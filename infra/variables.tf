@@ -39,3 +39,9 @@ variable "agent_image_tag" {
   default     = "v0"
   description = "ECR image tag the AgentCore Runtime points at. Bump on every container build."
 }
+
+variable "seed_admin_email" {
+  type        = string
+  default     = ""
+  description = "Email of the first admin user. Cognito emails them an invite + temporary password on first apply. Leave blank to skip and add users manually."
+}
