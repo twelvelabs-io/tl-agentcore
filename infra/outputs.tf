@@ -40,8 +40,8 @@ output "cognito_client_id" {
 }
 
 output "cognito_hosted_ui_domain" {
-  value       = "${aws_cognito_user_pool_domain.this.domain}.auth.${var.region}.amazoncognito.com"
-  description = "Hosted UI domain (no protocol). UI builds it into VITE_COGNITO_HOSTED_UI_DOMAIN."
+  value       = "https://${aws_cognito_user_pool_domain.this.domain}.auth.${var.region}.amazoncognito.com"
+  description = "Hosted UI base URL (with https:// — the UI feeds this into new URL() so the protocol is required)."
 }
 
 # ─── WebSocket + CloudFront ───────────────────────────────────────────────
@@ -69,7 +69,7 @@ output "cloudfront_distribution_id" {
 output "ui_env" {
   value       = <<-EOT
     VITE_AGENT_WS_URL=wss://${aws_cloudfront_distribution.frontend.domain_name}/live
-    VITE_COGNITO_HOSTED_UI_DOMAIN=${aws_cognito_user_pool_domain.this.domain}.auth.${var.region}.amazoncognito.com
+    VITE_COGNITO_HOSTED_UI_DOMAIN=https://${aws_cognito_user_pool_domain.this.domain}.auth.${var.region}.amazoncognito.com
     VITE_COGNITO_CLIENT_ID=${aws_cognito_user_pool_client.spa.id}
     VITE_FRONTEND_URL=https://${aws_cloudfront_distribution.frontend.domain_name}
   EOT

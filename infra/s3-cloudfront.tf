@@ -50,6 +50,19 @@ resource "aws_cloudfront_distribution" "frontend" {
     }
   }
 
+  # HTTP API Gateway — fronts tl_proxy for browser-side TL API calls.
+  origin {
+    domain_name = replace(replace(aws_apigatewayv2_api.http.api_endpoint, "https://", ""), "/", "")
+    origin_id   = "tl-proxy-http"
+
+    custom_origin_config {
+      http_port              = 80
+      https_port             = 443
+      origin_protocol_policy = "https-only"
+      origin_ssl_protocols   = ["TLSv1.2"]
+    }
+  }
+
   default_cache_behavior {
     target_origin_id       = "frontend-s3"
     viewer_protocol_policy = "redirect-to-https"
@@ -74,6 +87,19 @@ resource "aws_cloudfront_distribution" "frontend" {
     target_origin_id         = "chat-ws"
     viewer_protocol_policy   = "redirect-to-https"
     allowed_methods          = ["GET", "HEAD", "OPTIONS"]
+    cached_methods           = ["GET", "HEAD"]
+    compress                 = false
+    origin_request_policy_id = "b689b0a8-53d0-40ab-baf2-68738e2966ac" # AllViewer
+    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # CachingDisabled
+  }
+
+  # /tl/* → HTTP API Gateway (tl_proxy lambda → api.twelvelabs.io).
+  # No caching — every request is auth-checked and forwards to TL.
+  ordered_cache_behavior {
+    path_pattern             = "/tl/*"
+    target_origin_id         = "tl-proxy-http"
+    viewer_protocol_policy   = "redirect-to-https"
+    allowed_methods          = ["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"]
     cached_methods           = ["GET", "HEAD"]
     compress                 = false
     origin_request_policy_id = "b689b0a8-53d0-40ab-baf2-68738e2966ac" # AllViewer
