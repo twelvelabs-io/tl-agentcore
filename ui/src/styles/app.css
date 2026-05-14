@@ -1,0 +1,362 @@
+@import "tailwindcss";
+
+/*
+ * "Jockey · Lab" — editorial / edit-suite hybrid.
+ * Filmic dark palette with one warm amber accent.
+ */
+
+@theme {
+  --font-display: "Fraunces", "Charter", "Georgia", serif;
+  --font-body: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", monospace;
+
+  /* Filmic charcoal — warmer than pure black, sits well behind video */
+  --color-paper: #0c0d0e;
+  --color-ink: #ebe6da;          /* warm bone */
+  --color-ink-soft: #a09a8d;
+  --color-ink-faint: #6b6660;
+  --color-rule: #232527;
+  --color-surface: #14161a;
+  --color-surface-2: #1b1e23;
+
+  /* Single accent, used sparingly: hot amber. Says "active / cue / scrubber". */
+  --color-cue: #ff7a1a;
+  --color-cue-soft: #ffae6e;
+  --color-cue-deep: #c2530b;
+
+  /* Status colours — muted, not festive */
+  --color-status-ready: #7fb289;
+  --color-status-pending: #c9a26d;
+  --color-status-failed: #c97a72;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-body);
+  font-feature-settings: "ss01", "ss02", "cv11";
+  font-variant-ligatures: common-ligatures;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Editorial display type uses optical-size + soft variable axes for character */
+.font-display {
+  font-family: var(--font-display);
+  font-variation-settings: "opsz" 144, "SOFT" 30;
+  letter-spacing: -0.022em;
+}
+
+.font-mono {
+  font-family: var(--font-mono);
+  font-feature-settings: "cv02", "cv11", "ss02", "zero";
+}
+
+/* Section number / label small-caps — periodicals feel */
+.label {
+  font-family: var(--font-body);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--color-ink-soft);
+}
+
+/* Editorial rule (hairline) */
+.rule {
+  height: 1px;
+  background: var(--color-rule);
+}
+
+/* Film-perforation strip down the left edge — pure decoration */
+.perforations {
+  background-image: radial-gradient(circle at center, var(--color-surface-2) 1.5px, transparent 1.6px);
+  background-size: 12px 18px;
+  background-position: 0 0;
+  background-repeat: repeat-y;
+}
+
+/* Caret blink for streaming text */
+@keyframes caret-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+.caret::after {
+  content: "▍";
+  display: inline-block;
+  margin-left: 2px;
+  color: var(--color-cue);
+  animation: caret-blink 1s steps(1, end) infinite;
+}
+
+/* Subtle film-grain noise overlay — helps the dark surfaces feel filmic */
+.grain {
+  position: relative;
+}
+.grain::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.05;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.7 0'/></filter><rect width='160' height='160' filter='url(%23n)'/></svg>");
+}
+
+/* Custom scrollbar — slim, filmic */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-rule) transparent;
+}
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb { background: var(--color-rule); border-radius: 4px; }
+*::-webkit-scrollbar-track { background: transparent; }
+
+/* Buttons */
+.btn {
+  font-family: var(--font-body);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 10px 18px;
+  border: 1px solid var(--color-rule);
+  background: transparent;
+  color: var(--color-ink);
+  cursor: pointer;
+  transition: border-color 120ms ease, background-color 120ms ease, color 120ms ease;
+}
+.btn:hover { border-color: var(--color-ink-soft); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-cue {
+  border-color: var(--color-cue);
+  color: var(--color-cue);
+}
+.btn-cue:hover {
+  background: var(--color-cue);
+  color: var(--color-paper);
+}
+
+/* Editorial textarea — invisible chrome, type does the work */
+.editorial-input {
+  font-family: var(--font-display);
+  font-variation-settings: "opsz" 144, "SOFT" 30;
+  font-size: 36px;
+  line-height: 1.18;
+  letter-spacing: -0.022em;
+  background: transparent;
+  border: 0;
+  outline: 0;
+  color: var(--color-ink);
+  width: 100%;
+  resize: none;
+}
+.editorial-input::placeholder {
+  color: var(--color-ink-faint);
+  font-style: italic;
+}
+
+/* Tab bar — periodicals masthead */
+.tab {
+  font-family: var(--font-body);
+  text-transform: uppercase;
+  letter-spacing: 0.22em;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--color-ink-soft);
+  padding-bottom: 6px;
+  border-bottom: 1px solid transparent;
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+.tab:hover { color: var(--color-ink); }
+.tab[data-active="true"] {
+  color: var(--color-cue);
+  border-bottom-color: var(--color-cue);
+}
+
+/* Clip card — feels like an EDL row */
+.clip-card {
+  border: 1px solid var(--color-rule);
+  background: var(--color-surface);
+  transition: border-color 120ms ease, transform 120ms ease;
+}
+.clip-card:hover {
+  border-color: var(--color-cue);
+  transform: translateY(-1px);
+}
+
+/* Status pip */
+.pip {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  margin-right: 8px;
+  vertical-align: middle;
+}
+.pip-ready { background: var(--color-status-ready); box-shadow: 0 0 8px var(--color-status-ready); }
+.pip-pending { background: var(--color-status-pending); animation: caret-blink 1.4s ease-in-out infinite; }
+.pip-failed { background: var(--color-status-failed); }
+
+/* Inline video reference chip — rendered for <vref> tags in prose */
+.vref {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 8px 3px;
+  margin: 0 2px;
+  border: 1px solid var(--color-rule);
+  background: var(--color-surface);
+  font-family: var(--font-body);
+  font-size: 0.86em;
+  line-height: 1.2;
+  vertical-align: baseline;
+  color: var(--color-ink);
+  cursor: help;
+  transition: border-color 120ms ease, background 120ms ease;
+  white-space: nowrap;
+  border-radius: 1px;
+}
+.vref:hover { border-color: var(--color-cue); background: var(--color-surface-2); }
+.vref-glyph { color: var(--color-cue); font-size: 0.9em; transform: translateY(1px); }
+.vref-missing { color: var(--color-ink-soft); border-style: dashed; }
+.vref-missing .vref-glyph { color: var(--color-ink-faint); }
+.vref-missing .vref-name { font-family: var(--font-mono); font-size: 0.78em; }
+.vref-text { color: var(--color-ink-soft); }
+.vref-text .vref-glyph { color: var(--color-ink-soft); }
+.vref-text .vref-name { font-family: var(--font-mono); font-size: 0.78em; letter-spacing: 0; }
+.vref-range {
+  font-family: var(--font-mono);
+  font-size: 0.78em;
+  color: var(--color-cue);
+  letter-spacing: 0;
+  margin-left: 6px;
+  padding-left: 6px;
+  border-left: 1px solid var(--color-rule);
+}
+
+/*
+ * Markdown rendering for Jockey responses.
+ * Spacing tuned for editorial reading; lists feel like a periodical sidebar.
+ */
+.response-md {
+  font-size: 1rem;
+  line-height: 1.65;
+  color: var(--color-ink);
+  max-width: 42rem;
+}
+.response-md > * + * { margin-top: 0.85em; }
+.response-md p { margin: 0; }
+.response-md strong { font-weight: 600; color: var(--color-ink); }
+.response-md em { font-style: italic; }
+.response-md a { color: var(--color-cue); text-decoration: underline; text-underline-offset: 3px; }
+.response-md code {
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  padding: 1px 6px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-rule);
+  border-radius: 1px;
+}
+.response-md pre {
+  font-family: var(--font-mono);
+  font-size: 0.84em;
+  background: var(--color-surface);
+  border: 1px solid var(--color-rule);
+  padding: 12px 14px;
+  overflow-x: auto;
+}
+.response-md pre code { background: transparent; border: 0; padding: 0; }
+.response-md ol, .response-md ul {
+  padding-left: 0;
+  list-style: none;
+  margin: 0.85em 0;
+}
+.response-md li {
+  position: relative;
+  padding-left: 1.6em;
+  margin: 0.35em 0;
+}
+.response-md ol { counter-reset: item; }
+.response-md ol > li {
+  counter-increment: item;
+}
+.response-md ol > li::before {
+  content: counter(item, decimal-leading-zero);
+  position: absolute;
+  left: 0;
+  top: 0.05em;
+  font-family: var(--font-mono);
+  font-size: 0.78em;
+  color: var(--color-cue);
+  letter-spacing: 0.04em;
+}
+.response-md ul > li::before {
+  content: "—";
+  position: absolute;
+  left: 0;
+  color: var(--color-ink-faint);
+  font-family: var(--font-mono);
+}
+.response-md h1, .response-md h2, .response-md h3 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  margin-top: 1.2em;
+}
+.response-md h1 { font-size: 1.6em; }
+.response-md h2 { font-size: 1.3em; }
+.response-md h3 { font-size: 1.1em; }
+.response-md blockquote {
+  border-left: 2px solid var(--color-cue);
+  padding-left: 1em;
+  color: var(--color-ink-soft);
+  font-style: italic;
+}
+.response-md hr {
+  border: 0;
+  border-top: 1px solid var(--color-rule);
+  margin: 1.4em 0;
+}
+.vref-name { font-weight: 500; letter-spacing: -0.005em; }
+.vref-meta {
+  font-family: var(--font-mono);
+  font-size: 0.78em;
+  color: var(--color-ink-soft);
+  letter-spacing: 0;
+}
+
+/* Persona chip */
+.persona {
+  font-family: var(--font-body);
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 8px 14px;
+  border: 1px solid var(--color-rule);
+  color: var(--color-ink-soft);
+  cursor: pointer;
+  transition: all 120ms ease;
+  white-space: nowrap;
+}
+.persona:hover { color: var(--color-ink); border-color: var(--color-ink-soft); }
+.persona[data-active="true"] {
+  color: var(--color-paper);
+  background: var(--color-cue);
+  border-color: var(--color-cue);
+}
+
+/* Channel player — hover-revealed custom controls. We don't use the native
+   <video controls> chrome because it auto-flashes on every program transition;
+   our custom bar fades in only on actual user hover. */
+.channel-player-wrap:hover .channel-controls,
+.channel-controls:focus-within {
+  opacity: 1 !important;
+}
+

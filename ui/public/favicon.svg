@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" shape-rendering="geometricPrecision">
+  <!-- Editorial favicon: amber middot from the Jockey·Lab wordmark, with a thin
+       editorial rule and a serif uppercase J for character. -->
+  <rect width="32" height="32" rx="4" fill="#0c0d0e"/>
+  <!-- thin rule, evoking the masthead's hairline border -->
+  <line x1="5" y1="24" x2="27" y2="24" stroke="#ebe6da" stroke-width="0.6" opacity="0.35"/>
+  <!-- the amber middot — the brand pip -->
+  <circle cx="16" cy="14" r="4.2" fill="#ff7a1a"/>
+  <!-- subtle ring for depth -->
+  <circle cx="16" cy="14" r="6.5" fill="none" stroke="#ff7a1a" stroke-width="0.5" opacity="0.35"/>
+</svg>
