@@ -17,8 +17,8 @@
 terraform {
   required_version = ">= 1.5"
   required_providers {
-    aws    = { source = "hashicorp/aws",    version = "~> 6.43" }
-    random = { source = "hashicorp/random", version = "~> 3.6"  }
+    aws    = { source = "hashicorp/aws", version = "~> 6.43" }
+    random = { source = "hashicorp/random", version = "~> 3.6" }
   }
 }
 
@@ -34,7 +34,7 @@ provider "aws" {
 }
 
 data "aws_caller_identity" "current" {}
-data "aws_region"          "current" {}
+data "aws_region" "current" {}
 
 resource "random_id" "stack" {
   byte_length = 3

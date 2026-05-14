@@ -23,7 +23,7 @@ resource "aws_iam_role" "runtime" {
 data "aws_iam_policy_document" "runtime_perms" {
   # Pull the container image at runtime start.
   statement {
-    sid     = "EcrPull"
+    sid = "EcrPull"
     actions = [
       "ecr:GetAuthorizationToken",
       "ecr:BatchGetImage",
@@ -34,7 +34,7 @@ data "aws_iam_policy_document" "runtime_perms" {
   }
   # CloudWatch Logs.
   statement {
-    sid     = "Cloudwatch"
+    sid = "Cloudwatch"
     actions = [
       "logs:CreateLogGroup",
       "logs:CreateLogStream",
@@ -45,7 +45,7 @@ data "aws_iam_policy_document" "runtime_perms" {
   }
   # Invoke the Bedrock model + the cross-region inference profile.
   statement {
-    sid     = "BedrockInvoke"
+    sid = "BedrockInvoke"
     actions = [
       "bedrock:InvokeModel",
       "bedrock:InvokeModelWithResponseStream",
@@ -59,14 +59,14 @@ data "aws_iam_policy_document" "runtime_perms" {
   }
   # Read the TL API key from Secrets Manager.
   statement {
-    sid     = "ReadTLKey"
-    actions = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+    sid       = "ReadTLKey"
+    actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
     resources = [aws_secretsmanager_secret.tl_api_key.arn]
   }
   # Read the kb_cache table (Tier-1 cache).
   statement {
-    sid     = "ReadKbCache"
-    actions = ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan"]
+    sid       = "ReadKbCache"
+    actions   = ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan"]
     resources = [aws_dynamodb_table.kb_cache.arn]
   }
 }
