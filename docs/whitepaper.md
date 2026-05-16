@@ -123,7 +123,7 @@ sequenceDiagram
         A->>P: pegasus_analyze(asset_id, prompt)
         P-->>A: grounded description
     end
-    A-->>U: EDL — scenes, in/out, role, take_note
+    A-->>U: EDL, scenes, in/out, role, take_note
 ```
 
 ### 3.3 Why AgentCore (not Bedrock Agents)
@@ -258,19 +258,33 @@ The Tier-1 cache tools; see §4.
 
 ## 6 · Deployment recipe
 
-Terraform-only deployment. Three modules under `infra/`:
+Terraform-only deployment. The stack under `infra/` provisions, end-to-end:
 
-1. `runtime.tf`: ECS Fargate task def, agent container, IAM role.
-   arm64-only (Graviton).
-2. `gateway.tf`: AgentCore Gateway, Cognito JWT authorizer, MCP target
-   pointing at the runtime.
-3. `dynamodb.tf`: `kb_cache` table, `pk = ks_<id>`, `sk = asset_<id>`
-   or `sk = OVERVIEW`.
+- **Runtime.** `aws_bedrockagentcore_agent_runtime` running the Strands
+  agent container (arm64 Graviton, pulled from ECR by tag), with a
+  versioned `aws_bedrockagentcore_agent_runtime_endpoint` for callers.
+- **Cache.** `kb_cache` DynamoDB table, `pk = ks_<id>`, `sk = asset_<id>`
+  or `sk = OVERVIEW`.
+- **Edge + transport.** CloudFront fronts an S3 bucket of built UI
+  assets plus two API Gateway origins: a WebSocket for the chat lambda
+  that invokes the runtime, and an HTTP API for the `tl_proxy` lambda
+  that forwards `/tl/*` browser calls to the TwelveLabs API.
+- **Identity.** Cognito User Pool with `allow_admin_create_user_only =
+  true`: no self-registration, and admins onboard every user via
+  `aws cognito-idp admin-create-user`. An `admins` group surfaces the
+  admin role to the UI as a claim. The Cognito JWT flows end-to-end
+  from browser through CloudFront, through the WebSocket and HTTP APIs,
+  and into the lambdas that verify it before invoking the runtime.
+- **Secrets.** The TwelveLabs API key lives in Secrets Manager; both
+  the runtime container and the `tl_proxy` lambda read it at startup.
+- **Gateway.** `gateway.tf` is documented but disabled in v1; Phase 2
+  moves the agent tools out of the runtime container into MCP-served
+  lambdas behind AgentCore Gateway.
 
 ```bash
 cd infra
 terraform init
-terraform apply -var="tl_api_key_secret=tl/api-key"
+terraform apply -var="tl_api_key=tlk_..." -var="seed_admin_email=you@example.com"
 ```
 
 Build and push the agent container:
@@ -331,11 +345,15 @@ runtime (AgentCore) does not change. Only the prompt and the cache schema.
 
 The companion repository contains:
 
-- `agent/`: Strands agent and tools (Python)
-- `ui/`: React demo with live tool-trace visualization
+- `agent/`: Strands agent and tools (Python, packaged into the arm64
+  AgentCore Runtime container)
+- `ui/`: React + Vite SPA with the Rough Cut and Agent tabs, the live
+  architecture diagram, and a Playwright E2E suite in `ui/e2e/`
+- `lambda/`: chat lambda (WebSocket → InvokeAgentRuntime) and
+  `tl_proxy` lambda (the browser's `/tl/*` forwarder)
 - `infra/`: Terraform for one-command deployment
-- `scripts/`: `ingest_kb_cache.py`
-- `tests/`: end-to-end pipeline test
+- `scripts/`: `ingest_kb_cache.py` (cache builder) and
+  `setup_test_fixtures.sh` (creates the E2E knowledge store)
 
 A reader can `terraform apply` and have a working endpoint in roughly 15
 minutes, plus the cache-ingestion time for whatever KB they bring.
