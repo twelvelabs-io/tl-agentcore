@@ -62,7 +62,7 @@ resource "aws_bedrockagentcore_agent_runtime" "this" {
   environment_variables = {
     AGENT_MODEL_ID    = var.agent_model_id
     TL_API_KEY_SECRET = aws_secretsmanager_secret.tl_api_key.name
-    KB_CACHE_TABLE    = aws_dynamodb_table.kb_cache.name
+    PROFILE_CACHE_TABLE    = aws_dynamodb_table.profile_cache.name
     AWS_REGION        = var.region
   }
 }

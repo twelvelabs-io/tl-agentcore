@@ -2,7 +2,7 @@
 
 Tools, by speed class:
 
-  Tier 1 — kb_cache (DDB, sub-10ms):
+  Tier 1 — profile_cache (DDB, sub-10ms):
     get_kb_overview       corpus summary
     list_kb_assets        filtered asset list
     lookup_asset_profile  single-asset cached digest
@@ -35,7 +35,7 @@ MODEL_ID = os.environ.get(
     "us.anthropic.claude-sonnet-4-6",
 )
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
-KB_CACHE_TABLE = os.environ.get("KB_CACHE_TABLE")
+PROFILE_CACHE_TABLE = os.environ.get("PROFILE_CACHE_TABLE")
 
 _secrets = boto3.client("secretsmanager", region_name=AWS_REGION) if TL_API_KEY_SECRET else None
 _ddb = boto3.client("dynamodb", region_name=AWS_REGION)
@@ -58,23 +58,23 @@ def _tl_key() -> str:
     return _cached_key
 
 
-# ─── DDB helpers (kb_cache table) ───────────────────────────────────────────
+# ─── DDB helpers (profile_cache table) ───────────────────────────────────────────
 
-def _ddb_kb_get(pk: str, sk: str) -> dict | None:
-    if not KB_CACHE_TABLE:
+def _ddb_profile_get(pk: str, sk: str) -> dict | None:
+    if not PROFILE_CACHE_TABLE:
         return None
-    r = _ddb.get_item(TableName=KB_CACHE_TABLE, Key={"pk": {"S": pk}, "sk": {"S": sk}})
+    r = _ddb.get_item(TableName=PROFILE_CACHE_TABLE, Key={"pk": {"S": pk}, "sk": {"S": sk}})
     return _ddb_to_python(r.get("Item"))
 
 
-def _ddb_kb_query(pk: str, sk_prefix: str, limit: int | None = None) -> list[dict]:
-    if not KB_CACHE_TABLE:
+def _ddb_profile_query(pk: str, sk_prefix: str, limit: int | None = None) -> list[dict]:
+    if not PROFILE_CACHE_TABLE:
         return []
     items: list[dict] = []
     page: dict | None = None
     while True:
         kwargs: dict = {
-            "TableName": KB_CACHE_TABLE,
+            "TableName": PROFILE_CACHE_TABLE,
             "KeyConditionExpression": "pk = :p AND begins_with(sk, :s)",
             "ExpressionAttributeValues": {":p": {"S": pk}, ":s": {"S": sk_prefix}},
         }
@@ -161,7 +161,7 @@ def marengo_search(
         group_by: "clip" (default — moment-level) or "video" (asset-grouped).
         knowledge_store_id: optional — when provided, each returned clip is
             enriched with the cached profile (title, one_liner, mood_tags,
-            role_hint) from kb_cache. **Pass this whenever you have a ks_id** —
+            role_hint) from profile_cache. **Pass this whenever you have a ks_id** —
             one extra DDB Query saves you N pegasus_analyze calls.
 
     Returns:
@@ -194,12 +194,12 @@ def marengo_search(
     j = r.json()
     clips = j.get("data", []) or []
 
-    # Cache-join: enrich each clip with its kb_cache profile when ks_id is given.
+    # Cache-join: enrich each clip with its profile_cache profile when ks_id is given.
     # video_id (index-side) usually maps 1:1 to asset_id (KB-side). A miss is
     # never an error — clip stays un-enriched.
-    if knowledge_store_id and KB_CACHE_TABLE and clips:
+    if knowledge_store_id and PROFILE_CACHE_TABLE and clips:
         try:
-            profiles = _ddb_kb_query(f"ks#{knowledge_store_id}", "ASSET#")
+            profiles = _ddb_profile_query(f"ks#{knowledge_store_id}", "ASSET#")
             by_id = {p.get("asset_id"): p for p in profiles if p.get("asset_id")}
             for c in clips:
                 vid = c.get("video_id") or ""
@@ -267,7 +267,7 @@ def pegasus_analyze(
     return j.get("data") or "(no text returned)"
 
 
-# ─── Tier 1 — kb_cache lookups ──────────────────────────────────────────────
+# ─── Tier 1 — profile_cache lookups ──────────────────────────────────────────────
 @tool
 def get_kb_overview(knowledge_store_id: str) -> dict:
     """Return the pre-computed corpus overview for a knowledge store: total
@@ -282,7 +282,7 @@ def get_kb_overview(knowledge_store_id: str) -> dict:
     """
     if not knowledge_store_id:
         return {"cached": False, "error": "knowledge_store_id required"}
-    item = _ddb_kb_get(f"ks#{knowledge_store_id}", "OVERVIEW")
+    item = _ddb_profile_get(f"ks#{knowledge_store_id}", "OVERVIEW")
     if not item:
         return {"cached": False, "knowledge_store_id": knowledge_store_id}
     return {
@@ -323,7 +323,7 @@ def list_kb_assets(
     """
     if not knowledge_store_id:
         return [{"error": "knowledge_store_id required"}]
-    raw = _ddb_kb_query(f"ks#{knowledge_store_id}", "ASSET#", limit=None)
+    raw = _ddb_profile_query(f"ks#{knowledge_store_id}", "ASSET#", limit=None)
     out: list = []
     mood_l = (mood or "").lower().strip() or None
     role_l = (role or "").lower().strip() or None
@@ -364,7 +364,7 @@ def lookup_asset_profile(knowledge_store_id: str, asset_id: str) -> dict:
     """
     if not knowledge_store_id or not asset_id:
         return {"cached": False, "error": "knowledge_store_id and asset_id required"}
-    item = _ddb_kb_get(f"ks#{knowledge_store_id}", f"ASSET#{asset_id}")
+    item = _ddb_profile_get(f"ks#{knowledge_store_id}", f"ASSET#{asset_id}")
     if not item:
         return {"cached": False, "asset_id": asset_id}
     return {
@@ -469,7 +469,7 @@ The active `knowledge_store_id` is provided in the user message metadata as `[ks
 ## When the cache is empty
 
 If `get_kb_overview` returns `cached: False`, tell the user:
-> "This KB doesn't have its profile cache built yet — falling back to live retrieval; expect ~3-5× slower responses. (Run `scripts/ingest_kb_cache.py <ks_id>` to build it.)"
+> "This KB doesn't have its profile cache built yet — falling back to live retrieval; expect ~3-5× slower responses. (Run `scripts/ingest_profile_cache.py <ks_id>` to build it.)"
 Then proceed with Tier 2 tools.
 """
 

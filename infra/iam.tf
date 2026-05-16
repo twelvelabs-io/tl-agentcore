@@ -63,11 +63,11 @@ data "aws_iam_policy_document" "runtime_perms" {
     actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
     resources = [aws_secretsmanager_secret.tl_api_key.arn]
   }
-  # Read the kb_cache table (Tier-1 cache).
+  # Read the profile_cache table (Tier-1 cache).
   statement {
     sid       = "ReadKbCache"
     actions   = ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan"]
-    resources = [aws_dynamodb_table.kb_cache.arn]
+    resources = [aws_dynamodb_table.profile_cache.arn]
   }
 }
 

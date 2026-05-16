@@ -55,7 +55,7 @@ flowchart TD
     WS["API Gateway<br/>WebSocket"]
     Chat["<b>Chat λ</b><br/>async self-invoke"]
     Runtime["<b>AgentCore Runtime</b><br/>Strands · Sonnet 4.6<br/>Graviton container (arm64)"]
-    Cache[("<b>DynamoDB</b><br/>kb_cache table<br/>per-asset profiles")]
+    Cache[("<b>DynamoDB</b><br/>profile_cache table<br/>per-asset profiles")]
     Marengo["<b>Marengo</b> · /v1.3/search<br/>ranked clip-level retrieval"]
     Pegasus["<b>Pegasus</b> · /v1.3/analyze<br/>single-video generation"]
 
@@ -102,7 +102,7 @@ sequenceDiagram
     autonumber
     participant U as Producer
     participant A as Agent (Sonnet 4.6)
-    participant C as kb_cache (DDB)
+    participant C as profile_cache (DDB)
     participant M as Marengo /search
     participant P as Pegasus /analyze
 
@@ -162,7 +162,7 @@ single Pegasus call that produces a structured profile:
 - Role hint (establishing, hero, b-roll, …)
 - Subject and entity surface
 
-The profile is stored as a row in a DynamoDB table (`kb_cache`), keyed
+The profile is stored as a row in a DynamoDB table (`profile_cache`), keyed
 by knowledge-store id and asset id. A single additional row per
 knowledge store rolls those profiles up into a corpus overview: total
 asset count, dominant moods, dominant styles, sample titles. The agent
@@ -174,12 +174,12 @@ The cache is built by an ingestion script:
 
 ```mermaid
 flowchart LR
-    Script["<b>scripts/ingest_kb_cache.py</b><br/>ks_&lt;id&gt;"]
+    Script["<b>scripts/ingest_profile_cache.py</b><br/>ks_&lt;id&gt;"]
     List["List items<br/>/v1.3/knowledge-stores/{ks}/items<br/><i>(paginated)</i>"]
     Analyze["<b>Pegasus /v1.3/analyze</b><br/>12 concurrent"]
     AssetPut["DDB PutItem<br/>N × per-asset"]
     OverviewPut["DDB PutItem<br/>1 × corpus overview"]
-    Cache[("<b>kb_cache</b><br/>DynamoDB")]
+    Cache[("<b>profile_cache</b><br/>DynamoDB")]
 
     Script --> List
     List --> Analyze
@@ -263,7 +263,7 @@ Terraform-only deployment. The stack under `infra/` provisions, end-to-end:
 - **Runtime.** `aws_bedrockagentcore_agent_runtime` running the Strands
   agent container (arm64 Graviton, pulled from ECR by tag), with a
   versioned `aws_bedrockagentcore_agent_runtime_endpoint` for callers.
-- **Cache.** `kb_cache` DynamoDB table, `pk = ks_<id>`, `sk = asset_<id>`
+- **Cache.** `profile_cache` DynamoDB table, `pk = ks_<id>`, `sk = asset_<id>`
   or `sk = OVERVIEW`.
 - **Edge + transport.** CloudFront fronts an S3 bucket of built UI
   assets plus two API Gateway origins: a WebSocket for the chat lambda
@@ -298,7 +298,7 @@ Build and push the agent container:
 Ingest the cache for an existing KB:
 
 ```bash
-python scripts/ingest_kb_cache.py ks_<id>
+python scripts/ingest_profile_cache.py ks_<id>
 ```
 
 ### 6.1 Implementation notes
@@ -355,7 +355,7 @@ The companion repository contains:
 - `lambda/`: chat lambda (WebSocket → InvokeAgentRuntime) and
   `tl_proxy` lambda (the browser's `/tl/*` forwarder)
 - `infra/`: Terraform for one-command deployment
-- `scripts/`: `ingest_kb_cache.py` (cache builder) and
+- `scripts/`: `ingest_profile_cache.py` (cache builder) and
   `setup_test_fixtures.sh` (creates the E2E knowledge store)
 
 A reader can `terraform apply` and have a working endpoint in roughly 15

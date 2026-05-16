@@ -169,7 +169,7 @@ function NoKS() {
         Pick a knowledge base from the picker above to begin.
       </p>
       <p className="mt-6 text-sm" style={{ color: "var(--color-ink-soft)" }}>
-        First time? Run <span className="font-mono">scripts/ingest_kb_cache.py &lt;ks_id&gt;</span> on
+        First time? Run <span className="font-mono">scripts/ingest_profile_cache.py &lt;ks_id&gt;</span> on
         the knowledge base to populate the cache — the agent will be ~4× faster.
       </p>
     </div>

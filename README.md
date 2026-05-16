@@ -21,7 +21,7 @@ The agent does it by orchestrating three TwelveLabs primitives:
 
 | Tier | Tool | Latency | Use |
 |---|---|---|---|
-| 1 | `kb_cache` (DDB) | <10 ms | Pre-built per-asset profile lookup |
+| 1 | `profile_cache` (DDB) | <10 ms | Pre-built per-asset profile lookup |
 | 2 | `marengo_search` | 1–10 s | Semantic clip-level retrieval |
 | 3 | `pegasus_analyze` | 5–30 s | Per-clip generative analysis |
 
@@ -33,8 +33,8 @@ workflow — see whitepaper §4.
 ```
 agent/        Python Strands agent — tools + runtime + Dockerfile (arm64)
 ui/           React + Vite demo UI (RoughCut + AgentCore live-arch view)
-infra/        Terraform — AgentCore Runtime, Gateway, kb_cache DDB, ECR
-scripts/      Ingestion utility (ingest_kb_cache.py)
+infra/        Terraform — AgentCore Runtime, Gateway, profile_cache DDB, ECR
+scripts/      Ingestion utility (ingest_profile_cache.py)
 docs/         White paper + reference docs
 tests/        End-to-end pipeline tests against a real KB
 ```
@@ -48,7 +48,7 @@ cp ../.env.example ../.env  # fill in TL_API_KEY
 python local_run.py "build me a 30s tension reel from ks_abc123"
 
 # 2. Build the cache (one-time per knowledge store)
-python ../scripts/ingest_kb_cache.py ks_abc123
+python ../scripts/ingest_profile_cache.py ks_abc123
 
 # 3. UI
 cd ../ui && npm install && npm run dev
@@ -61,7 +61,7 @@ cd infra
 terraform init
 terraform apply
 # pushes the agent container to ECR, creates the AgentCore Runtime + Gateway,
-# wires kb_cache DDB perms.
+# wires profile_cache DDB perms.
 ```
 
 See `infra/README.md` for variable reference and the [whitepaper §6

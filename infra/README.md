@@ -7,7 +7,7 @@ Phase-1 deployment of the tl-agentcore reference architecture:
 | `aws_ecr_repository.agent` | Container registry for the Strands agent image (arm64) |
 | `aws_bedrockagentcore_agent_runtime.this` | AgentCore Runtime running the container |
 | `aws_bedrockagentcore_agent_runtime_endpoint.live` | Stable invoke target |
-| `aws_dynamodb_table.kb_cache` | Tier-1 cache table (see whitepaper §4) |
+| `aws_dynamodb_table.profile_cache` | Tier-1 cache table (see whitepaper §4) |
 | `aws_secretsmanager_secret.tl_api_key` | TwelveLabs API key the runtime reads |
 | `aws_iam_role.runtime` | Execution role (ECR pull + Bedrock invoke + DDB + Secrets) |
 
@@ -37,8 +37,8 @@ Populate the Tier-1 cache for a knowledge store:
 
 ```bash
 cd ..
-export KB_CACHE_TABLE=$(terraform -chdir=infra output -raw kb_cache_table)
-python scripts/ingest_kb_cache.py ks_<id>
+export PROFILE_CACHE_TABLE=$(terraform -chdir=infra output -raw profile_cache_table)
+python scripts/ingest_profile_cache.py ks_<id>
 ```
 
 ## Known prerequisites & gotchas

@@ -5,7 +5,7 @@
 # What this stack stands up:
 #   - ECR repo for the Strands agent container (linux/arm64)
 #   - AgentCore Runtime + endpoint
-#   - kb_cache DDB table (Tier-1 cache from the whitepaper)
+#   - profile_cache DDB table (Tier-1 cache from the whitepaper)
 #   - Secrets Manager entry for the TwelveLabs API key
 #   - IAM roles (runtime + ECR pull + DDB read + Bedrock invoke + secret read)
 #

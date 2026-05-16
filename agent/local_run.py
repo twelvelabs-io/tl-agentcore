@@ -6,7 +6,7 @@ Usage:
     pip install -r requirements.txt
     export TL_API_KEY=$(grep TL_API_KEY ../.env | cut -d= -f2)
     export AWS_PROFILE=...           # for Bedrock model access
-    export KB_CACHE_TABLE=...        # optional — enables Tier 1 cache
+    export PROFILE_CACHE_TABLE=...        # optional — enables Tier 1 cache
 
     python local_run.py ks_069f7c02-... "build me a 30s action highlight reel"
 """

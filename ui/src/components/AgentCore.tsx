@@ -1,5 +1,5 @@
 // "Agent" tab — chat with the Strands agent on AgentCore Runtime.
-// The agent has access to the kb_cache tools (Tier 1) and the live
+// The agent has access to the profile_cache tools (Tier 1) and the live
 // TwelveLabs primitives marengo_search / pegasus_analyze / list_tl_indexes
 // (Tier 2). The right rail surfaces the live architecture diagram so a
 // viewer can watch each tool fire as the agent reasons.

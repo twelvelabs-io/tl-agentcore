@@ -20,9 +20,9 @@ output "runtime_role_arn" {
   value = aws_iam_role.runtime.arn
 }
 
-output "kb_cache_table" {
-  value       = aws_dynamodb_table.kb_cache.name
-  description = "DynamoDB table holding the Tier-1 cache. Pass to scripts/ingest_kb_cache.py."
+output "profile_cache_table" {
+  value       = aws_dynamodb_table.profile_cache.name
+  description = "DynamoDB table holding the Tier-1 cache. Pass to scripts/ingest_profile_cache.py."
 }
 
 output "tl_api_key_secret" {

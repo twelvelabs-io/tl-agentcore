@@ -111,10 +111,10 @@ const SCHEMA = {
 };
 
 // Rough Cut prompt — the AgentCore Strands agent orchestrates TwelveLabs
-// primitives directly with a cache-first discipline: pre-built kb_cache
+// primitives directly with a cache-first discipline: pre-built profile_cache
 // (DDB · sub-10ms) for the primary pick, then a Marengo pass per beat for
 // alternates, and Pegasus only when neither covers a take-note.
-const AGENT_INSTRUCTIONS = `You are an experienced film editor assembling a rough cut by orchestrating TwelveLabs primitives directly with a **cache-first** discipline. Use the pre-built kb_cache (DDB · sub-10ms) before reaching for live Marengo/Pegasus.
+const AGENT_INSTRUCTIONS = `You are an experienced film editor assembling a rough cut by orchestrating TwelveLabs primitives directly with a **cache-first** discipline. Use the pre-built profile_cache (DDB · sub-10ms) before reaching for live Marengo/Pegasus.
 
 ## Approach — keep it tight, ~3 turns total
 
