@@ -98,48 +98,50 @@ fresh description that wasn't captured at index time.
 A typical six-beat rough-cut turn cascades through the tiers like this:
 
 ```mermaid
-sequenceDiagram
-    autonumber
-    participant U as Producer
-    participant A as Agent
-    participant C as profile_cache
-    participant M as Marengo
-    participant P as Pegasus
+flowchart TD
+    U(["Producer · build me a 60 s action highlight reel"]) --> A1[Agent]
 
-    U->>+A: build me a 60 s action highlight reel
+    A1 --> T1
 
-    rect rgba(34, 197, 94, 0.12)
-        Note over A,C: Turn 1 · cache scout · sub-10 ms per call
-        A->>+C: get_kb_overview(ks)
-        C-->>-A: corpus summary, top moods
-        par parallel · one call per beat
-            A->>C: list_kb_assets(mood="tension")
-        and
-            A->>C: list_kb_assets(mood="action")
-        and
-            A->>C: list_kb_assets(mood="celebration")
-        end
-        C-->>A: candidate clips per beat
+    subgraph T1["Turn 1 · profile_cache scout · sub-10 ms per call"]
+      direction TB
+      C0["get_kb_overview&lpar;ks&rpar;"]
+      C0 --> CFan{{"parallel fan-out · one call per beat"}}
+      CFan --> C1["list_kb_assets · tension"]
+      CFan --> C2["list_kb_assets · action"]
+      CFan --> C3["list_kb_assets · celebration"]
     end
 
-    rect rgba(59, 130, 246, 0.12)
-        Note over A,M: Turn 2 · Marengo pass · always, sources alternates · 1–3 s each
-        par parallel · one per beat
-            A->>M: marengo_search(ks, "kinetic action")
-        and
-            A->>M: marengo_search(ks, "tense crowd")
-        and
-            A->>M: marengo_search(ks, "celebration")
-        end
-        M-->>A: ranked clips · rank 1 = primary, 2–4 = alternates
+    T1 --> A2[Agent · candidate clips per beat]
+    A2 --> T2
+
+    subgraph T2["Turn 2 · Marengo pass · always, sources alternates · 1–3 s each"]
+      direction TB
+      MFan{{"parallel fan-out · one search per beat"}}
+      MFan --> M1["marengo_search · kinetic action"]
+      MFan --> M2["marengo_search · tense crowd"]
+      MFan --> M3["marengo_search · celebration"]
     end
 
-    opt one beat lacks a usable take-note
-        A->>+P: pegasus_analyze(asset_id, "describe 0:30–0:38")
-        P-->>-A: grounded description
-    end
+    T2 --> A3[Agent · ranked clips · rank 1 = primary, 2–4 = alternates]
+    A3 -.->|"opt · beat lacks usable take-note"| P["pegasus_analyze · grounded description"]
+    P -.-> A3
+    A3 --> O(["EDL · scenes · primary clip + 2–4 alternates per beat"])
 
-    A-->>-U: EDL · scenes · primary clip + 2–4 alternates per beat
+    classDef phase1 fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef phase2 fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
+    classDef agent  fill:#e0e7ff,stroke:#4f46e5,stroke-width:2px,color:#312e81
+    classDef pegasus fill:#fef3e2,stroke:#f59e0b,color:#7c2d12
+    classDef io     fill:#f1f5f9,stroke:#475569,color:#0f172a
+
+    class C0,C1,C2,C3,CFan phase1
+    class M1,M2,M3,MFan phase2
+    class A1,A2,A3 agent
+    class P pegasus
+    class U,O io
+
+    style T1 fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px,color:#14532d
+    style T2 fill:#eff6ff,stroke:#2563eb,stroke-width:1.5px,color:#1e3a8a
 ```
 
 ### 3.3 Why AgentCore (not Bedrock Agents)
