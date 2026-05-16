@@ -9,8 +9,16 @@
 The producer's "find me the highlights" task collapses from hours to
 seconds when the agent can read the indexed library directly. Bedrock
 AgentCore plus TwelveLabs Marengo and Pegasus is the AWS-native path to
-that workflow without writing custom retrieval, custom ranking, or custom
-generative-vision code.
+that workflow without writing custom retrieval, custom ranking, or
+custom generative-vision code.
+
+The retrieval layer is embedding-RAG over video clips: Marengo segments
+and embeds every clip at ingest, the vectors land in an S3 Vectors
+index, and the agent embeds each producer beat into the same vector
+space and runs an ANN query. There is no custom cache, no curated
+taxonomy of moods or roles, no two-tier dispatch logic. One retrieval
+primitive returns ranked clips with timecodes, and the alternates
+producers can swap into the EDL are the natural shape of an ANN result.
 
 The architecture generalizes from highlights to sports recaps, ad
 cutdowns, social shorts, and newsroom workflows with no agent-runtime
@@ -55,94 +63,86 @@ flowchart TD
     WS["API Gateway<br/>WebSocket"]
     Chat["<b>Chat λ</b><br/>async self-invoke"]
     Runtime["<b>AgentCore Runtime</b><br/>Strands · Sonnet 4.6<br/>Graviton container (arm64)"]
-    Cache[("<b>DynamoDB</b><br/>profile_cache table<br/>per-asset profiles")]
-    Marengo["<b>Marengo</b> · /v1.3/search<br/>ranked clip-level retrieval"]
-    Pegasus["<b>Pegasus</b> · /v1.3/analyze<br/>single-video generation"]
+    Vectors[("<b>S3 Vectors</b><br/>clip embeddings · ANN")]
+    Marengo["<b>Marengo</b> · embed-v2<br/>text + video embeddings"]
+    Pegasus["<b>Pegasus</b> · /v1.3/analyze<br/>take-note generation"]
 
     Browser -- "wss + Cognito JWT" --> CF
     CF --> WS
     WS --> Chat
     Chat -- "SigV4<br/>InvokeAgentRuntime" --> Runtime
-    Runtime -- "<b>Tier 1</b> · cache · &lt;10 ms" --> Cache
-    Runtime -- "<b>Tier 2</b> · live · 1–10 s" --> Marengo
-    Runtime -- "<b>Tier 2</b> · live · 5–30 s" --> Pegasus
+    Runtime -- "1 · embed beat phrase · ~200 ms" --> Marengo
+    Marengo -. "vector" .-> Runtime
+    Runtime -- "2 · ANN query · ~50 ms" --> Vectors
+    Vectors -. "ranked clips" .-> Runtime
+    Runtime -- "3 · richer take-note · only when needed · 5–15 s" --> Pegasus
 
     classDef edge    fill:#fef3e2,stroke:#f59e0b,stroke-width:1px,color:#7c2d12
     classDef compute fill:#fef9c3,stroke:#ca8a04,stroke-width:1px,color:#713f12
     classDef hero    fill:#e0e7ff,stroke:#4f46e5,stroke-width:2px,color:#312e81
-    classDef tier1   fill:#dcfce7,stroke:#16a34a,stroke-width:1px,color:#14532d
-    classDef tier2   fill:#dbeafe,stroke:#2563eb,stroke-width:1px,color:#1e3a8a
+    classDef store   fill:#dcfce7,stroke:#16a34a,stroke-width:1px,color:#14532d
+    classDef tl      fill:#dbeafe,stroke:#2563eb,stroke-width:1px,color:#1e3a8a
 
     class Browser,CF,WS edge
     class Chat compute
     class Runtime hero
-    class Cache tier1
-    class Marengo,Pegasus tier2
+    class Vectors store
+    class Marengo,Pegasus tl
 ```
 
-### 3.2 The two-tier tool design
+### 3.2 One retrieval primitive, not two tiers
 
-The agent has access to two speed classes of tool. The system prompt
-requires it to try the fastest tier first.
+The agent has one retrieval primitive: vector similarity over a Marengo
+embedding index hosted on S3 Vectors. Producer beats become text
+embeddings via Marengo's text encoder; the index returns ranked clips
+by cosine similarity. Pegasus is reserved for take-note generation when
+a beat needs prose, not retrieval.
 
-| Tier | Tool | p50 latency | When |
-|---|---|---|---|
-| 1 | `get_kb_overview` / `list_kb_assets` / `lookup_asset_profile` | <10 ms | Always start here on a known KS |
-| 2 | `marengo_search` / `pegasus_analyze` / `list_tl_indexes` | 1–10 s | Cache miss, or needs in-clip timecodes |
+| Tool | p50 latency | Purpose |
+|---|---|---|
+| `vector_search` (embed + ANN) | ~250 ms | Ranked clip-level retrieval per beat |
+| `pegasus_analyze` | 5–15 s | Take-note generation, called only when the chosen clip lacks one |
+| `list_tl_indexes` | <1 s | Discovery, skipped once the index is in context |
 
-The cache answers structural questions ("what's in this KB?", "find me
-action clips") without ever calling a model at runtime. The live
-primitives kick in only when a beat needs a fine-grained timecode or a
-fresh description that wasn't captured at index time.
-
-A typical six-beat rough-cut turn cascades through the tiers like this:
+A typical six-beat rough cut runs every beat through `vector_search` in
+parallel and assembles the EDL in a single agent turn:
 
 ```mermaid
 flowchart TD
-    U(["Producer · build me a 60 s action highlight reel"]) --> A1[Agent]
+    U(["Producer · build me a 60 s action highlight reel"]) --> A1[Agent · parse brief into beats]
 
-    A1 --> T1
+    A1 --> VFan{{"parallel fan-out · one vector_search per beat"}}
 
-    subgraph T1["Turn 1 · profile_cache scout · sub-10 ms per call"]
+    subgraph VS["vector_search · S3 Vectors · ~250 ms each"]
       direction TB
-      C0["get_kb_overview&lpar;ks&rpar;"]
-      C0 --> CFan{{"parallel fan-out · one call per beat"}}
-      CFan --> C1["list_kb_assets · tension"]
-      CFan --> C2["list_kb_assets · action"]
-      CFan --> C3["list_kb_assets · celebration"]
+      VFan --> V1["beat: cold-open landscape"]
+      VFan --> V2["beat: kinetic action"]
+      VFan --> V3["beat: tense crowd"]
+      VFan --> V4["beat: celebration"]
     end
 
-    T1 --> A2[Agent · candidate clips per beat]
-    A2 --> T2
+    VS --> A2[Agent · ranked clips per beat · rank 1 = primary, 2–5 = alternates]
+    A2 -.->|"opt · primary clip needs a take-note"| P["pegasus_analyze · grounded description"]
+    P -.-> A2
+    A2 --> O(["EDL · scenes · primary clip + 2–4 alternates per beat"])
 
-    subgraph T2["Turn 2 · Marengo pass · always, sources alternates · 1–3 s each"]
-      direction TB
-      MFan{{"parallel fan-out · one search per beat"}}
-      MFan --> M1["marengo_search · kinetic action"]
-      MFan --> M2["marengo_search · tense crowd"]
-      MFan --> M3["marengo_search · celebration"]
-    end
+    classDef retrieval fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef agent     fill:#e0e7ff,stroke:#4f46e5,stroke-width:2px,color:#312e81
+    classDef pegasus   fill:#fef3e2,stroke:#f59e0b,color:#7c2d12
+    classDef io        fill:#f1f5f9,stroke:#475569,color:#0f172a
 
-    T2 --> A3[Agent · ranked clips · rank 1 = primary, 2–4 = alternates]
-    A3 -.->|"opt · beat lacks usable take-note"| P["pegasus_analyze · grounded description"]
-    P -.-> A3
-    A3 --> O(["EDL · scenes · primary clip + 2–4 alternates per beat"])
-
-    classDef phase1 fill:#dcfce7,stroke:#16a34a,color:#14532d
-    classDef phase2 fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
-    classDef agent  fill:#e0e7ff,stroke:#4f46e5,stroke-width:2px,color:#312e81
-    classDef pegasus fill:#fef3e2,stroke:#f59e0b,color:#7c2d12
-    classDef io     fill:#f1f5f9,stroke:#475569,color:#0f172a
-
-    class C0,C1,C2,C3,CFan phase1
-    class M1,M2,M3,MFan phase2
-    class A1,A2,A3 agent
+    class V1,V2,V3,V4,VFan retrieval
+    class A1,A2 agent
     class P pegasus
     class U,O io
 
-    style T1 fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px,color:#14532d
-    style T2 fill:#eff6ff,stroke:#2563eb,stroke-width:1.5px,color:#1e3a8a
+    style VS fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px,color:#14532d
 ```
+
+There is no two-tier dance, no cache miss handling, no fall-through
+logic. Every retrieval is a vector query; every result is ranked; the
+alternates payload is the natural shape of an ANN response, not a
+bolt-on.
 
 ### 3.3 Why AgentCore (not Bedrock Agents)
 
@@ -161,50 +161,60 @@ async-self-invoke workarounds.
 
 ---
 
-## 4 · The cache-first pattern
+## 4 · Embedding-RAG for video clips
 
-### 4.1 The naïve path is too slow
+### 4.1 What we keep from text RAG, and what changes
 
-A 6-beat highlight reel built from `marengo_search` and `pegasus_analyze`
-alone, across a 1,300-clip knowledge store, takes 3–5 minutes. That is
-not interactive. Producers will not use it.
+Standard text RAG on AWS is well understood: chunk the corpus at index
+time, compute embeddings, store the vectors in a managed index (S3
+Vectors, OpenSearch, Bedrock Knowledge Bases), and at query time embed
+the user's question and retrieve the top-K nearest chunks. The shape of
+the architecture for video is the same. The two pieces that change are:
 
-### 4.2 The shape of a per-asset profile
+- **The chunker is Marengo.** Marengo segments a video into clip-level
+  units automatically (typically 5–10 s shots, aware of cuts and
+  motion). There is no manual chunking decision to make.
+- **The embedding model is multimodal.** Marengo embeds both video
+  clips and text queries into the same vector space. The producer's
+  beat ("kinetic action with crowd reaction") becomes a vector that is
+  natively comparable to every clip in the index.
 
-At index time, every asset in the knowledge store is run through a
-single Pegasus call that produces a structured profile:
+The retrieval primitive is exactly what an AWS practitioner expects:
+ANN lookup against a managed vector index.
 
-- One-line description
-- Mood tags (tension, action, celebration, …)
-- Visual style (handheld, wide, kinetic, …)
-- Role hint (establishing, hero, b-roll, …)
-- Subject and entity surface
+### 4.2 The shape of an indexed clip
 
-The profile is stored as a row in a DynamoDB table (`profile_cache`), keyed
-by knowledge-store id and asset id. A single additional row per
-knowledge store rolls those profiles up into a corpus overview: total
-asset count, dominant moods, dominant styles, sample titles. The agent
-reads either at single-digit-millisecond latency.
+At ingest time, every asset is segmented and embedded by Marengo. Each
+clip becomes one row in the S3 Vector index:
 
-### 4.3 Building the cache
+| Field | Source |
+|---|---|
+| `id` | `<asset_id>:<start_seconds>:<end_seconds>` |
+| `vector` | Marengo clip embedding (1024-dim float) |
+| `asset_id` | TwelveLabs asset id |
+| `knowledge_store_id` | Filterable attribute for KS scoping |
+| `start_time`, `end_time` | Clip boundaries inside the source asset |
 
-The cache is built by an ingestion script:
+The clip-level granularity is what makes alternates work cheaply: rank
+1 is the primary, ranks 2–5 are sibling clips by definition similar in
+the embedding space, and they already carry their own timecodes.
+
+### 4.3 Building the index
+
+The index is built by an ingestion script run once per knowledge store:
 
 ```mermaid
 flowchart LR
-    Script["<b>scripts/ingest_profile_cache.py</b><br/>ks_&lt;id&gt;"]
-    List["List items<br/>/v1.3/knowledge-stores/{ks}/items<br/><i>(paginated)</i>"]
-    Analyze["<b>Pegasus /v1.3/analyze</b><br/>12 concurrent"]
-    AssetPut["DDB PutItem<br/>N × per-asset"]
-    OverviewPut["DDB PutItem<br/>1 × corpus overview"]
-    Cache[("<b>profile_cache</b><br/>DynamoDB")]
+    Script["<b>scripts/ingest_vectors.py</b><br/>ks_&lt;id&gt;"]
+    List["List assets in KS<br/>/v1.3/knowledge-stores/{ks}/items"]
+    Embed["<b>Marengo /embed-v2/tasks</b><br/>video-mode · per-clip vectors"]
+    Batch["PutVectors · batched<br/>id, vector, asset_id, start, end"]
+    Index[("<b>S3 Vectors</b><br/>tl-agentcore-clips")]
 
     Script --> List
-    List --> Analyze
-    Analyze --> AssetPut
-    Analyze --> OverviewPut
-    AssetPut --> Cache
-    OverviewPut --> Cache
+    List --> Embed
+    Embed --> Batch
+    Batch --> Index
 
     classDef script fill:#fef9c3,stroke:#ca8a04,stroke-width:1px,color:#713f12
     classDef step   fill:#dbeafe,stroke:#2563eb,stroke-width:1px,color:#1e3a8a
@@ -212,31 +222,48 @@ flowchart LR
     classDef store  fill:#dcfce7,stroke:#16a34a,stroke-width:1px,color:#14532d
 
     class Script script
-    class List,AssetPut,OverviewPut step
-    class Analyze hero
-    class Cache store
+    class List,Batch step
+    class Embed hero
+    class Index store
 ```
 
-Throughput: roughly 150 assets per minute. A 1,300-clip KB takes about
-15 minutes to ingest.
+Marengo's embedding job returns one vector per segmented clip; a
+typical 10-minute asset yields 60–120 clip vectors. Throughput is
+gated by Marengo's embedding endpoint (~10 minutes of video per
+minute of wall-clock) and S3 Vectors `PutVectors` batches of 500.
 
-Three agent tools read it back at runtime:
+A single agent tool reads the index at runtime: `vector_search(query_text,
+knowledge_store_id, k=5)`. It embeds the query via Marengo's text
+encoder and runs an ANN query against the S3 Vector index, scoped by
+`knowledge_store_id`.
 
-- `get_kb_overview(ks_id)`: corpus summary
-- `list_kb_assets(ks_id, mood=…, role=…)`: filtered asset list
-- `lookup_asset_profile(ks_id, asset_id)`: single-asset cached digest
+### 4.4 Why this lands cleanly
 
-### 4.4 Measured impact
+- **One retrieval primitive.** No cache-vs-live tier dance. Every beat
+  is a vector query; every response is a ranked list.
+- **Alternates are free.** ANN returns top-K by construction. Rank 1 is
+  the primary; ranks 2–5 are the alternates payload the UI hands to the
+  producer. No second Marengo pass per beat.
+- **No curated taxonomy.** There is no enum of mood tags or role hints
+  to maintain; the model interprets the beat phrase as written.
+  *"Celebration after a tense moment"* and *"quiet vineyard wide
+  shot"* both work without a vocabulary update.
+- **Native AWS retrieval surface.** S3 Vectors is the AWS-managed
+  vector index pattern. The same primitive can back a Bedrock
+  Knowledge Base later (§9).
 
-| Same prompt, same KB (1,317 clips) | Latency |
+### 4.5 Latency, end-to-end
+
+| Stage (per beat) | Latency |
 |---|---|
-| Live `marengo_search` + `pegasus_analyze` only | ~210 s |
-| Cache-first (Tier 1 → Tier 2 fallback) | ~55 s |
+| Marengo text encode of beat phrase | ~200 ms |
+| S3 Vectors ANN (k=5) | ~50 ms |
+| `pegasus_analyze` for take-note | 5–15 s, only when needed |
 
-Cache-first cuts the six-beat highlight job from over three minutes to
-under one. That is the difference between a batch tool a producer uses
-overnight and an interactive tool they use at their desk. The cache is
-the lever; the Strands agent on AgentCore Runtime is the orchestrator.
+A 6-beat reel: ~1.5 s of retrieval in parallel + agent overhead +
+optional Pegasus per beat. End-to-end, an interactive request lands in
+under 15 s when no take-notes are required, and under 60 s when every
+beat needs Pegasus.
 
 ---
 
@@ -244,33 +271,28 @@ the lever; the Strands agent on AgentCore Runtime is the orchestrator.
 
 Detailed contract for each tool. Source of truth: `agent/tl_agentcore/agent.py`.
 
-### 5.1 `marengo_search(index_id, query_text, knowledge_store_id?)`
+### 5.1 `vector_search(query_text, knowledge_store_id, k=5)`
 
-Ranked clip-level retrieval. Always pass `knowledge_store_id` when known.
-Marengo joins the cache and returns clips already enriched with
-title, one_liner, mood_tags, and role_hint, eliminating most follow-up
-Pegasus calls.
+The retrieval primitive. Embeds `query_text` through Marengo's text
+encoder, then runs an ANN query against the S3 Vector index, filtered
+to clips whose `knowledge_store_id` matches. Returns `k` clips ordered
+by descending cosine similarity, each with `asset_id`, `start_time`,
+`end_time`, and a similarity score.
 
-The agent runs one Marengo call per beat in every rough-cut turn,
-regardless of whether the cache already supplied a primary clip. The
-top-ranked result becomes (or confirms) the primary; the next two to
-four are emitted as `alternatives` on the EDL clip object, so a producer
-can swap any pick for a similarly-ranked option in the UI without
-re-running the agent.
+The agent calls `vector_search` once per beat in parallel. Rank 1 is
+the primary clip on that beat; ranks 2–5 are emitted as `alternatives`
+on the EDL clip object, so a producer can swap any pick for a
+similarly-ranked option in the UI without re-running the agent.
 
 ### 5.2 `pegasus_analyze(target, prompt)`
 
-Single-video generation. Used when a cached `one_liner` does not answer
-the beat (for example, *"what specifically happens at 0:32–0:38 in this
-clip?"*).
+Single-video generation. Used only when the chosen primary clip needs
+a richer take-note than the embedding similarity score alone conveys
+(for example, *"what specifically happens at 0:32–0:38 in this clip?"*).
 
 ### 5.3 `list_tl_indexes()`
 
 Discovery. Skipped when the index is already in context.
-
-### 5.4 `get_kb_overview` / `list_kb_assets` / `lookup_asset_profile`
-
-The Tier-1 cache tools; see §4.
 
 ---
 
@@ -281,8 +303,10 @@ Terraform-only deployment. The stack under `infra/` provisions, end-to-end:
 - **Runtime.** `aws_bedrockagentcore_agent_runtime` running the Strands
   agent container (arm64 Graviton, pulled from ECR by tag), with a
   versioned `aws_bedrockagentcore_agent_runtime_endpoint` for callers.
-- **Cache.** `profile_cache` DynamoDB table, `pk = ks_<id>`, `sk = asset_<id>`
-  or `sk = OVERVIEW`.
+- **Vector index.** S3 Vectors bucket holding one Marengo embedding per
+  segmented clip, attributed with `asset_id`, `knowledge_store_id`,
+  `start_time`, and `end_time`. The agent's `vector_search` tool
+  filters by `knowledge_store_id` so a single index serves multiple KSs.
 - **Edge + transport.** CloudFront fronts an S3 bucket of built UI
   assets plus two API Gateway origins: a WebSocket for the chat lambda
   that invokes the runtime, and an HTTP API for the `tl_proxy` lambda
@@ -313,10 +337,10 @@ Build and push the agent container:
 ./build-agent.sh   # docker buildx build --platform linux/arm64 …
 ```
 
-Ingest the cache for an existing KB:
+Build the vector index for an existing knowledge store:
 
 ```bash
-python scripts/ingest_profile_cache.py ks_<id>
+python scripts/ingest_vectors.py ks_<id>
 ```
 
 ### 6.1 Implementation notes
@@ -334,6 +358,10 @@ python scripts/ingest_profile_cache.py ks_<id>
 - **AgentCore Runtime → custom HTTP timeouts.** AWS SDK default
   socketTimeout (180 s) is below the 300 s lambda cap. Set NodeHttpHandler
   `socketTimeout: 280_000` explicitly.
+- **S3 Vectors filterable metadata is bounded.** Per-vector metadata is
+  capped; keep the attribute set to the four fields the agent actually
+  filters or returns (`asset_id`, `knowledge_store_id`, `start_time`,
+  `end_time`). Anything richer belongs in a separate metadata store.
 
 ---
 
@@ -344,21 +372,29 @@ only two things change:
 
 1. **The system prompt:** what the agent is being asked to assemble
    (highlight reel → news recap → ad cutdown → channel block).
-2. **The ingestion profile schema:** what gets cached per asset.
+2. **The beat-extraction step:** how the brief is decomposed into the
+   per-beat phrases that go into `vector_search`. The clip index stays
+   the same; only the queries change shape.
 
 Worked examples:
 
-- **Sports recaps.** Profile schema gains `play_type`, `momentum_shift`,
-  `crowd_energy`. Prompt asks for narrative arc, not mood arc.
-- **Social cutdowns.** Profile schema gains `vertical_safe`, `hook_window`,
-  `caption_friendly`. Prompt biases short, kinetic, opening-strong.
-- **Newsroom dossiers.** Profile schema gains `entity_appearances`,
-  `quote_density`. Prompt asks for chronology and sources.
-- **FAST channel programming.** Multi-prompt: rough-cut per show, then
-  schedule. Adds an audience-intelligence DDB tool.
+- **Sports recaps.** Beats become narrative-arc phrases ("decisive
+  play", "momentum shift", "crowd reaction") instead of mood phrases.
+  No index change; the same Marengo embeddings serve the new queries.
+- **Social cutdowns.** Beats bias short, kinetic, opening-strong
+  ("hook in first second", "vertical-safe close-up", "punchline cut").
+  Same index.
+- **Newsroom dossiers.** Beats are entity- and chronology-keyed
+  ("the senator at the podium", "wide of the crowd outside",
+  "anchor handoff"). Same index.
+- **FAST channel programming.** A coordinator prompt builds a sequence
+  of rough cuts (one per show in the schedule) and a separate scheduler
+  agent assembles the channel. The vector index is shared; only the
+  orchestration above it differs.
 
 The TwelveLabs models (Marengo and Pegasus) do not change. The agent
-runtime (AgentCore) does not change. Only the prompt and the cache schema.
+runtime (AgentCore) does not change. The S3 Vector index does not
+change. Only the prompt and the beat-extraction shape.
 
 ---
 
@@ -372,12 +408,14 @@ The companion repository contains:
   architecture diagram, and a Playwright E2E suite in `ui/e2e/`
 - `lambda/`: chat lambda (WebSocket → InvokeAgentRuntime) and
   `tl_proxy` lambda (the browser's `/tl/*` forwarder)
-- `infra/`: Terraform for one-command deployment
-- `scripts/`: `ingest_profile_cache.py` (cache builder) and
-  `setup_test_fixtures.sh` (creates the E2E knowledge store)
+- `infra/`: Terraform for one-command deployment (S3 Vectors bucket,
+  AgentCore Runtime + endpoint, Cognito, CloudFront, two API Gateways,
+  lambdas)
+- `scripts/`: `ingest_vectors.py` (Marengo embedding → S3 Vectors) and
+  `setup_test_fixtures.sh` (creates the E2E knowledge store + index)
 
 A reader can `terraform apply` and have a working endpoint in roughly 15
-minutes, plus the cache-ingestion time for whatever KB they bring.
+minutes, plus the embedding-ingestion time for whatever KB they bring.
 
 ---
 
@@ -386,6 +424,7 @@ minutes, plus the cache-ingestion time for whatever KB they bring.
 | Follow-on | Status |
 |---|---|
 | Pegasus 1.5 on Bedrock Marketplace | Pending availability |
+| Bedrock Knowledge Base backed by the same S3 Vector index | Roadmap |
 | Sports-recap variant | Planned |
 | Newsroom dossier variant | Planned |
 | FAST-channel programming variant | Planned |

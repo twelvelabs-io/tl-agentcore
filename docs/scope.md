@@ -21,9 +21,9 @@ we invest in long-form prose in the paper itself.
 | # | Capability | In v1? |
 |---|---|:-:|
 | R1 | Natural-language prompt → multi-clip rough-cut / highlight reel plan (EDL) | ☐ |
-| R2 | Cache-first retrieval (pre-built per-asset profiles in DDB) | ☐ |
-| R3 | Marengo semantic clip search as Tier-2 fallback | ☐ |
-| R4 | Pegasus generative analysis as Tier-3 fallback | ☐ |
+| R2 | Embedding-RAG retrieval (Marengo clip vectors in an S3 Vectors index) | ☐ |
+| R3 | One retrieval primitive: `vector_search` per beat, ANN top-K | ☐ |
+| R4 | Pegasus generative analysis for take-notes on the chosen primary | ☐ |
 | R5 | Live "tool trace" visualization (architecture diagram lighting up per node) | ☐ |
 | R6 | HLS back-to-back playback of the produced reel | ☐ |
 | R7 | EDL export (XML / CSV / FCP7) for NLE handoff | ☐ |
