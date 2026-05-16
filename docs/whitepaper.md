@@ -277,9 +277,11 @@ Terraform-only deployment. The stack under `infra/` provisions, end-to-end:
   and into the lambdas that verify it before invoking the runtime.
 - **Secrets.** The TwelveLabs API key lives in Secrets Manager; both
   the runtime container and the `tl_proxy` lambda read it at startup.
-- **Gateway.** `gateway.tf` is documented but disabled in v1; Phase 2
-  moves the agent tools out of the runtime container into MCP-served
-  lambdas behind AgentCore Gateway.
+- **Gateway.** `gateway.tf` is documented but not enabled in this
+  reference implementation. A future evolution moves the agent tools
+  out of the runtime container into MCP-served lambdas behind
+  AgentCore Gateway, so the tool catalog is administered as
+  infrastructure instead of code.
 
 ```bash
 cd infra
@@ -373,5 +375,4 @@ minutes, plus the cache-ingestion time for whatever KB they bring.
 
 ---
 
-*Authors: Leor Berezinski (TwelveLabs SA) · Adam (AWS SA) · James Wu
-(TwelveLabs DevRel).*
+*Authors: TwelveLabs and AWS.*
