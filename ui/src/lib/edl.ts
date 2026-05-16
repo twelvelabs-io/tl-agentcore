@@ -13,12 +13,21 @@
 
 import type { Asset } from "./api";
 
+export type RoughCutAlternate = {
+  video_reference: string;     // asset_id or video_id of the alternate
+  start_time: string;
+  end_time: string;
+  rank?: number;               // Marengo rank (1 = best) from the same query as the primary
+  why_alt?: string;            // one-line: what makes this a defensible swap
+};
+
 export type RoughCutClip = {
   video_reference: string;     // asset_id
   start_time: string;           // "HH:MM:SS" or "HH:MM:SS.fff" or "MM:SS"
   end_time: string;
   role?: string;
   take_note?: string;
+  alternatives?: RoughCutAlternate[];
 };
 
 export type RoughCutScene = {

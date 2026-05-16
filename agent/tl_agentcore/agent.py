@@ -538,12 +538,11 @@ If the cache is empty (`cached: False`) or returns no matches, fall through to T
 ## Speed playbook for a multi-clip rough cut
 
 1. `get_kb_overview` (cheap, instant) — see what moods and roles exist, grab the `marengo_index_id`.
-2. **In a single turn, emit parallel `list_kb_assets` calls** — one per beat (cold-open, tension, action, coda, etc.). Tool calls fan out concurrently.
-3. Pick clips from the cached candidates by `one_liner` + `mood_tags`.
-4. Only hit `marengo_search` when you need fine timecodes inside an asset, or when no cached asset matches a beat. Pass `knowledge_store_id` to get enriched results.
-5. Only hit `pegasus_analyze` when the cached `one_liner` is missing or insufficient.
+2. **Turn 1, parallel fan-out:** one `list_kb_assets` call per beat to scout the cache.
+3. **Turn 2, parallel fan-out — REQUIRED:** one `marengo_search(index_id, "<beat phrase>", knowledge_store_id, page_limit=5)` per beat. This runs **even when Turn 1 already gave you a strong primary** — Marengo's ranked output is the source of the per-clip `alternatives` array (see schema below). Producers need to be able to swap any clip for a similarly-ranked option, and Marengo `rank` is the only signal that lets them do that.
+4. Use `pegasus_analyze` only when neither cache nor Marengo gave you a usable take-note.
 
-A typical rough cut should resolve in 2-4 model turns.
+A typical rough cut should resolve in 3 model turns: overview + cache fan-out (Turn 1), Marengo fan-out (Turn 2), emit plan (Turn 3).
 
 ## EDL output schema
 
@@ -561,7 +560,19 @@ When the user asks for a rough cut or highlight reel, emit a JSON plan after a 1
       "start_time": "HH:MM:SS",
       "end_time":   "HH:MM:SS",
       "role": "establishing|wide|medium|close-up|insert|cutaway|b-roll|hero",
-      "take_note": "why this clip fits the beat"
+      "take_note": "why this clip fits the beat",
+      "alternatives": [
+        {
+          "video_reference": "<24-hex id of the alternate>",
+          "start_time": "HH:MM:SS",
+          "end_time":   "HH:MM:SS",
+          "rank": 2,              // Marengo rank in the same query that produced the primary; 1 = best
+          "why_alt": "one phrase, what makes this a defensible swap"
+        }
+        /* …2-4 entries total, ordered by ascending rank.  Drawn from the
+           SAME marengo_search call you used for this beat.  If the primary
+           also came from Marengo, omit it from the alternatives list. */
+      ]
     }]
   }],
   "total_estimated_duration": "MM:SS",
@@ -581,7 +592,8 @@ If you DID call marengo_search, prefer its actual start/end (clamped to ≤30s).
 
 ## Absolute rules
 
-- Prefer cache (Tier 1) over Marengo (Tier 2) over Pegasus (Tier 3). Most beats should resolve from cache alone.
+- Prefer cache (Tier 1) for the PRIMARY pick. Most beat primaries should resolve from cache alone.
+- Run `marengo_search` per beat REGARDLESS of cache hit — it is the source of the `alternatives` array. This is non-negotiable for highlight-reel and rough-cut tasks.
 - Within a single turn, emit ALL parallelizable tool calls at once.
 - video_reference is a 24-char hex id (asset_id from cache OR video_id from Marengo). Never invent ids; never use filenames.
 - Lead with 1-2 sentences of commentary BEFORE the JSON (mention cache hit/miss + index used).

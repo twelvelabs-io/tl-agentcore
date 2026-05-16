@@ -233,6 +233,13 @@ Marengo joins the cache and returns clips already enriched with
 title, one_liner, mood_tags, and role_hint, eliminating most follow-up
 Pegasus calls.
 
+The agent runs one Marengo call per beat in every rough-cut turn,
+regardless of whether the cache already supplied a primary clip. The
+top-ranked result becomes (or confirms) the primary; the next two to
+four are emitted as `alternatives` on the EDL clip object, so a producer
+can swap any pick for a similarly-ranked option in the UI without
+re-running the agent.
+
 ### 5.2 `pegasus_analyze(target, prompt)`
 
 Single-video generation. Used when a cached `one_liner` does not answer

@@ -81,6 +81,21 @@ const SCHEMA = {
                 end_time: { type: "string", description: "HH:MM:SS within the source clip" },
                 role: { type: "string", description: "establishing | wide | medium | close-up | insert | cutaway | b-roll" },
                 take_note: { type: "string", description: "why this take/range was chosen" },
+                alternatives: {
+                  type: "array",
+                  description: "2-4 ranked alternates from the same Marengo query, ordered by ascending rank.",
+                  items: {
+                    type: "object",
+                    properties: {
+                      video_reference: { type: "string", description: "TwelveLabs asset_id or video_id of the alternate" },
+                      start_time: { type: "string" },
+                      end_time: { type: "string" },
+                      rank: { type: "integer", description: "Marengo rank (1 = best) from the same query as the primary" },
+                      why_alt: { type: "string", description: "one phrase, what makes this a defensible swap" },
+                    },
+                    required: ["video_reference", "start_time", "end_time"],
+                  },
+                },
               },
               required: ["video_reference", "start_time", "end_time"],
             },
@@ -132,8 +147,8 @@ Pick mood filters from the overview's \`top_moods\` — match each script beat t
 
 If \`get_kb_overview\` returns \`cached: false\`, fall back to the legacy path: list_tl_indexes → parallel marengo_search per beat. Note this in your final \`notes\` field.
 
-### Turn 2 — ONLY if a beat had no cache matches:
-For each beat that came back empty from list_kb_assets, ONE \`marengo_search(index_id=<from overview>, query_text=<mood phrase>, knowledge_store_id=<ks>, page_limit=3)\` — passing knowledge_store_id makes Marengo return clips already enriched with cached title/mood/role.
+### Turn 2 — Marengo pass per beat (REQUIRED, even when Turn 1 covered the primary):
+For EVERY beat, emit one \`marengo_search(index_id=<from overview>, query_text=<beat phrase>, knowledge_store_id=<ks>, page_limit=5)\` call — all in parallel. Marengo's ranked output is the source of the \`alternatives\` array. Producers need to swap a clip for a similarly-ranked option, and Marengo \`rank\` is the only signal that supports that.
 
 ### Turn 3 — emit the plan.
 
@@ -151,7 +166,19 @@ Schema:
       "start_time": "HH:MM:SS",
       "end_time":   "HH:MM:SS",
       "role": "establishing|wide|medium|close-up|insert|cutaway|b-roll|hero",
-      "take_note": "why this clip fits the beat — quote the cached one_liner if relevant"
+      "take_note": "why this clip fits the beat — quote the cached one_liner if relevant",
+      "alternatives": [
+        {
+          "video_reference": "<24-hex id from same marengo_search>",
+          "start_time": "HH:MM:SS",
+          "end_time":   "HH:MM:SS",
+          "rank": 2,
+          "why_alt": "one phrase, what makes this a defensible swap"
+        }
+        /* 2-4 entries, ordered by ascending rank. Drawn from the SAME
+           marengo_search call that scored this beat. If the primary also
+           came from Marengo, omit it from the alternatives list. */
+      ]
     }]
   }],
   "total_estimated_duration": "MM:SS",
@@ -350,7 +377,10 @@ export function RoughCut() {
     const ids = new Set<string>();
     const collect = (p: RoughCutPlan | null) => {
       if (!p) return;
-      for (const s of p.scenes) for (const c of s.clips || []) ids.add(c.video_reference);
+      for (const s of p.scenes) for (const c of s.clips || []) {
+        ids.add(c.video_reference);
+        for (const a of c.alternatives || []) ids.add(a.video_reference);
+      }
     };
     collect(plan);
     collect(cmpJockey.plan);
@@ -366,6 +396,42 @@ export function RoughCut() {
 
   const totalSec = useMemo(() => (plan ? totalDuration(plan) : 0), [plan]);
   const clipCount = useMemo(() => (plan ? plan.scenes.reduce((s, sc) => s + (sc.clips?.length || 0), 0) : 0), [plan]);
+
+  // Swap an alternate into the primary slot.  The old primary is demoted to
+  // the head of the alternatives list so the move stays reversible; rank on
+  // the demoted entry borrows the alt's rank slot so the swapped order is
+  // sensible if Marengo ever re-runs.
+  const swapAlt = (sceneIdx: number, clipIdx: number, altIdx: number) => {
+    setPlan((p) => {
+      if (!p) return p;
+      const scenes = p.scenes.slice();
+      const scene = { ...scenes[sceneIdx] };
+      const clips = scene.clips.slice();
+      const clip = clips[clipIdx];
+      const alts = clip.alternatives || [];
+      const chosen = alts[altIdx];
+      if (!chosen) return p;
+      const demoted = {
+        video_reference: clip.video_reference,
+        start_time: clip.start_time,
+        end_time: clip.end_time,
+        rank: chosen.rank,
+        why_alt: clip.take_note || "previous primary",
+      };
+      const newAlts = [demoted, ...alts.filter((_, i) => i !== altIdx)];
+      clips[clipIdx] = {
+        ...clip,
+        video_reference: chosen.video_reference,
+        start_time: chosen.start_time,
+        end_time: chosen.end_time,
+        take_note: chosen.why_alt || clip.take_note,
+        alternatives: newAlts,
+      };
+      scene.clips = clips;
+      scenes[sceneIdx] = scene;
+      return { ...p, scenes };
+    });
+  };
 
   const generate = async () => {
     if (!ks || !script.trim()) return;
@@ -697,7 +763,14 @@ export function RoughCut() {
 
               <ol className="space-y-6">
                 {plan.scenes.map((sc, i) => (
-                  <SceneBlock key={sc.scene_id || i} scene={sc} index={i} fps={fps} assetCache={assetCache} />
+                  <SceneBlock
+                    key={sc.scene_id || i}
+                    scene={sc}
+                    index={i}
+                    fps={fps}
+                    assetCache={assetCache}
+                    onSwap={(clipIdx, altIdx) => swapAlt(i, clipIdx, altIdx)}
+                  />
                 ))}
               </ol>
             </>
@@ -925,12 +998,13 @@ function fmtMs(ms: number): string {
 }
 
 function SceneBlock({
-  scene, index, fps, assetCache,
+  scene, index, fps, assetCache, onSwap,
 }: {
   scene: RoughCutPlan["scenes"][number];
   index: number;
   fps: number;
   assetCache: Record<string, Asset>;
+  onSwap?: (clipIdx: number, altIdx: number) => void;
 }) {
   const sceneSec = scene.clips.reduce((s, c) => s + Math.max(parseTime(c.end_time) - parseTime(c.start_time), 0), 0);
 
@@ -954,26 +1028,40 @@ function SceneBlock({
       </div>
       <ul className="space-y-2">
         {scene.clips.map((c, j) => (
-          <ClipRow key={j} index={j} clip={c} fps={fps} asset={assetCache[c.video_reference]} />
+          <ClipRow
+            key={j}
+            index={j}
+            clip={c}
+            fps={fps}
+            asset={assetCache[c.video_reference]}
+            assetCache={assetCache}
+            onSwap={onSwap ? (altIdx) => onSwap(j, altIdx) : undefined}
+          />
         ))}
       </ul>
     </motion.li>
   );
 }
 
-function ClipRow({ index, clip, asset }: {
+function ClipRow({ index, clip, asset, assetCache, onSwap }: {
   index: number;
   clip: RoughCutPlan["scenes"][number]["clips"][number];
   fps: number;
   asset?: Asset;
+  assetCache?: Record<string, Asset>;
+  onSwap?: (altIdx: number) => void;
 }) {
   const dur = Math.max(parseTime(clip.end_time) - parseTime(clip.start_time), 0);
   const thumb = asset?.thumbnail?.representative_url;
+  const [altsOpen, setAltsOpen] = useState(false);
+  const alts = clip.alternatives || [];
+  const hasAlts = alts.length > 0;
   return (
-    <li
-      className="clip-card grid grid-cols-[64px_1fr_auto] gap-4 items-center p-3 cursor-pointer"
-      onClick={() => setGlobal({ activeAssetId: clip.video_reference })}
-    >
+    <li className="clip-card p-3">
+      <div
+        className="grid grid-cols-[64px_1fr_auto] gap-4 items-center cursor-pointer"
+        onClick={() => setGlobal({ activeAssetId: clip.video_reference })}
+      >
       <div
         className="aspect-video rounded-sm"
         style={{
@@ -998,6 +1086,77 @@ function ClipRow({ index, clip, asset }: {
         {clip.end_time}<br />
         <span style={{ color: "var(--color-cue)" }}>{fmtDuration(dur)}</span>
       </div>
+      </div>
+
+      {hasAlts && (
+        <div className="mt-2 pt-2" style={{ borderTop: "1px dashed var(--color-rule)" }}>
+          <button
+            type="button"
+            className="label text-[10px] hover:text-[var(--color-cue)]"
+            onClick={(e) => { e.stopPropagation(); setAltsOpen((v) => !v); }}
+            title="Marengo-ranked swap candidates from the same query"
+          >
+            {altsOpen ? "▾" : "▸"} {alts.length} alternate{alts.length === 1 ? "" : "s"} · marengo-ranked
+          </button>
+
+          {altsOpen && (
+            <ul className="mt-2 space-y-1.5">
+              {alts.map((alt, k) => {
+                const altAsset = assetCache?.[alt.video_reference];
+                const altThumb = altAsset?.thumbnail?.representative_url;
+                const altDur = Math.max(parseTime(alt.end_time) - parseTime(alt.start_time), 0);
+                return (
+                  <li
+                    key={k}
+                    className="grid grid-cols-[48px_1fr_auto_auto] gap-3 items-center px-2 py-1.5 rounded-sm"
+                    style={{ background: "var(--color-surface)" }}
+                  >
+                    <div
+                      className="aspect-video rounded-sm"
+                      style={{
+                        background: altThumb ? `url(${altThumb}) center/cover no-repeat` : "var(--color-surface-2)",
+                        height: 28,
+                      }}
+                    />
+                    <div className="min-w-0">
+                      <div className="font-mono text-[10px] truncate" style={{ color: "var(--color-ink-soft)" }}>
+                        {alt.rank != null && (
+                          <span style={{ color: "var(--color-cue)" }}>rank {alt.rank}</span>
+                        )}
+                        {alt.rank != null && " · "}
+                        <span style={{ color: "var(--color-ink)" }}>
+                          {altAsset?.filename || alt.video_reference.slice(0, 18)}
+                        </span>
+                      </div>
+                      {alt.why_alt && (
+                        <p className="text-[10px] mt-0.5 truncate" style={{ color: "var(--color-ink-soft)" }}>
+                          {alt.why_alt}
+                        </p>
+                      )}
+                    </div>
+                    <div className="font-mono text-[10px] whitespace-nowrap text-right" style={{ color: "var(--color-ink-faint)" }}>
+                      {alt.start_time} ▸ {alt.end_time}<br />
+                      <span style={{ color: "var(--color-cue)" }}>{fmtDuration(altDur)}</span>
+                    </div>
+                    {onSwap ? (
+                      <button
+                        type="button"
+                        className="btn btn-cue text-[10px] px-2 py-0.5"
+                        onClick={(e) => { e.stopPropagation(); onSwap(k); }}
+                        title="Promote this alternate to the primary slot"
+                      >
+                        use this →
+                      </button>
+                    ) : (
+                      <span className="label text-[9px]" style={{ color: "var(--color-ink-faint)" }}>read-only</span>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+      )}
     </li>
   );
 }
