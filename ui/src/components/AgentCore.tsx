@@ -1,8 +1,9 @@
 // "Agent" tab — chat with the Strands agent on AgentCore Runtime.
-// The agent has access to the profile_cache tools (Tier 1) and the live
-// TwelveLabs primitives marengo_search / pegasus_analyze / list_tl_indexes
-// (Tier 2). The right rail surfaces the live architecture diagram so a
-// viewer can watch each tool fire as the agent reasons.
+// The agent has one retrieval primitive (vector_search over an S3 Vector
+// index of Marengo clip embeddings) plus pegasus_analyze for take-notes
+// and list_tl_indexes for discovery. The right rail surfaces the live
+// architecture diagram so a viewer can watch each tool fire as the agent
+// reasons.
 
 import { useRef, useState } from "react";
 import { motion } from "motion/react";
@@ -111,7 +112,7 @@ export function AgentCore() {
           />
           <div className="flex items-center justify-between mt-3">
             <div className="label" style={{ color: "var(--color-ink-faint)" }}>
-              ⌘↩ to send · sigv4 → InvokeAgentRuntime · Strands · Sonnet 4.6 · cache-first tool palette
+              ⌘↩ to send · sigv4 → InvokeAgentRuntime · Strands · Sonnet 4.6 · vector retrieval
             </div>
             <div className="flex gap-2">
               <button className="btn" onClick={reset} disabled={busy || !turns.length}>new session</button>
@@ -157,12 +158,9 @@ export function AgentCore() {
       <aside className="lg:border-l lg:pl-8" style={{ borderColor: "var(--color-rule)" }}>
         <div className="label">§ II · Tools</div>
         <div className="rule mt-3 mb-4" />
-        <ToolRow name="get_kb_overview"      hint="cache · corpus summary" />
-        <ToolRow name="list_kb_assets"       hint="cache · filtered asset list" />
-        <ToolRow name="lookup_asset_profile" hint="cache · single-asset digest" />
-        <ToolRow name="marengo_search"       hint="TL · ranked clip-level retrieval" />
-        <ToolRow name="pegasus_analyze"      hint="TL · single-video generation" />
-        <ToolRow name="list_tl_indexes"      hint="TL · discover Marengo indexes" />
+        <ToolRow name="vector_search"   hint="Marengo embed + S3 Vectors ANN · ranked clips per beat" />
+        <ToolRow name="pegasus_analyze" hint="TL · take-note for the chosen primary clip" />
+        <ToolRow name="list_tl_indexes" hint="TL · discover Marengo indexes (rarely needed)" />
 
         <div className="label mt-12">§ III · Stack</div>
         <div className="rule mt-3 mb-4" />

@@ -63,11 +63,18 @@ data "aws_iam_policy_document" "runtime_perms" {
     actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
     resources = [aws_secretsmanager_secret.tl_api_key.arn]
   }
-  # Read the profile_cache table (Tier-1 cache).
+  # Query the S3 Vectors index. QueryVectors + GetVectors are required to
+  # use metadata filters and return metadata in the response.
   statement {
-    sid       = "ReadKbCache"
-    actions   = ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan"]
-    resources = [aws_dynamodb_table.profile_cache.arn]
+    sid = "QueryVectorIndex"
+    actions = [
+      "s3vectors:QueryVectors",
+      "s3vectors:GetVectors",
+    ]
+    resources = [
+      aws_s3vectors_vector_bucket.clips.vector_bucket_arn,
+      "${aws_s3vectors_vector_bucket.clips.vector_bucket_arn}/index/*",
+    ]
   }
 }
 

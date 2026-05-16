@@ -6,11 +6,11 @@
 //                                                  │
 //                                              gateway (when MCP path)
 //                                                  ↓
-//                                        marengo + pegasus / profile_cache
+//                                        vector_search · pegasus
 //
 // Mapping (handled by callers):
 //   tool_call marengo/pegasus → "marengo_pegasus_tools" (then tl_*)
-//   tool_call profile_cache_*      → "profile_cache_tools" (then dynamodb_profile_cache)
+//   tool_call vector_search        → "vector_search_tool" (then s3vectors_index)
 //   tool_result / rationale   → "runtime"
 //   text_delta                → "runtime"
 //   done                      → "browser" then null
@@ -28,12 +28,12 @@ export type NodeId =
   | "lookup_rights"
   | "audience_tools"
   | "marengo_pegasus_tools"
-  | "profile_cache_tools"
+  | "vector_search_tool"
   | "tl_marengo"
   | "tl_pegasus"
   | "dynamodb_rights"
   | "dynamodb_audiences"
-  | "dynamodb_profile_cache";
+  | "s3vectors_index";
 
 type Activity = "idle" | "active" | "recent";
 
@@ -105,7 +105,7 @@ export function LiveArchDiagram({
 
       <ArchBranch
         cols={[
-          activeNode === "profile_cache_tools" || activeNode === "dynamodb_profile_cache",
+          activeNode === "vector_search_tool" || activeNode === "s3vectors_index",
           ...(hideStudioPath ? [] : [activeNode === "marengo_pegasus_tools" || activeNode === "tl_marengo" || activeNode === "tl_pegasus"]),
           activeNode === "lookup_rights" || activeNode === "dynamodb_rights",
           activeNode === "audience_tools" || activeNode === "dynamodb_audiences",
@@ -115,18 +115,18 @@ export function LiveArchDiagram({
       <div className={`grid grid-cols-1 ${gridColsClass(hideStudioPath)} gap-4 max-w-6xl mx-auto`}>
         <div className="flex flex-col items-center">
           <ArchCard
-            state={stateOf("profile_cache_tools")}
-            tag="cache · in-proc"
-            title="profile_cache tools"
-            sub="overview · list · profile"
+            state={stateOf("vector_search_tool")}
+            tag="retrieval · in-proc"
+            title="vector_search"
+            sub="Marengo text embed · ANN query"
             highlightAlways
           />
-          <ArchArrow active={activeNode === "dynamodb_profile_cache"} label="Query / GetItem" />
+          <ArchArrow active={activeNode === "s3vectors_index"} label="QueryVectors · filter ks_id" />
           <ArchCard
-            state={stateOf("dynamodb_profile_cache")}
+            state={stateOf("s3vectors_index")}
             tag="store"
-            title="DynamoDB"
-            sub="profile_cache · per-asset profiles"
+            title="S3 Vectors"
+            sub="Marengo clip embeddings"
             highlightAlways
           />
         </div>
@@ -351,7 +351,7 @@ function ArchBranch({ cols }: { cols: boolean[] }) {
   );
 }
 
-// Up to 4 default columns: profile_cache · marengo+pegasus · rights · audiences.
+// Up to 4 default columns: s3vectors · pegasus · rights · audiences.
 // hideStudio drops one. Tailwind needs literal class names so we resolve to
 // a fixed string here rather than building it dynamically.
 function gridColsClass(hideStudio: boolean): string {
@@ -366,12 +366,10 @@ export function nodeForEvent(ev: { type: string; tool?: string }): NodeId | null
   if (ev.type === "session") return "runtime";
   if (ev.type === "tool_call") {
     const t = ev.tool || "";
+    if (t === "vector_search") return "vector_search_tool";
+    if (t === "pegasus_analyze" || t === "list_tl_indexes") return "marengo_pegasus_tools";
     if (t === "lookup_rights" || t === "lookup-rights") return "lookup_rights";
     if (t === "list_audiences" || t === "lookup_audience") return "audience_tools";
-    if (t === "marengo_search" || t === "pegasus_analyze" || t === "list_tl_indexes")
-      return "marengo_pegasus_tools";
-    if (t === "get_kb_overview" || t === "list_kb_assets" || t === "lookup_asset_profile")
-      return "profile_cache_tools";
     return "runtime";
   }
   if (ev.type === "tool_result") return "runtime";
@@ -384,10 +382,9 @@ export function nodeForEvent(ev: { type: string; tool?: string }): NodeId | null
 // --- helper: which downstream node a tool call bounces to after ~400ms ---
 export function downstreamFor(toolName: string | undefined): NodeId | null {
   if (!toolName) return null;
-  if (toolName === "marengo_search" || toolName === "list_tl_indexes") return "tl_marengo";
+  if (toolName === "vector_search") return "s3vectors_index";
+  if (toolName === "list_tl_indexes") return "tl_marengo";
   if (toolName === "pegasus_analyze") return "tl_pegasus";
-  if (toolName === "get_kb_overview" || toolName === "list_kb_assets" || toolName === "lookup_asset_profile")
-    return "dynamodb_profile_cache";
   if (toolName.includes("rights")) return "dynamodb_rights";
   if (toolName.includes("audience")) return "dynamodb_audiences";
   return null;

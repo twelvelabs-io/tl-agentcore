@@ -10,9 +10,9 @@ test.describe("RoughCut: alternates render + swap", () => {
     await signedInPage.locator('button:has-text("assemble rough cut")').click();
 
     // Wait for at least one alternate toggle to render. The toggle reads
-    // "▸ N alternates · marengo-ranked".
+    // "▸ N alternates · vector-ranked".
     const altToggle = signedInPage
-      .locator('button:has-text("alternates · marengo-ranked")')
+      .locator('button:has-text("alternates · vector-ranked")')
       .first();
     await expect(altToggle).toBeVisible({ timeout: 3 * 60_000 });
 
@@ -32,7 +32,7 @@ test.describe("RoughCut: alternates render + swap", () => {
     await signedInPage.locator('button:has-text("assemble rough cut")').click();
 
     const altToggle = signedInPage
-      .locator('button:has-text("alternates · marengo-ranked")')
+      .locator('button:has-text("alternates · vector-ranked")')
       .first();
     await expect(altToggle).toBeVisible({ timeout: 3 * 60_000 });
 

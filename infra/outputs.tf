@@ -20,9 +20,14 @@ output "runtime_role_arn" {
   value = aws_iam_role.runtime.arn
 }
 
-output "profile_cache_table" {
-  value       = aws_dynamodb_table.profile_cache.name
-  description = "DynamoDB table holding the Tier-1 cache. Pass to scripts/ingest_profile_cache.py."
+output "vector_bucket_name" {
+  value       = aws_s3vectors_vector_bucket.clips.vector_bucket_name
+  description = "S3 Vectors bucket holding Marengo clip embeddings. Passed to the agent runtime and the ingest script."
+}
+
+output "vector_index_name" {
+  value       = aws_s3vectors_index.clips.index_name
+  description = "S3 Vectors index name (single index per bucket; KS scoping is done via metadata filter)."
 }
 
 output "tl_api_key_secret" {

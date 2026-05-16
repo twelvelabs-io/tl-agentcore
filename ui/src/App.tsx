@@ -169,8 +169,9 @@ function NoKS() {
         Pick a knowledge base from the picker above to begin.
       </p>
       <p className="mt-6 text-sm" style={{ color: "var(--color-ink-soft)" }}>
-        First time? Run <span className="font-mono">scripts/ingest_profile_cache.py &lt;ks_id&gt;</span> on
-        the knowledge base to populate the cache — the agent will be ~4× faster.
+        First time? Run <span className="font-mono">scripts/ingest_vectors.py &lt;ks_id&gt;</span> to build
+        the Marengo clip-embedding index in S3 Vectors. The agent searches that
+        index per beat.
       </p>
     </div>
   );

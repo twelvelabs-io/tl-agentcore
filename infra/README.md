@@ -7,9 +7,9 @@ Phase-1 deployment of the tl-agentcore reference architecture:
 | `aws_ecr_repository.agent` | Container registry for the Strands agent image (arm64) |
 | `aws_bedrockagentcore_agent_runtime.this` | AgentCore Runtime running the container |
 | `aws_bedrockagentcore_agent_runtime_endpoint.live` | Stable invoke target |
-| `aws_dynamodb_table.profile_cache` | Tier-1 cache table (see whitepaper §4) |
+| `aws_s3vectors_vector_bucket.clips` + `aws_s3vectors_index.clips` | S3 Vectors store of Marengo clip embeddings (see whitepaper §4) |
 | `aws_secretsmanager_secret.tl_api_key` | TwelveLabs API key the runtime reads |
-| `aws_iam_role.runtime` | Execution role (ECR pull + Bedrock invoke + DDB + Secrets) |
+| `aws_iam_role.runtime` | Execution role (ECR pull + Bedrock invoke + s3vectors:Query/Get + Secrets) |
 
 The agent runs with **in-process tools** (`agent/tl_agentcore/agent.py`). The
 AgentCore Gateway path is documented in `gateway.tf` but not enabled —
@@ -33,12 +33,13 @@ Build + push the agent container:
 terraform apply -var agent_image_tag=v20260514...
 ```
 
-Populate the Tier-1 cache for a knowledge store:
+Build the vector index for a knowledge store:
 
 ```bash
 cd ..
-export PROFILE_CACHE_TABLE=$(terraform -chdir=infra output -raw profile_cache_table)
-python scripts/ingest_profile_cache.py ks_<id>
+export VECTOR_BUCKET_NAME=$(terraform -chdir=infra output -raw vector_bucket_name)
+export VECTOR_INDEX_NAME=$(terraform -chdir=infra output -raw vector_index_name)
+python scripts/ingest_vectors.py ks_<id>
 ```
 
 ## Known prerequisites & gotchas

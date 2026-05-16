@@ -60,10 +60,11 @@ resource "aws_bedrockagentcore_agent_runtime" "this" {
   # Cognito JWTs directly, add an authorizer_configuration.custom_jwt_authorizer.
 
   environment_variables = {
-    AGENT_MODEL_ID    = var.agent_model_id
-    TL_API_KEY_SECRET = aws_secretsmanager_secret.tl_api_key.name
-    PROFILE_CACHE_TABLE    = aws_dynamodb_table.profile_cache.name
-    AWS_REGION        = var.region
+    AGENT_MODEL_ID     = var.agent_model_id
+    TL_API_KEY_SECRET  = aws_secretsmanager_secret.tl_api_key.name
+    VECTOR_BUCKET_NAME = aws_s3vectors_vector_bucket.clips.vector_bucket_name
+    VECTOR_INDEX_NAME  = aws_s3vectors_index.clips.index_name
+    AWS_REGION         = var.region
   }
 }
 

@@ -1,24 +1,21 @@
 """Strands Agent definition for the tl-agentcore Rough Cut / Highlight reel demo.
 
-Tools, by speed class:
+One retrieval primitive: vector_search.
+  - Embeds the query phrase through Marengo's text encoder (sync, 512-dim).
+  - Queries an S3 Vectors index of Marengo clip embeddings, filtered by
+    knowledge_store_id.
+  - Returns ranked clips with timecodes. Rank 1 is the primary on each beat;
+    ranks 2..k are emitted on the EDL as `alternatives`.
 
-  Tier 1 — profile_cache (DDB, sub-10ms):
-    get_kb_overview       corpus summary
-    list_kb_assets        filtered asset list
-    lookup_asset_profile  single-asset cached digest
-
-  Tier 2 — TwelveLabs primitives (1-10s):
-    list_tl_indexes       discover Marengo indexes
-    marengo_search        ranked clip-level retrieval (cache-joined when ks_id passed)
-    pegasus_analyze       single-video generative analysis
-
-Phase 1: tools call TL/DDB directly (in-process).
-Phase 2: same tool surface, exposed through AgentCore Gateway as MCP. Agent
-contract doesn't change — only the wiring inside build_agent().
+Plus two ancillaries:
+  - pegasus_analyze: prose take-note for the chosen primary when its
+    similarity score alone does not justify the pick.
+  - list_tl_indexes: discovery, skipped once the index is in context.
 """
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Optional
 
@@ -34,17 +31,19 @@ MODEL_ID = os.environ.get(
     "AGENT_MODEL_ID",
     "us.anthropic.claude-sonnet-4-6",
 )
+EMBED_MODEL = os.environ.get("MARENGO_EMBED_MODEL", "marengo3.0")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
-PROFILE_CACHE_TABLE = os.environ.get("PROFILE_CACHE_TABLE")
+VECTOR_BUCKET_NAME = os.environ.get("VECTOR_BUCKET_NAME")
+VECTOR_INDEX_NAME = os.environ.get("VECTOR_INDEX_NAME")
 
 _secrets = boto3.client("secretsmanager", region_name=AWS_REGION) if TL_API_KEY_SECRET else None
-_ddb = boto3.client("dynamodb", region_name=AWS_REGION)
+_s3v = boto3.client("s3vectors", region_name=AWS_REGION)
 
 _cached_key: Optional[str] = None
 
 
 def _tl_key() -> str:
-    """Resolve the TL API key — env var (local) or Secrets Manager (deployed)."""
+    """Resolve the TL API key: env var (local) or Secrets Manager (deployed)."""
     global _cached_key
     if _cached_key:
         return _cached_key
@@ -58,67 +57,107 @@ def _tl_key() -> str:
     return _cached_key
 
 
-# ─── DDB helpers (profile_cache table) ───────────────────────────────────────────
-
-def _ddb_profile_get(pk: str, sk: str) -> dict | None:
-    if not PROFILE_CACHE_TABLE:
-        return None
-    r = _ddb.get_item(TableName=PROFILE_CACHE_TABLE, Key={"pk": {"S": pk}, "sk": {"S": sk}})
-    return _ddb_to_python(r.get("Item"))
-
-
-def _ddb_profile_query(pk: str, sk_prefix: str, limit: int | None = None) -> list[dict]:
-    if not PROFILE_CACHE_TABLE:
-        return []
-    items: list[dict] = []
-    page: dict | None = None
-    while True:
-        kwargs: dict = {
-            "TableName": PROFILE_CACHE_TABLE,
-            "KeyConditionExpression": "pk = :p AND begins_with(sk, :s)",
-            "ExpressionAttributeValues": {":p": {"S": pk}, ":s": {"S": sk_prefix}},
-        }
-        if page:
-            kwargs["ExclusiveStartKey"] = page
-        r = _ddb.query(**kwargs)
-        for it in r.get("Items", []):
-            obj = _ddb_to_python(it)
-            if obj:
-                items.append(obj)
-                if limit and len(items) >= limit:
-                    return items
-        page = r.get("LastEvaluatedKey")
-        if not page:
-            break
-    return items
+def _embed_text(query_text: str) -> list[float]:
+    """Marengo text encoder. Returns a 512-dim float vector."""
+    key = _tl_key()
+    files = [
+        ("text", (None, query_text)),
+        ("model_name", (None, EMBED_MODEL)),
+    ]
+    with httpx.Client(timeout=60) as c:
+        r = c.post(f"{TL_BASE_URL}/embed", headers={"x-api-key": key}, files=files)
+    if r.status_code >= 400:
+        raise RuntimeError(f"Marengo embed failed {r.status_code}: {r.text[:400]}")
+    j = r.json()
+    seg = ((j.get("text_embedding") or {}).get("segments") or [{}])[0]
+    v = seg.get("float") or seg.get("values") or []
+    if not v:
+        raise RuntimeError(f"Marengo embed returned no vector: {json.dumps(j)[:300]}")
+    return v
 
 
-def _ddb_to_python(item):
-    if item is None:
-        return None
-    out: dict = {}
-    for k, v in item.items():
-        out[k] = _ddb_value(v)
-    return out
+def _secs_to_hhmmss(s) -> str:
+    try:
+        s = float(s)
+    except Exception:
+        return "00:00:00"
+    total = max(0, int(round(s)))
+    h, rem = divmod(total, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{sec:02d}"
 
 
-def _ddb_value(v):
-    if "S" in v: return v["S"]
-    if "N" in v: return float(v["N"]) if "." in v["N"] else int(v["N"])
-    if "BOOL" in v: return v["BOOL"]
-    if "NULL" in v: return None
-    if "L" in v: return [_ddb_value(x) for x in v["L"]]
-    if "M" in v: return {k: _ddb_value(x) for k, x in v["M"].items()}
-    if "SS" in v: return list(v["SS"])
-    if "NS" in v: return [float(x) if "." in x else int(x) for x in v["NS"]]
-    return None
+# ─── Tier 1 — vector retrieval ─────────────────────────────────────────────
+@tool
+def vector_search(
+    query_text: str,
+    knowledge_store_id: str,
+    k: int = 5,
+) -> dict:
+    """Ranked clip-level retrieval over the S3 Vectors index of Marengo clip
+    embeddings. The agent's single retrieval primitive.
+
+    Embeds `query_text` via Marengo's text encoder, runs ANN on the index
+    filtered by `knowledge_store_id`, and returns the top-`k` clips ordered
+    by ascending cosine distance (lower = better match).
+
+    Args:
+        query_text: natural-language beat phrase (e.g. "kinetic action with
+            crowd reaction", "quiet vineyard wide shot"). Keep concise; the
+            embedding model handles semantics.
+        knowledge_store_id: scope the search to clips belonging to this KS.
+        k: how many clips to return (default 5: rank 1 = primary, 2..k =
+            alternates).
+
+    Returns:
+        Dict with `clips`: ordered list of {asset_id, start_time, end_time,
+        rank, distance}. start_time / end_time are HH:MM:SS strings.
+    """
+    if not query_text:
+        return {"error": "query_text is required"}
+    if not knowledge_store_id:
+        return {"error": "knowledge_store_id is required"}
+    if not (VECTOR_BUCKET_NAME and VECTOR_INDEX_NAME):
+        return {"error": "VECTOR_BUCKET_NAME / VECTOR_INDEX_NAME not configured"}
+
+    try:
+        vec = _embed_text(query_text)
+    except Exception as e:
+        return {"error": f"embed failed: {e}"}
+
+    try:
+        resp = _s3v.query_vectors(
+            vectorBucketName=VECTOR_BUCKET_NAME,
+            indexName=VECTOR_INDEX_NAME,
+            topK=k,
+            queryVector={"float32": vec},
+            filter={"knowledge_store_id": knowledge_store_id},
+            returnDistance=True,
+            returnMetadata=True,
+        )
+    except Exception as e:
+        return {"error": f"S3 Vectors query failed: {e}"}
+
+    clips = []
+    for i, v in enumerate(resp.get("vectors") or []):
+        md = v.get("metadata") or {}
+        clips.append({
+            "asset_id":   md.get("asset_id"),
+            "start_time": _secs_to_hhmmss(md.get("start_sec") or 0),
+            "end_time":   _secs_to_hhmmss(md.get("end_sec")   or 0),
+            "rank":       i + 1,
+            "distance":   v.get("distance"),
+        })
+    return {"clips": clips, "query": query_text}
 
 
-# ─── Tier 2 — TwelveLabs primitives ─────────────────────────────────────────
+# ─── Ancillaries ────────────────────────────────────────────────────────────
 @tool
 def list_tl_indexes() -> list:
     """List the user's TwelveLabs Marengo indexes. Use when the user names
     an index by name or asks "what's available". Returns id, name, video_count.
+    Usually skipped once the agent is invoked with a knowledge_store_id in
+    context (vector_search needs no index lookup).
     """
     key = _tl_key()
     with httpx.Client(timeout=30) as client:
@@ -142,97 +181,20 @@ def list_tl_indexes() -> list:
 
 
 @tool
-def marengo_search(
-    index_id: str,
-    query_text: str,
-    search_options: Optional[list] = None,
-    page_limit: int = 10,
-    group_by: str = "clip",
-    knowledge_store_id: Optional[str] = None,
-) -> dict:
-    """Search a Marengo index for clips matching a natural-language query.
-
-    Args:
-        index_id: TL index id (from list_tl_indexes()). Must be a Marengo index.
-        query_text: natural-language search query (≤500 tokens).
-        search_options: list of modalities to search across; defaults to
-            ["visual","audio"]. Other valid: "transcription".
-        page_limit: max results (default 10, max 50).
-        group_by: "clip" (default — moment-level) or "video" (asset-grouped).
-        knowledge_store_id: optional — when provided, each returned clip is
-            enriched with the cached profile (title, one_liner, mood_tags,
-            role_hint) from profile_cache. **Pass this whenever you have a ks_id** —
-            one extra DDB Query saves you N pegasus_analyze calls.
-
-    Returns:
-        Dict with `clips` (list of {video_id, start, end, rank, thumbnail_url,
-        transcription, user_metadata, [enriched: title, one_liner,
-        mood_tags, role_hint]}) and `total_results`. rank=1 = best match.
-    """
-    if not index_id:
-        return {"error": "index_id is required"}
-    if not query_text:
-        return {"error": "query_text is required"}
-    key = _tl_key()
-    opts = search_options or ["visual", "audio"]
-
-    files = [("index_id", (None, index_id))]
-    for o in opts:
-        files.append(("search_options", (None, o)))
-    files.append(("query_text", (None, query_text)))
-    files.append(("page_limit", (None, str(page_limit))))
-    files.append(("group_by", (None, group_by)))
-
-    with httpx.Client(timeout=120) as client:
-        r = client.post(
-            f"{TL_BASE_URL}/search",
-            headers={"x-api-key": key},
-            files=files,
-        )
-    if r.status_code >= 400:
-        return {"error": f"marengo {r.status_code}: {r.text[:400]}"}
-    j = r.json()
-    clips = j.get("data", []) or []
-
-    # Cache-join: enrich each clip with its profile_cache profile when ks_id is given.
-    # video_id (index-side) usually maps 1:1 to asset_id (KB-side). A miss is
-    # never an error — clip stays un-enriched.
-    if knowledge_store_id and PROFILE_CACHE_TABLE and clips:
-        try:
-            profiles = _ddb_profile_query(f"ks#{knowledge_store_id}", "ASSET#")
-            by_id = {p.get("asset_id"): p for p in profiles if p.get("asset_id")}
-            for c in clips:
-                vid = c.get("video_id") or ""
-                p = by_id.get(vid)
-                if p:
-                    c["enriched"] = {
-                        "title":     p.get("title"),
-                        "one_liner": p.get("one_liner"),
-                        "mood_tags": p.get("mood_tags") or [],
-                        "role_hint": p.get("role_hint"),
-                    }
-        except Exception:
-            pass
-
-    return {
-        "clips":         clips,
-        "total_results": (j.get("page_info") or {}).get("total_results"),
-        "index_id":      (j.get("search_pool") or {}).get("index_id"),
-    }
-
-
-@tool
 def pegasus_analyze(
     target: str,
     prompt: str,
     target_type: str = "asset_id",
     max_tokens: int = 1024,
 ) -> str:
-    """Generate a text response about a specific video using Pegasus.
+    """Generate a take-note about a specific clip using Pegasus. Use ONLY
+    when the chosen primary clip needs a richer description than the
+    similarity score conveys (for example, the producer asked something
+    like "what specifically happens at 0:32-0:38 in this clip?").
 
     Args:
         target: asset_id (KB-side) OR video_id (Marengo index-side).
-        prompt: instruction for Pegasus (≤2000 tokens).
+        prompt: instruction for Pegasus (<=2000 tokens).
         target_type: "asset_id" (default) or "video_id".
         max_tokens: response cap (1-4096, default 1024).
 
@@ -249,8 +211,6 @@ def pegasus_analyze(
         "stream": False,
         "max_tokens": max_tokens,
     }
-    # Marengo /search returns `video_id`, NOT `asset_id`, so pass it via the
-    # deprecated top-level field. asset_ids go through the new structured form.
     if target_type == "video_id":
         body["video_id"] = target
     else:
@@ -267,149 +227,38 @@ def pegasus_analyze(
     return j.get("data") or "(no text returned)"
 
 
-# ─── Tier 1 — profile_cache lookups ──────────────────────────────────────────────
-@tool
-def get_kb_overview(knowledge_store_id: str) -> dict:
-    """Return the pre-computed corpus overview for a knowledge store: total
-    asset count, dominant moods, dominant visual styles, common roles, and
-    a sample of titles. **Call this FIRST on any new knowledge store** —
-    DDB GetItem; if the overview is missing (cached: False), fall through
-    to list_tl_indexes + marengo_search.
+# ─── System prompt: vector-first highlight reels ────────────────────────────
+SYSTEM_PROMPT = """You are an experienced film editor assembling a rough cut or highlight reel from an indexed video library. You translate a producer's brief (a script, treatment, scene outline, or a single-line request like "build me a 30-second action highlight reel") into a structured Edit Decision List (EDL).
 
-    Returns:
-        Dict with: cached (bool), asset_count, top_moods, top_styles,
-        top_roles, sample_titles, marengo_index_id.
-    """
-    if not knowledge_store_id:
-        return {"cached": False, "error": "knowledge_store_id required"}
-    item = _ddb_profile_get(f"ks#{knowledge_store_id}", "OVERVIEW")
-    if not item:
-        return {"cached": False, "knowledge_store_id": knowledge_store_id}
-    return {
-        "cached":              True,
-        "asset_count":         item.get("asset_count"),
-        "top_moods":           item.get("top_moods") or [],
-        "top_styles":          item.get("top_styles") or [],
-        "top_roles":           item.get("top_roles") or [],
-        "sample_titles":       item.get("sample_titles") or [],
-        "marengo_index_id":    item.get("marengo_index_id"),
-        "marengo_index_name":  item.get("marengo_index_name"),
-        "marengo_video_count": item.get("marengo_video_count"),
-    }
+## Retrieval surface
 
+You have one retrieval primitive and two ancillaries:
 
-@tool
-def list_kb_assets(
-    knowledge_store_id: str,
-    mood: Optional[str] = None,
-    role: Optional[str] = None,
-    limit: int = 30,
-) -> list:
-    """List cached assets in a knowledge store, optionally filtered by mood
-    or role hint. The cache-first path — prefer this over marengo_search
-    when the goal is "find me clips that fit a mood / role".
+1. **vector_search(query_text, knowledge_store_id, k=5)** — the workhorse.
+   Returns the top-k clips by Marengo embedding similarity, scoped to the
+   active knowledge store. Use one call per script beat, all in parallel
+   in a single turn. The top-ranked clip on each call is the primary on
+   that beat; the rest become `alternatives` on the EDL.
+2. **pegasus_analyze(target, prompt)** — call only when a primary clip
+   needs a richer take-note than its similarity score conveys.
+3. **list_tl_indexes()** — discovery; skip when an index_id is already in
+   context.
 
-    Args:
-        knowledge_store_id: ks_xxxxxxxx.
-        mood: optional case-insensitive partial match against mood_tags
-            (e.g. "tension", "action", "release", "coda", "celebration").
-        role: optional case-insensitive partial match against role_hint
-            (e.g. "cold-open", "action-set-piece", "emotional-coda").
-        limit: max assets to return (default 30).
+## Speed playbook
 
-    Returns:
-        List of profiles {asset_id, title, one_liner, mood_tags,
-        primary_subjects, visual_style, role_hint}.
-    """
-    if not knowledge_store_id:
-        return [{"error": "knowledge_store_id required"}]
-    raw = _ddb_profile_query(f"ks#{knowledge_store_id}", "ASSET#", limit=None)
-    out: list = []
-    mood_l = (mood or "").lower().strip() or None
-    role_l = (role or "").lower().strip() or None
-    for r in raw:
-        if mood_l:
-            tags = [str(m).lower() for m in (r.get("mood_tags") or [])]
-            if not any(mood_l in t for t in tags):
-                continue
-        if role_l:
-            rh = str(r.get("role_hint") or "").lower()
-            if role_l not in rh:
-                continue
-        out.append({
-            "asset_id":         r.get("asset_id"),
-            "title":            r.get("title"),
-            "one_liner":        r.get("one_liner"),
-            "mood_tags":        r.get("mood_tags") or [],
-            "primary_subjects": r.get("primary_subjects") or [],
-            "visual_style":     r.get("visual_style"),
-            "role_hint":        r.get("role_hint"),
-        })
-        if len(out) >= limit:
-            break
-    return out
+A multi-clip rough cut should resolve in 1-2 model turns:
 
-
-@tool
-def lookup_asset_profile(knowledge_store_id: str, asset_id: str) -> dict:
-    """Read the cached profile for one asset. Use before pegasus_analyze —
-    if the cached one_liner answers the question, skip the live call.
-
-    Args:
-        knowledge_store_id: ks_xxxxxxxx.
-        asset_id: 24-char hex asset id.
-
-    Returns:
-        Dict with cached fields + cached (bool).
-    """
-    if not knowledge_store_id or not asset_id:
-        return {"cached": False, "error": "knowledge_store_id and asset_id required"}
-    item = _ddb_profile_get(f"ks#{knowledge_store_id}", f"ASSET#{asset_id}")
-    if not item:
-        return {"cached": False, "asset_id": asset_id}
-    return {
-        "cached":           True,
-        "asset_id":         asset_id,
-        "title":            item.get("title"),
-        "one_liner":        item.get("one_liner"),
-        "mood_tags":        item.get("mood_tags") or [],
-        "primary_subjects": item.get("primary_subjects") or [],
-        "visual_style":     item.get("visual_style"),
-        "role_hint":        item.get("role_hint"),
-    }
-
-
-# ─── System prompt — RoughCut / Highlight focus ─────────────────────────────
-SYSTEM_PROMPT = """You are an experienced film editor assembling a rough cut or highlight reel from an indexed video library. You translate a producer's brief — a script, treatment, scene outline, or a single-line request like "build me a 30-second action highlight reel" — into a structured Edit Decision List (EDL).
-
-## Tools by speed class — ALWAYS try the fastest tier first
-
-### Tier 1 — Cache (DDB · sub-10ms). **Always start here on a known knowledge_store_id.**
-
-1. **get_kb_overview(knowledge_store_id)** — corpus summary (asset count, dominant moods, visual styles, role distribution, sample titles, marengo_index_id). Call this FIRST on any new KS.
-2. **list_kb_assets(knowledge_store_id, mood?, role?)** — filtered list of pre-profiled assets with title, one_liner, mood_tags, visual_style, role_hint. The right tool for "find me clips that fit a tone or beat".
-3. **lookup_asset_profile(knowledge_store_id, asset_id)** — single-asset cached digest. Often replaces a pegasus_analyze.
-
-If the cache is empty (`cached: False`) or returns no matches, fall through to Tier 2.
-
-### Tier 2 — Live primitives (TL API · 1-10s)
-
-4. **marengo_search(index_id, query_text, knowledge_store_id?)** — ranked clip-level retrieval. **Always pass `knowledge_store_id`** when you have it — Marengo returns clips enriched with the cached profile, eliminating most follow-up Pegasus calls.
-5. **pegasus_analyze(target, prompt)** — single-video generation. Use ONLY when the cached `lookup_asset_profile` doesn't already answer your question.
-6. **list_tl_indexes()** — discover Marengo indexes. Skip when an index_id is already in context (e.g. from `get_kb_overview`).
-
-## Speed playbook for a multi-clip rough cut
-
-1. `get_kb_overview` (cheap, instant) — see what moods and roles exist, grab the `marengo_index_id`.
-2. **Turn 1, parallel fan-out:** one `list_kb_assets` call per beat to scout the cache.
-3. **Turn 2, parallel fan-out — REQUIRED:** one `marengo_search(index_id, "<beat phrase>", knowledge_store_id, page_limit=5)` per beat. This runs **even when Turn 1 already gave you a strong primary** — Marengo's ranked output is the source of the per-clip `alternatives` array (see schema below). Producers need to be able to swap any clip for a similarly-ranked option, and Marengo `rank` is the only signal that lets them do that.
-4. Use `pegasus_analyze` only when neither cache nor Marengo gave you a usable take-note.
-
-A typical rough cut should resolve in 3 model turns: overview + cache fan-out (Turn 1), Marengo fan-out (Turn 2), emit plan (Turn 3).
+- Turn 1: parse the brief into N beat phrases (one per scene). In a single
+  turn, emit N parallel `vector_search` calls (one per beat), each with the
+  beat phrase as `query_text` and the active knowledge_store_id.
+- Turn 2 (only when needed): per beat, call `pegasus_analyze` on the
+  primary's `asset_id` if you need a stronger take-note than the rank /
+  distance alone justifies.
+- Emit the EDL.
 
 ## EDL output schema
 
-When the user asks for a rough cut or highlight reel, emit a JSON plan after a 1-2 sentence commentary:
+After 1-2 sentences of commentary, emit a JSON plan:
 
 ```
 {
@@ -419,58 +268,47 @@ When the user asks for a rough cut or highlight reel, emit a JSON plan after a 1
     "scene_name": "string",
     "scene_description": "optional",
     "clips": [{
-      "video_reference": "<24-hex asset_id from list_kb_assets, or video_id from marengo_search>",
+      "video_reference": "<24-hex asset_id from vector_search>",
       "start_time": "HH:MM:SS",
       "end_time":   "HH:MM:SS",
       "role": "establishing|wide|medium|close-up|insert|cutaway|b-roll|hero",
       "take_note": "why this clip fits the beat",
       "alternatives": [
         {
-          "video_reference": "<24-hex id of the alternate>",
+          "video_reference": "<24-hex asset_id of the alternate>",
           "start_time": "HH:MM:SS",
           "end_time":   "HH:MM:SS",
-          "rank": 2,              // Marengo rank in the same query that produced the primary; 1 = best
+          "rank": 2,
           "why_alt": "one phrase, what makes this a defensible swap"
         }
-        /* …2-4 entries total, ordered by ascending rank.  Drawn from the
-           SAME marengo_search call you used for this beat.  If the primary
-           also came from Marengo, omit it from the alternatives list. */
+        /* 2-4 entries, drawn from the SAME vector_search response, ordered
+           by ascending rank (rank 2 first, rank 3 next, etc.). */
       ]
     }]
   }],
   "total_estimated_duration": "MM:SS",
-  "notes": "cache hit/miss count + which moods you mapped to which beats"
+  "notes": "any caveats (low-confidence beats, index empty, etc.)"
 }
 ```
 
-## Time-range defaults when you only have cached assets (no marengo timecodes)
-
-Pick a sensible range based on `role_hint`:
-- cold-open / atmospheric / hero-shot → 00:00:00 → 00:00:08
-- action-set-piece / kinetic → 00:00:30 → 00:00:38 (action usually starts after the setup)
-- emotional-coda / intimacy → 00:01:00 → 00:01:08 (coda beats sit deeper in the asset)
-- b-roll / transition → 00:00:10 → 00:00:14 (short cutaway)
-
-If you DID call marengo_search, prefer its actual start/end (clamped to ≤30s).
-
 ## Absolute rules
 
-- Prefer cache (Tier 1) for the PRIMARY pick. Most beat primaries should resolve from cache alone.
-- Run `marengo_search` per beat REGARDLESS of cache hit — it is the source of the `alternatives` array. This is non-negotiable for highlight-reel and rough-cut tasks.
-- Within a single turn, emit ALL parallelizable tool calls at once.
-- video_reference is a 24-char hex id (asset_id from cache OR video_id from Marengo). Never invent ids; never use filenames.
-- Lead with 1-2 sentences of commentary BEFORE the JSON (mention cache hit/miss + index used).
+- Run `vector_search` per beat IN PARALLEL in one turn. Sequential calls
+  are wasteful; the model can emit multiple tool calls per turn.
+- `video_reference` is a 24-char hex asset_id from a vector_search result.
+  Never invent ids; never use filenames.
+- The alternatives on a clip are the ranks 2..k from the SAME vector_search
+  call that produced the primary. Do not mix alternates across beats.
+- Lead with 1-2 sentences of commentary BEFORE the JSON.
 - Strict JSON: no trailing commas, no comments inside.
 
 ## Knowledge base context
 
-The active `knowledge_store_id` is provided in the user message metadata as `[ks: ks_xxx]`. If absent, ask the user to select a knowledge base before proceeding.
-
-## When the cache is empty
-
-If `get_kb_overview` returns `cached: False`, tell the user:
-> "This KB doesn't have its profile cache built yet — falling back to live retrieval; expect ~3-5× slower responses. (Run `scripts/ingest_profile_cache.py <ks_id>` to build it.)"
-Then proceed with Tier 2 tools.
+The active `knowledge_store_id` is provided in the user message metadata as
+`[ks: ks_xxx]`. If absent, ask the user to select a knowledge base before
+proceeding. If `vector_search` returns an empty `clips` list, tell the user
+the index has not been built for this KS yet and recommend running
+`scripts/ingest_vectors.py <ks_id>`.
 """
 
 
@@ -478,13 +316,7 @@ Then proceed with Tier 2 tools.
 def build_agent(access_token: Optional[str] = None) -> tuple[Agent, str]:
     """Construct the Strands Agent. Returns (agent, mode) where mode is
     "mcp-gateway" if wired to the AgentCore Gateway, or "in-process" if
-    falling back to direct TL/DDB calls.
-
-    Phase 1 (in-process): agent code holds the tools.
-    Phase 2 (mcp-gateway): same tools, served by AgentCore Gateway as MCP.
-
-    A Cognito access_token is required for the MCP path because the Gateway
-    uses CUSTOM_JWT auth — we forward the user's identity through.
+    falling back to direct tool calls.
     """
     mcp_url = os.environ.get("GATEWAY_MCP_URL")
     if mcp_url and access_token:
@@ -503,11 +335,6 @@ def build_agent(access_token: Optional[str] = None) -> tuple[Agent, str]:
     agent = Agent(
         system_prompt=SYSTEM_PROMPT,
         model=MODEL_ID,
-        tools=[
-            # Tier 1 — cache
-            get_kb_overview, list_kb_assets, lookup_asset_profile,
-            # Tier 2 — live TL primitives
-            list_tl_indexes, marengo_search, pegasus_analyze,
-        ],
+        tools=[vector_search, list_tl_indexes, pegasus_analyze],
     )
     return agent, "in-process"

@@ -18,7 +18,7 @@ variable "project_name" {
 variable "agent_model_id" {
   type        = string
   default     = "us.anthropic.claude-sonnet-4-6"
-  description = "Bedrock cross-region inference profile for the Strands orchestrator. With profile_cache pre-built, the agent finishes in fewer turns so the per-turn latency hit is offset."
+  description = "Bedrock cross-region inference profile for the Strands orchestrator."
 }
 
 variable "tl_api_key" {

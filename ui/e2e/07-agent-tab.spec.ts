@@ -5,9 +5,9 @@ test.describe("Agent tab", () => {
     await signedInPage.locator('button:has-text("Agent")').first().click();
 
     // Tool catalog rail.
-    await expect(signedInPage.locator("text=get_kb_overview")).toBeVisible();
-    await expect(signedInPage.locator("text=marengo_search")).toBeVisible();
-    await expect(signedInPage.locator("text=pegasus_analyze")).toBeVisible();
+    await expect(signedInPage.locator("text=vector_search").first()).toBeVisible();
+    await expect(signedInPage.locator("text=pegasus_analyze").first()).toBeVisible();
+    await expect(signedInPage.locator("text=list_tl_indexes").first()).toBeVisible();
 
     // Live arch diagram is present (AgentCore Runtime is the hero card).
     await expect(signedInPage.locator('text="AgentCore Runtime"').first()).toBeVisible();

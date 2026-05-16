@@ -5,9 +5,9 @@
 # What this stack stands up:
 #   - ECR repo for the Strands agent container (linux/arm64)
 #   - AgentCore Runtime + endpoint
-#   - profile_cache DDB table (Tier-1 cache from the whitepaper)
+#   - S3 Vectors bucket + index for Marengo clip embeddings (see whitepaper §4)
 #   - Secrets Manager entry for the TwelveLabs API key
-#   - IAM roles (runtime + ECR pull + DDB read + Bedrock invoke + secret read)
+#   - IAM roles (runtime + ECR pull + s3vectors query + Bedrock invoke + secret read)
 #
 # What's NOT here yet (deliberately Phase-2):
 #   - AgentCore Gateway. The agent runs with in-process tools by default.

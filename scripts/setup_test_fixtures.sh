@@ -99,7 +99,25 @@ else
   echo "==> Index already has $INDEX_VIDEOS video(s); skipping ingest."
 fi
 
-# ─── 4. Write TEST_KS_ID into ui/e2e/.env.test ─────────────────────────────
+# ─── 4. Ingest Marengo clip embeddings into the S3 Vector index ───────────
+#
+# Skipped automatically if VECTOR_BUCKET_NAME is unset (lets the script
+# stay useful in scenarios where infra isn't deployed yet). When set, the
+# ingest script is idempotent: re-running for an already-embedded asset
+# just upserts the same vectors.
+if [ -n "${VECTOR_BUCKET_NAME:-}" ]; then
+  echo "==> Ingesting clip embeddings into s3vectors://${VECTOR_BUCKET_NAME}"
+  TL_API_KEY="${TL_API_KEY}" \
+    VECTOR_BUCKET_NAME="${VECTOR_BUCKET_NAME}" \
+    VECTOR_INDEX_NAME="${VECTOR_INDEX_NAME:-clips}" \
+    AWS_REGION="${AWS_REGION:-us-east-1}" \
+    python3 scripts/ingest_vectors.py "$KS_ID"
+else
+  echo "==> VECTOR_BUCKET_NAME not set; skipping vector ingest"
+  echo "    (run scripts/ingest_vectors.py separately when ready)"
+fi
+
+# ─── 5. Write TEST_KS_ID into ui/e2e/.env.test ─────────────────────────────
 mkdir -p ui/e2e
 touch "$ENV_TEST"
 TMP=$(mktemp)
