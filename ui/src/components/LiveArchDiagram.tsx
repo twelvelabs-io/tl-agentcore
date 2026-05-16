@@ -5,18 +5,16 @@
 //   browser → cloudfront → apigw → chat_lambda → runtime
 //                                                  │
 //                                              gateway (when MCP path)
-//                                                  ↓ ↓
-//                                        ask_jockey  lookup_rights
-//                                              ↓           ↓
-//                                        tl_jockey      dynamodb
+//                                                  ↓
+//                                        marengo + pegasus / kb_cache
 //
 // Mapping (handled by callers):
-//   tool_call ask_jockey    → "ask_jockey"  (then "tl_jockey" briefly)
-//   tool_call lookup_rights → "lookup_rights" (then "dynamodb")
-//   tool_result / rationale → "runtime"
-//   text_delta              → "runtime"
-//   done                    → "browser" then null
-//   error                   → null (caller handles error styling separately)
+//   tool_call marengo/pegasus → "marengo_pegasus_tools" (then tl_*)
+//   tool_call kb_cache_*      → "kb_cache_tools" (then dynamodb_kb_cache)
+//   tool_result / rationale   → "runtime"
+//   text_delta                → "runtime"
+//   done                      → "browser" then null
+//   error                     → null (caller handles error styling separately)
 
 import { motion } from "motion/react";
 
@@ -27,12 +25,10 @@ export type NodeId =
   | "chat_lambda"
   | "runtime"
   | "gateway"
-  | "ask_jockey"
   | "lookup_rights"
   | "audience_tools"
   | "marengo_pegasus_tools"
   | "kb_cache_tools"
-  | "tl_jockey"
   | "tl_marengo"
   | "tl_pegasus"
   | "dynamodb_rights"
@@ -46,17 +42,12 @@ export function LiveArchDiagram({
   history = [],
   compact = false,
   hideStudioPath = false,
-  hideJockeyPath = false,
 }: {
   activeNode: NodeId | null;
   history?: NodeId[];
   compact?: boolean;
-  /** Hide the Marengo + Pegasus column. Used on the Agent tab where the
-   *  agent is restricted to ask_jockey + ancillary tools only. */
+  /** Hide the Marengo + Pegasus column. */
   hideStudioPath?: boolean;
-  /** Hide the ask_jockey → TL Jockey column. Used on the Studio tab where
-   *  the agent is restricted to raw TL primitives + cache only. */
-  hideJockeyPath?: boolean;
 }) {
   const stateOf = (id: NodeId): Activity => {
     if (id === activeNode) return "active";
@@ -115,14 +106,13 @@ export function LiveArchDiagram({
       <ArchBranch
         cols={[
           activeNode === "kb_cache_tools" || activeNode === "dynamodb_kb_cache",
-          ...(hideJockeyPath ? [] : [activeNode === "ask_jockey" || activeNode === "tl_jockey"]),
           ...(hideStudioPath ? [] : [activeNode === "marengo_pegasus_tools" || activeNode === "tl_marengo" || activeNode === "tl_pegasus"]),
           activeNode === "lookup_rights" || activeNode === "dynamodb_rights",
           activeNode === "audience_tools" || activeNode === "dynamodb_audiences",
         ]}
       />
 
-      <div className={`grid grid-cols-1 ${gridColsClass(hideStudioPath, hideJockeyPath)} gap-4 max-w-6xl mx-auto`}>
+      <div className={`grid grid-cols-1 ${gridColsClass(hideStudioPath)} gap-4 max-w-6xl mx-auto`}>
         <div className="flex flex-col items-center">
           <ArchCard
             state={stateOf("kb_cache_tools")}
@@ -140,23 +130,6 @@ export function LiveArchDiagram({
             highlightAlways
           />
         </div>
-        {!hideJockeyPath && (
-          <div className="flex flex-col items-center">
-            <ArchCard
-              state={stateOf("ask_jockey")}
-              tag="tool · λ"
-              title="ask_jockey"
-              sub="via Gateway · MCP"
-            />
-            <ArchArrow active={activeNode === "tl_jockey"} label="x-api-key" />
-            <ArchCard
-              state={stateOf("tl_jockey")}
-              tag="external"
-              title="TL Jockey"
-              sub="/v1.3/responses"
-            />
-          </div>
-        )}
         {!hideStudioPath && (
           <div className="flex flex-col items-center">
             <ArchCard
@@ -378,12 +351,11 @@ function ArchBranch({ cols }: { cols: boolean[] }) {
   );
 }
 
-// 5 default columns: kb_cache · ask_jockey · marengo+pegasus · rights · audiences.
-// Each hide-prop drops one. Tailwind needs literal class names so we resolve to
+// Up to 4 default columns: kb_cache · marengo+pegasus · rights · audiences.
+// hideStudio drops one. Tailwind needs literal class names so we resolve to
 // a fixed string here rather than building it dynamically.
-function gridColsClass(hideStudio: boolean, hideJockey: boolean): string {
-  const cols = 5 - (hideStudio ? 1 : 0) - (hideJockey ? 1 : 0);
-  if (cols === 5) return "md:grid-cols-5";
+function gridColsClass(hideStudio: boolean): string {
+  const cols = 4 - (hideStudio ? 1 : 0);
   if (cols === 4) return "md:grid-cols-4";
   if (cols === 3) return "md:grid-cols-3";
   return "md:grid-cols-2";
@@ -394,7 +366,6 @@ export function nodeForEvent(ev: { type: string; tool?: string }): NodeId | null
   if (ev.type === "session") return "runtime";
   if (ev.type === "tool_call") {
     const t = ev.tool || "";
-    if (t === "ask_jockey" || t === "ask-jockey") return "ask_jockey";
     if (t === "lookup_rights" || t === "lookup-rights") return "lookup_rights";
     if (t === "list_audiences" || t === "lookup_audience") return "audience_tools";
     if (t === "marengo_search" || t === "pegasus_analyze" || t === "list_tl_indexes")
@@ -413,7 +384,6 @@ export function nodeForEvent(ev: { type: string; tool?: string }): NodeId | null
 // --- helper: which downstream node a tool call bounces to after ~400ms ---
 export function downstreamFor(toolName: string | undefined): NodeId | null {
   if (!toolName) return null;
-  if (toolName === "ask_jockey" || toolName === "ask-jockey") return "tl_jockey";
   if (toolName === "marengo_search" || toolName === "list_tl_indexes") return "tl_marengo";
   if (toolName === "pegasus_analyze") return "tl_pegasus";
   if (toolName === "get_kb_overview" || toolName === "list_kb_assets" || toolName === "lookup_asset_profile")

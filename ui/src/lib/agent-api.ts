@@ -1,5 +1,5 @@
-// Talk to the deployed Bedrock-agent over WebSocket. Streams events as they
-// arrive; no integration-timeout ceiling.
+// Talk to the deployed AgentCore Runtime over WebSocket. Streams events as
+// they arrive; no integration-timeout ceiling.
 
 import { getAccessToken } from "./auth";
 
@@ -19,23 +19,6 @@ export type AgentTurnInput = {
   knowledge_store_id: string;
   prompt: string;
   session_id?: string;
-  mode?: "bedrock" | "agentcore";
-};
-
-export type JockeyDirectInput = {
-  knowledge_store_id: string;
-  prompt: string;
-  instructions?: string;
-  session_id?: string;
-  text_format?: object;
-  include?: string[];
-  model?: string;
-};
-
-export type JockeyDirectResult = {
-  text: string;
-  session_id?: string;
-  usage?: { input_tokens?: number; output_tokens?: number };
 };
 
 const WS_URL = (import.meta.env.VITE_AGENT_WS_URL || "").replace(/\/$/, "");
@@ -76,15 +59,16 @@ export async function* streamAgentTurn(input: AgentTurnInput): AsyncGenerator<Ag
     setTimeout(() => rej(new Error("WS connect timeout")), 10_000);
   });
 
-  // Send the turn. Mode "agentcore" routes the chat lambda through
-  // InvokeAgentRuntime, and forwards the user's Cognito access token so the
-  // Strands agent (in the Runtime container) can call the MCP Gateway as
-  // that user — end-to-end real auth.
-  const wireMessage =
-    input.mode === "agentcore"
-      ? { mode: "agentcore", knowledge_store_id: input.knowledge_store_id, prompt: input.prompt, session_id: input.session_id, access_token: token || undefined }
-      : { knowledge_store_id: input.knowledge_store_id, prompt: input.prompt, session_id: input.session_id };
-  ws.send(JSON.stringify(wireMessage));
+  // Wire format: route the chat lambda through InvokeAgentRuntime, forwarding
+  // the user's Cognito access token so the Strands agent (in the Runtime
+  // container) can call the MCP Gateway as that user — end-to-end real auth.
+  ws.send(JSON.stringify({
+    mode: "agentcore",
+    knowledge_store_id: input.knowledge_store_id,
+    prompt: input.prompt,
+    session_id: input.session_id,
+    access_token: token || undefined,
+  }));
 
   try {
     while (true) {
@@ -101,50 +85,3 @@ export async function* streamAgentTurn(input: AgentTurnInput): AsyncGenerator<Ag
   }
 }
 
-/** Direct Jockey passthrough over WebSocket. Used by Reel + Lens — these calls
- * regularly take >30s for structured-output, which the HTTP API path can't
- * accommodate. The WS path bypasses the integration timeout. */
-export async function callJockeyDirect(input: JockeyDirectInput): Promise<JockeyDirectResult> {
-  if (!WS_URL) throw new Error("VITE_AGENT_WS_URL not set");
-
-  const token = await getAccessToken();
-  const params = new URLSearchParams();
-  if (token) params.set("token", token);
-  else if (PWD) params.set("password", PWD);
-  const ws = new WebSocket(`${WS_URL}?${params.toString()}`);
-
-  await new Promise<void>((res, rej) => {
-    ws.onopen = () => res();
-    setTimeout(() => rej(new Error("WS connect timeout")), 10_000);
-  });
-
-  return new Promise<JockeyDirectResult>((resolve, reject) => {
-    let resolved = false;
-    let collected: JockeyDirectResult | null = null;
-
-    ws.onmessage = (ev) => {
-      const lines = String(ev.data).split("\n").map((s) => s.trim()).filter(Boolean);
-      for (const line of lines) {
-        try {
-          const obj = JSON.parse(line) as AgentEvent;
-          if (obj.type === "result") {
-            collected = { text: obj.text, session_id: obj.session_id, usage: obj.usage };
-          } else if (obj.type === "error") {
-            if (!resolved) { resolved = true; reject(new Error(obj.message)); ws.close(); }
-          } else if (obj.type === "done") {
-            if (!resolved) {
-              resolved = true;
-              if (collected) resolve(collected);
-              else reject(new Error("done without result"));
-              ws.close();
-            }
-          }
-        } catch { /* skip malformed */ }
-      }
-    };
-    ws.onerror = () => { if (!resolved) { resolved = true; reject(new Error("WebSocket error")); } };
-    ws.onclose = () => { if (!resolved) { resolved = true; reject(new Error("WS closed before result")); } };
-
-    ws.send(JSON.stringify({ mode: "jockey", ...input }));
-  });
-}

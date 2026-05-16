@@ -1,8 +1,8 @@
 // "Agent" tab — chat with the Strands agent on AgentCore Runtime.
-// Four tools at the agent's disposal: ask_jockey, lookup_rights,
-// list_audiences, lookup_audience. The right rail surfaces the live
-// architecture diagram so a viewer can watch each tool fire as the agent
-// reasons.
+// The agent has access to the kb_cache tools (Tier 1) and the live
+// TwelveLabs primitives marengo_search / pegasus_analyze / list_tl_indexes
+// (Tier 2). The right rail surfaces the live architecture diagram so a
+// viewer can watch each tool fire as the agent reasons.
 
 import { useRef, useState } from "react";
 import { motion } from "motion/react";
@@ -52,33 +52,13 @@ export function AgentCore() {
     };
     const t0 = Date.now();
 
-    // The Agent tab demonstrates Jockey-level orchestration. Marengo +
-    // Pegasus + cache primitives are reserved for the Studio tab; the
-    // Newsroom Vault tools (entity collections, POIs, dossiers, embed
-    // export) ARE fair game here — they're how a producer drives the
-    // archive workflow from chat.
-    //
-    // Routing rules are spelled out explicitly because the SYSTEM_PROMPT
-    // tier-list frontloads ask_jockey for KB questions, which causes the
-    // model to mis-route registry questions ("what POI collections do we
-    // have?") into ask_jockey, which then returns "no POI metadata found"
-    // because Jockey reasons over video content, not the registry.
-    const guardedPrompt =
-      "ROUTING (apply BEFORE ask_jockey):\n" +
-      "- POI / collection / entity / 'who appears' / 'persons of interest' → list_entity_collections, list_pois, lookup_poi, find_appearances, entities_in_asset.\n" +
-      "- 'find every clip of [person]' → list_entity_collections → list_pois → entity_search OR find_appearances.\n" +
-      "- 'summarize each appearance' / bulk Pegasus → open_dossier → close_dossier.\n" +
-      "- 'follow up' / 'and then what about' (with prior session_id) → ask_followup.\n" +
-      "- Embeddings export → export_embeddings, embed_text.\n" +
-      "- Generic Q&A about video CONTENT (what happens in the videos, what's said, dramatic arc) → ask_jockey.\n" +
-      "- Rights / audience questions → lookup_rights / list_audiences / lookup_audience as ancillary.\n\n" +
-      "FORBIDDEN this turn (Studio-only): marengo_search, pegasus_analyze, list_tl_indexes, get_kb_overview, list_kb_assets, lookup_asset_profile.\n\n" +
-      "User question:\n" + text;
+    // No additional routing scaffold — the agent's system prompt already
+    // handles tier discipline (cache → live primitives).
+    const guardedPrompt = text;
 
     try {
       let acc = "";
       for await (const ev of streamAgentTurn({
-        mode: "agentcore",
         knowledge_store_id: ks._id,
         prompt: guardedPrompt,
         session_id: sessionId,
@@ -177,10 +157,12 @@ export function AgentCore() {
       <aside className="lg:border-l lg:pl-8" style={{ borderColor: "var(--color-rule)" }}>
         <div className="label">§ II · Tools</div>
         <div className="rule mt-3 mb-4" />
-        <ToolRow name="ask_jockey"      hint="video reasoning over the active KB" />
-        <ToolRow name="lookup_rights"   hint="DDB · licensing window + talent" />
-        <ToolRow name="list_audiences"  hint="DDB · catalog of audience segments" />
-        <ToolRow name="lookup_audience" hint="DDB · genre + daypart affinity" />
+        <ToolRow name="get_kb_overview"      hint="cache · corpus summary" />
+        <ToolRow name="list_kb_assets"       hint="cache · filtered asset list" />
+        <ToolRow name="lookup_asset_profile" hint="cache · single-asset digest" />
+        <ToolRow name="marengo_search"       hint="TL · ranked clip-level retrieval" />
+        <ToolRow name="pegasus_analyze"      hint="TL · single-video generation" />
+        <ToolRow name="list_tl_indexes"      hint="TL · discover Marengo indexes" />
 
         <div className="label mt-12">§ III · Stack</div>
         <div className="rule mt-3 mb-4" />
@@ -207,7 +189,7 @@ export function AgentCore() {
           bearer-JWT auth, OTEL traces.
         </p>
         <div className="rule mt-6 mb-10" />
-        <LiveArchDiagram activeNode={activeNode} history={nodeHistory} hideStudioPath />
+        <LiveArchDiagram activeNode={activeNode} history={nodeHistory} />
       </section>
     </div>
   );
@@ -217,10 +199,10 @@ function rid() { return Math.random().toString(36).slice(2, 10); }
 
 function Suggestions({ onPick }: { onPick: (s: string) => void }) {
   const samples = [
-    "Find a Brad Pitt drama and check its EMEA broadcast clearance.",
-    "Which clips would over-index for Men 35-54?",
-    "Pick one comedy and one thriller, then check rights for both.",
     "Summarize what's in this knowledge base in two sentences.",
+    "Find clips that look like an action set-piece.",
+    "Pick three clips that could open a 30-second highlight reel.",
+    "What's the most kinetic moment in this corpus?",
   ];
   return (
     <div className="py-12">

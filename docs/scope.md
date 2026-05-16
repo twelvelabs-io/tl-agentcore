@@ -25,10 +25,10 @@ we invest in long-form prose in the paper itself.
 | R3 | Marengo semantic clip search as Tier-2 fallback | ☐ |
 | R4 | Pegasus generative analysis as Tier-3 fallback | ☐ |
 | R5 | Live "tool trace" visualization (architecture diagram lighting up per node) | ☐ |
-| R6 | Side-by-side comparison vs. a managed Jockey call (same prompt, same KB) | ☐ |
-| R7 | HLS back-to-back playback of the produced reel | ☐ |
-| R8 | EDL export (XML / CSV / FCP7) for NLE handoff | ☐ |
-| R9 | Pegasus 1.5 on Bedrock Marketplace when GA (today: API + agent wrapper) | ☐ |
+| R6 | HLS back-to-back playback of the produced reel | ☐ |
+| R7 | EDL export (XML / CSV / FCP7) for NLE handoff | ☐ |
+| R8 | Pegasus 1.5 on Bedrock Marketplace when GA (today: API + agent wrapper) | ☐ |
+| R9 | Marengo-ranked alternates per clip with one-click producer swap | ☐ |
 
 ## Generalization promises (architectural)
 

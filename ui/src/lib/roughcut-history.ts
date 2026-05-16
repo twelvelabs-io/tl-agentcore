@@ -11,20 +11,13 @@ export type RoughCutHistoryEntry = {
   title: string;
   script: string;
   fps: number;
-  plan: RoughCutPlan;             // primary plan (Jockey-direct in compare mode)
+  plan: RoughCutPlan;
   ks_id?: string;
   ks_name?: string;
   render?: { job_id: string; render_id?: string; output_url?: string; status: string };
-  /** "jockey" | "agent" | "compare". Older entries don't have this — treat as "jockey". */
-  mode?: "jockey" | "agent" | "compare";
-  /** Populated for compare entries — both sides' results, including timing + errors. */
-  compare?: {
-    jockey: { plan: RoughCutPlan | null; elapsed_ms: number; err?: string };
-    agent:  { plan: RoughCutPlan | null; elapsed_ms: number; err?: string };
-  };
 };
 
-const KEY = "jocky.roughcut.history.v1";
+const KEY = "tl-agentcore.roughcut.history.v1";
 const MAX = 20;
 
 function read(): RoughCutHistoryEntry[] {

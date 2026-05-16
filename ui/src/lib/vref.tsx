@@ -1,6 +1,6 @@
-// Render Jockey free-form responses as markdown with inline reference tags.
+// Render free-form agent responses as markdown with inline reference tags.
 //
-// Jockey emits two reference tag types in prose:
+// The agent may emit reference tag types in prose:
 //   <vref id="<uuid>"></vref>                                 — KS item
 //   <vref id="<uuid>" start="00:00" end="00:05"></vref>      — KS item w/ clip
 //   <tref id="<token>"></tref>                                — text snippet

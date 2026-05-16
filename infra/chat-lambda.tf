@@ -1,7 +1,7 @@
 # Chat lambda + its IAM role.
 #
 # Path B in the architecture: browser ↔ API Gateway WebSocket ↔ chat lambda
-# ↔ AgentCore Runtime (or TwelveLabs Jockey, for the comparison demo path).
+# ↔ AgentCore Runtime.
 #
 # The lambda has BOTH the $connect/$default WS routes (sync handshake) and
 # an async self-invoke pattern for long AgentCore runs (~60-300s). The
@@ -51,7 +51,7 @@ data "aws_iam_policy_document" "chat_perms" {
       "${aws_bedrockagentcore_agent_runtime.this.agent_runtime_arn}/*",
     ]
   }
-  # Read the TL API key (for the Jockey-direct comparison path).
+  # Read the TL API key (forwarded to the AgentCore Runtime container).
   statement {
     sid       = "ReadTLKey"
     actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]

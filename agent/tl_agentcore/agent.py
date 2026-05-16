@@ -12,10 +12,6 @@ Tools, by speed class:
     marengo_search        ranked clip-level retrieval (cache-joined when ks_id passed)
     pegasus_analyze       single-video generative analysis
 
-  Tier 3 — managed orchestration (30s-3min):
-    ask_jockey            full Jockey /responses (kept for side-by-side comparison)
-    ask_followup          continue a Jockey thread
-
 Phase 1: tools call TL/DDB directly (in-process).
 Phase 2: same tool surface, exposed through AgentCore Gateway as MCP. Agent
 contract doesn't change — only the wiring inside build_agent().
@@ -24,7 +20,6 @@ contract doesn't change — only the wiring inside build_agent().
 from __future__ import annotations
 
 import os
-import re
 from typing import Optional
 
 import boto3
@@ -37,9 +32,6 @@ TL_API_KEY_SECRET = os.environ.get("TL_API_KEY_SECRET")
 TL_API_KEY = os.environ.get("TL_API_KEY")  # local dev fallback
 MODEL_ID = os.environ.get(
     "AGENT_MODEL_ID",
-    # Sonnet 4.6 mirrors Jockey's frontier-model class. With kb_cache
-    # pre-built, the agent finishes in fewer turns; the per-turn latency
-    # hit is offset.
     "us.anthropic.claude-sonnet-4-6",
 )
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
@@ -64,36 +56,6 @@ def _tl_key() -> str:
     r = _secrets.get_secret_value(SecretId=TL_API_KEY_SECRET)
     _cached_key = r["SecretString"]
     return _cached_key
-
-
-_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
-
-
-def _translate_vrefs(text: str, ks_id: str) -> str:
-    """Jockey emits KS-item ids (ksi_<uuid> minus prefix). The cache + EDL
-    layer is keyed by real asset_id. Look each item up, rewrite occurrences
-    in text."""
-    uuids = list(set(_UUID_RE.findall(text)))
-    if not uuids:
-        return text
-    key = _tl_key()
-    mapping: dict[str, str] = {}
-    with httpx.Client(timeout=60) as client:
-        for u in uuids:
-            try:
-                r = client.get(
-                    f"{TL_BASE_URL}/knowledge-stores/{ks_id}/items/ksi_{u}",
-                    headers={"x-api-key": key},
-                )
-                if r.status_code == 200:
-                    j = r.json()
-                    if j.get("asset_id"):
-                        mapping[u] = j["asset_id"]
-            except Exception:
-                continue
-    if not mapping:
-        return text
-    return _UUID_RE.sub(lambda m: mapping.get(m.group(0), m.group(0)), text)
 
 
 # ─── DDB helpers (kb_cache table) ───────────────────────────────────────────
@@ -150,100 +112,6 @@ def _ddb_value(v):
     if "SS" in v: return list(v["SS"])
     if "NS" in v: return [float(x) if "." in x else int(x) for x in v["NS"]]
     return None
-
-
-# ─── Tier 3 — managed orchestration (Jockey) ────────────────────────────────
-@tool
-def ask_jockey(knowledge_store_id: str, prompt: str, instructions: Optional[str] = None) -> str:
-    """Send a natural-language question to TwelveLabs Jockey, the managed
-    video-reasoning agent that has indexed the organization's video library.
-
-    Use sparingly — slow (30s-3min). Kept in the catalog so the demo can
-    show a Jockey-vs-AgentCore side-by-side comparison on the same prompt.
-
-    Args:
-        knowledge_store_id: TL knowledge-store id (form: ks_xxxxxxxx).
-        prompt: the natural-language question to ask Jockey.
-        instructions: optional system instructions to append for this call.
-
-    Returns:
-        Jockey's grounded answer as text, with `<vref>` tags rewritten to use
-        real asset_ids that downstream tools can join on.
-    """
-    key = _tl_key()
-    body: dict = {
-        "model": "jockey1.0",
-        "knowledge_store_id": knowledge_store_id,
-        "input": [{"type": "message", "role": "user", "content": prompt}],
-    }
-    if instructions:
-        body["instructions"] = instructions
-    with httpx.Client(timeout=240) as client:
-        r = client.post(
-            f"{TL_BASE_URL}/responses",
-            headers={"x-api-key": key, "content-type": "application/json"},
-            json=body,
-        )
-    if r.status_code >= 400:
-        return f"jockey error {r.status_code}: {r.text[:500]}"
-    j = r.json()
-    chunks: list[str] = []
-    for o in j.get("output", []):
-        if o.get("type") == "message":
-            for c in o.get("content", []):
-                if c.get("type") == "output_text":
-                    chunks.append(c["text"])
-    text = "\n".join(chunks)
-    try:
-        text = _translate_vrefs(text, knowledge_store_id)
-    except Exception:
-        pass
-    return text
-
-
-@tool
-def ask_followup(knowledge_store_id: str, session_id: str, prompt: str) -> dict:
-    """Continue a Jockey thread — cheaper than ask_jockey when the user's
-    question is a follow-up and you have a session_id from a prior call.
-
-    Args:
-        knowledge_store_id: same KS as the original session.
-        session_id: returned in the prior /responses call.
-        prompt: the follow-up question.
-
-    Returns:
-        Dict with: text (answer), session_id (reusable).
-    """
-    if not (knowledge_store_id and session_id and prompt):
-        return {"error": "knowledge_store_id, session_id, and prompt required"}
-    key = _tl_key()
-    body = {
-        "model": "jockey1.0",
-        "knowledge_store_id": knowledge_store_id,
-        "session_id": session_id,
-        "input": [{"type": "message", "role": "user", "content": prompt}],
-    }
-    with httpx.Client(timeout=240) as client:
-        r = client.post(
-            f"{TL_BASE_URL}/responses",
-            headers={"x-api-key": key, "content-type": "application/json"},
-            json=body,
-        )
-    if r.status_code >= 400:
-        return {"error": f"jockey {r.status_code}: {r.text[:400]}"}
-    j = r.json()
-    chunks: list[str] = []
-    for o in j.get("output") or []:
-        if o.get("type") == "message":
-            for c in o.get("content") or []:
-                if c.get("type") == "output_text":
-                    chunks.append(c.get("text", ""))
-    text = "\n".join(chunks)
-    try:
-        text = _translate_vrefs(text, knowledge_store_id)
-    except Exception:
-        pass
-    return {"text": text, "session_id": j.get("session_id") or session_id}
 
 
 # ─── Tier 2 — TwelveLabs primitives ─────────────────────────────────────────
@@ -530,11 +398,6 @@ If the cache is empty (`cached: False`) or returns no matches, fall through to T
 5. **pegasus_analyze(target, prompt)** — single-video generation. Use ONLY when the cached `lookup_asset_profile` doesn't already answer your question.
 6. **list_tl_indexes()** — discover Marengo indexes. Skip when an index_id is already in context (e.g. from `get_kb_overview`).
 
-### Tier 3 — Managed orchestration (TL Jockey · 30s-3min)
-
-7. **ask_jockey(knowledge_store_id, prompt)** — full Jockey orchestration. Kept in the catalog for side-by-side comparison demos. Don't reach for it when Tier 1 + Tier 2 cover the question.
-8. **ask_followup(knowledge_store_id, session_id, prompt)** — continue an ask_jockey thread.
-
 ## Speed playbook for a multi-clip rough cut
 
 1. `get_kb_overview` (cheap, instant) — see what moods and roles exist, grab the `marengo_index_id`.
@@ -645,8 +508,6 @@ def build_agent(access_token: Optional[str] = None) -> tuple[Agent, str]:
             get_kb_overview, list_kb_assets, lookup_asset_profile,
             # Tier 2 — live TL primitives
             list_tl_indexes, marengo_search, pegasus_analyze,
-            # Tier 3 — managed (kept for comparison demos)
-            ask_jockey, ask_followup,
         ],
     )
     return agent, "in-process"

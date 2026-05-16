@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
 /*
- * "Jockey · Lab" — editorial / edit-suite hybrid.
+ * tl-agentcore Rough Cut Lab — editorial / edit-suite hybrid.
  * Filmic dark palette with one warm amber accent.
  */
 
@@ -241,7 +241,7 @@ body {
 }
 
 /*
- * Markdown rendering for Jockey responses.
+ * Markdown rendering for agent responses.
  * Spacing tuned for editorial reading; lists feel like a periodical sidebar.
  */
 .response-md {

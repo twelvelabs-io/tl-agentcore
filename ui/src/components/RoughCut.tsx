@@ -1,14 +1,14 @@
 // "Rough Cut" — the headline workflow.
 //
-// User pastes a script (free-form prose, treatment, scene outline — Jockey can
-// parse any of them). Agent reads the script + the active KB's contents,
-// assembles a scene-by-scene plan with clip references and timecodes, and the
-// UI renders a producer-readable timeline with EDL export and (Phase 2) a
-// MediaConvert preview render.
+// User pastes a script (free-form prose, treatment, scene outline; the
+// agent parses any of them). The AgentCore Strands agent reads the script
+// plus the active KB's contents, assembles a scene-by-scene plan with clip
+// references and timecodes, and the UI renders a producer-readable
+// timeline with EDL export and (Phase 2) a MediaConvert preview render.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "motion/react";
-import { callJockeyDirect, streamAgentTurn } from "../lib/agent-api";
+import { streamAgentTurn } from "../lib/agent-api";
 import { useStore } from "../lib/store";
 import { getAsset, getStitch, startStitch, type Asset, type Channel, type StitchJob } from "../lib/api";
 import { ChannelPlayer } from "./ChannelPlayer";
@@ -110,31 +110,13 @@ const SCHEMA = {
   required: ["title", "scenes"],
 };
 
-const INSTRUCTIONS = `You are an experienced film editor assembling a rough cut from production dailies.
+// Rough Cut prompt — the AgentCore Strands agent orchestrates TwelveLabs
+// primitives directly with a cache-first discipline: pre-built kb_cache
+// (DDB · sub-10ms) for the primary pick, then a Marengo pass per beat for
+// alternates, and Pegasus only when neither covers a take-note.
+const AGENT_INSTRUCTIONS = `You are an experienced film editor assembling a rough cut by orchestrating TwelveLabs primitives directly with a **cache-first** discipline. Use the pre-built kb_cache (DDB · sub-10ms) before reaching for live Marengo/Pegasus.
 
-You are given (1) a script, treatment, or scene outline written in free-form prose, and (2) an indexed knowledge base of dailies clips. For each beat, scene, or act in the script, select the clips that best match — favoring scene-organized footage by filename when available (e.g. clips with names like "R01_01 Air EST Utah" match "establishing aerial of Utah").
-
-For each chosen clip:
-- Use its TwelveLabs asset_id as video_reference (a 24-char hex string).
-- Pick the best in/out range within the clip — prefer 3-8 second cuts for B-roll, longer for hero/interview shots.
-- Note the role (establishing, wide, medium, close-up, insert, cutaway, b-roll, hero).
-- Add a one-line take_note explaining why this clip and range fit the moment.
-
-Match the script's pacing — establishing scenes get longer, action gets quick cuts. Vary angles within a scene. Don't repeat the same clip in adjacent positions.
-
-Return STRICT JSON conforming to the provided schema. No prose outside the JSON.`;
-
-// Agent-mode prompt scaffold for Rough Cut — DELIBERATELY bypasses Jockey.
-// This is the "build a Jockey clone using AgentCore + raw TwelveLabs
-// primitives" demo path. The agent uses marengo_search per beat to find
-// candidate clips and (optionally) pegasus_analyze for richer take notes,
-// then composes the plan itself. Comparing this side-by-side with the
-// Jockey-direct path is the architecture story.
-const AGENT_INSTRUCTIONS = `You are an experienced film editor assembling a rough cut by orchestrating TwelveLabs primitives directly — but **cache-first**, the way Jockey itself does internally. Use the pre-built kb_cache (DDB · sub-10ms) before reaching for live Marengo/Pegasus.
-
-**DO NOT call ask_jockey.** This run intentionally bypasses Jockey to demonstrate the same architecture — cache → Marengo enriched with cache → Pegasus only when needed.
-
-## Approach — keep it tight, ~2-4 turns total
+## Approach — keep it tight, ~3 turns total
 
 ### Turn 1 — fan out cheap calls in parallel (one model turn, multiple tool_calls):
 - **get_kb_overview(ks)** — corpus moods, styles, sample titles, AND \`marengo_index_id\`.
@@ -198,8 +180,8 @@ If you DID call marengo_search, prefer Marengo's actual start/end (clamped to �
 
 ## Absolute rules
 
-- DO NOT call ask_jockey.
-- Prefer cache (Tier 1) over Marengo (Tier 2) over Pegasus (Tier 3). Most beats should resolve from cache alone.
+- Prefer cache (Tier 1) for the PRIMARY pick. Most beat primaries should resolve from cache alone.
+- Run \`marengo_search\` per beat REGARDLESS of cache hit — it is the source of the \`alternatives\` array.
 - Within a single turn, emit ALL tool calls for that turn at once — parallel execution is the point.
 - video_reference is a 24-char hex id (asset_id from cache OR video_id from Marengo). Never invent ids, never use filenames.
 - Lead with 1-2 sentences of commentary BEFORE the JSON (mention cache hit/miss + index used).
@@ -291,7 +273,6 @@ async function runAgentRoughCut(
   const wrappedPrompt = `${AGENT_INSTRUCTIONS}\n\n---\n\nProducer's brief / script:\n${script.trim()}\n\nKnowledge store id: ${ksId}\n\nGo.`;
   let acc = "";
   for await (const ev of streamAgentTurn({
-    mode: "agentcore",
     knowledge_store_id: ksId,
     prompt: wrappedPrompt,
   })) {
@@ -318,30 +299,6 @@ async function runAgentRoughCut(
   return clean;
 }
 
-async function runJockeyRoughCut(ksId: string, script: string): Promise<RoughCutPlan> {
-  const resp = await callJockeyDirect({
-    knowledge_store_id: ksId,
-    instructions: INSTRUCTIONS,
-    prompt: `Build a rough cut from the dailies in the active knowledge base, following this script:\n\n${script.trim()}`,
-    text_format: { type: "json_schema", name: "rough_cut", schema: SCHEMA },
-  });
-  let parsed: RoughCutPlan;
-  try { parsed = JSON.parse(resp.text); }
-  catch (e) { throw new Error(`Jockey returned non-JSON: ${String(e)}\n\n${resp.text.slice(0, 400)}`); }
-  return sanitizePlan(parsed);
-}
-
-type Mode = "jockey" | "agent" | "compare";
-
-type CompareSide = {
-  plan: RoughCutPlan | null;
-  elapsed: number;          // ms
-  err: string | null;
-  busy: boolean;
-  toolCount: number;
-};
-const EMPTY_SIDE: CompareSide = { plan: null, elapsed: 0, err: null, busy: false, toolCount: 0 };
-
 export function RoughCut() {
   const ks = useStore((s) => s.ks);
   const [script, setScript] = useState(SAMPLE_SCRIPT);
@@ -356,9 +313,6 @@ export function RoughCut() {
   const renderPollRef = useRef<number | null>(null);
   const [history, setHistory] = useState<RoughCutHistoryEntry[]>([]);
   const [activeEntryId, setActiveEntryId] = useState<string | null>(null);
-  const [mode, setMode] = useState<Mode>("jockey");
-  const [cmpJockey, setCmpJockey] = useState<CompareSide>(EMPTY_SIDE);
-  const [cmpAgent,  setCmpAgent]  = useState<CompareSide>(EMPTY_SIDE);
 
   // Load history on mount.
   useEffect(() => { setHistory(loadHistory()); }, []);
@@ -371,20 +325,15 @@ export function RoughCut() {
     return () => clearInterval(id);
   }, [busy]);
 
-  // When a plan lands (any mode, either compare side), prefetch assets so
-  // cards have filenames + thumbnails.
+  // When a plan lands, prefetch assets (primaries + alternates) so cards
+  // have filenames and thumbnails.
   useEffect(() => {
+    if (!plan) return;
     const ids = new Set<string>();
-    const collect = (p: RoughCutPlan | null) => {
-      if (!p) return;
-      for (const s of p.scenes) for (const c of s.clips || []) {
-        ids.add(c.video_reference);
-        for (const a of c.alternatives || []) ids.add(a.video_reference);
-      }
-    };
-    collect(plan);
-    collect(cmpJockey.plan);
-    collect(cmpAgent.plan);
+    for (const s of plan.scenes) for (const c of s.clips || []) {
+      ids.add(c.video_reference);
+      for (const a of c.alternatives || []) ids.add(a.video_reference);
+    }
     const need = [...ids].filter((id) => !assetCache[id]);
     if (!need.length) return;
     Promise.all(need.map((id) => getAsset(id).then((a) => [id, a] as const).catch(() => null))).then((rs) => {
@@ -392,7 +341,7 @@ export function RoughCut() {
       for (const r of rs) if (r) next[r[0]] = r[1];
       setAssetCache((cur) => ({ ...cur, ...next }));
     });
-  }, [plan, cmpJockey.plan, cmpAgent.plan]);
+  }, [plan]);
 
   const totalSec = useMemo(() => (plan ? totalDuration(plan) : 0), [plan]);
   const clipCount = useMemo(() => (plan ? plan.scenes.reduce((s, sc) => s + (sc.clips?.length || 0), 0) : 0), [plan]);
@@ -435,14 +384,11 @@ export function RoughCut() {
 
   const generate = async () => {
     if (!ks || !script.trim()) return;
-    if (mode === "compare") return runCompare();
     setBusy(true); setErr(null); setPlan(null); setElapsed(0);
     setRender(null); setRenderErr(null);
     if (renderPollRef.current) { clearInterval(renderPollRef.current); renderPollRef.current = null; }
     try {
-      const parsed = mode === "agent"
-        ? await runAgentRoughCut(ks._id, script)
-        : await runJockeyRoughCut(ks._id, script);
+      const parsed = await runAgentRoughCut(ks._id, script);
       setPlan(parsed);
       const saved = saveEntry({
         title: parsed.title || "Untitled",
@@ -451,7 +397,6 @@ export function RoughCut() {
         plan: parsed,
         ks_id: ks._id,
         ks_name: ks.name,
-        mode,
       });
       setActiveEntryId(saved.id);
       setHistory(loadHistory());
@@ -462,89 +407,13 @@ export function RoughCut() {
     }
   };
 
-  const runCompare = async () => {
-    if (!ks || !script.trim()) return;
-    setErr(null); setPlan(null);
-    setRender(null); setRenderErr(null);
-    if (renderPollRef.current) { clearInterval(renderPollRef.current); renderPollRef.current = null; }
-    const startedScript = script;
-    const startedKs = ks;
-    setCmpJockey({ ...EMPTY_SIDE, busy: true });
-    setCmpAgent({ ...EMPTY_SIDE, busy: true });
-    const t0 = Date.now();
-
-    // Hold the latest results in closures so we can save once both finish.
-    let finalJ: CompareSide = { ...EMPTY_SIDE, busy: true };
-    let finalA: CompareSide = { ...EMPTY_SIDE, busy: true };
-
-    const maybeSave = () => {
-      if (finalJ.busy || finalA.busy) return; // wait for both
-      // At least one side must have a plan to save.
-      if (!finalJ.plan && !finalA.plan) return;
-      const primary = finalJ.plan || finalA.plan!;
-      const saved = saveEntry({
-        title: `Compare · ${primary.title || "Untitled"}`,
-        script: startedScript,
-        fps,
-        plan: primary,
-        ks_id: startedKs._id,
-        ks_name: startedKs.name,
-        mode: "compare",
-        compare: {
-          jockey: { plan: finalJ.plan, elapsed_ms: finalJ.elapsed, err: finalJ.err || undefined },
-          agent:  { plan: finalA.plan, elapsed_ms: finalA.elapsed, err: finalA.err || undefined },
-        },
-      });
-      setActiveEntryId(saved.id);
-      setHistory(loadHistory());
-    };
-
-    void runJockeyRoughCut(ks._id, script)
-      .then((p) => { finalJ = { plan: p, elapsed: Date.now() - t0, err: null, busy: false, toolCount: 1 }; setCmpJockey(finalJ); maybeSave(); })
-      .catch((e) => { finalJ = { plan: null, elapsed: Date.now() - t0, err: String(e), busy: false, toolCount: 0 }; setCmpJockey(finalJ); maybeSave(); });
-
-    let agentTools = 0;
-    void runAgentRoughCut(ks._id, script, (kind) => { if (kind === "tool_call") agentTools++; })
-      .then((p) => { finalA = { plan: p, elapsed: Date.now() - t0, err: null, busy: false, toolCount: agentTools }; setCmpAgent(finalA); maybeSave(); })
-      .catch((e) => { finalA = { plan: null, elapsed: Date.now() - t0, err: String(e), busy: false, toolCount: agentTools }; setCmpAgent(finalA); maybeSave(); });
-  };
-
-  const cmpBusy = cmpJockey.busy || cmpAgent.busy;
-
   const restoreEntry = (entry: RoughCutHistoryEntry) => {
     setScript(entry.script);
     setFps(entry.fps);
     setActiveEntryId(entry.id);
     setErr(null);
     setRenderErr(null);
-
-    if (entry.mode === "compare" && entry.compare) {
-      // Restore to compare mode with both sides populated.
-      setMode("compare");
-      setPlan(null);
-      setCmpJockey({
-        plan: entry.compare.jockey.plan,
-        elapsed: entry.compare.jockey.elapsed_ms,
-        err: entry.compare.jockey.err || null,
-        busy: false,
-        toolCount: 1,
-      });
-      setCmpAgent({
-        plan: entry.compare.agent.plan,
-        elapsed: entry.compare.agent.elapsed_ms,
-        err: entry.compare.agent.err || null,
-        busy: false,
-        toolCount: 0,
-      });
-      setRender(null);
-      return;
-    }
-
-    // Single-mode restore (jockey or agent).
-    setMode(entry.mode === "agent" ? "agent" : "jockey");
     setPlan(entry.plan);
-    setCmpJockey(EMPTY_SIDE);
-    setCmpAgent(EMPTY_SIDE);
     if (entry.render?.status === "COMPLETE" && entry.render.output_url) {
       setRender({
         job_id: entry.render.job_id,
@@ -636,9 +505,6 @@ export function RoughCut() {
         <Pill label="Frame rate" value={String(fps)} options={DEFAULT_FPS_OPTIONS.map((o) => ({ value: String(o.value), label: o.label }))} onChange={(v) => setFps(Number(v))} />
       </header>
 
-      <ModeToggle mode={mode} onChange={setMode} />
-
-
       <div className="rule mt-4 mb-6" />
 
       <HistoryStrip
@@ -648,14 +514,14 @@ export function RoughCut() {
         onDelete={removeEntry}
       />
 
-      <div className={mode === "compare" ? "" : "grid lg:grid-cols-[1fr_1.4fr] gap-12"}>
-        {/* LEFT: script input (full-width in compare mode) */}
-        <section className={mode === "compare" ? "mb-10" : ""}>
+      <div className="grid lg:grid-cols-[1fr_1.4fr] gap-12">
+        {/* LEFT: script input */}
+        <section>
           <div className="label">§ I · Script</div>
           <div className="rule mt-3 mb-4" />
           <textarea
             className="bg-transparent border w-full p-4 outline-none text-sm leading-relaxed font-mono"
-            style={{ borderColor: "var(--color-rule)", minHeight: mode === "compare" ? "30vh" : "60vh" }}
+            style={{ borderColor: "var(--color-rule)", minHeight: "60vh" }}
             value={script}
             onChange={(e) => setScript(e.target.value)}
             placeholder="Paste a script, treatment, or scene-by-scene outline…"
@@ -667,33 +533,21 @@ export function RoughCut() {
             <button
               className="btn btn-cue"
               onClick={generate}
-              disabled={(mode === "compare" ? cmpBusy : busy) || !ks || !script.trim()}
+              disabled={busy || !ks || !script.trim()}
             >
-              {mode === "compare"
-                ? (cmpBusy ? "running both…" : "compare ⇆")
-                : (busy ? `assembling… ${elapsed}s` : "assemble rough cut →")}
+              {busy ? `assembling… ${elapsed}s` : "assemble rough cut →"}
             </button>
           </div>
-          {err && mode !== "compare" && (
+          {err && (
             <pre className="font-mono text-xs mt-4 p-3 whitespace-pre-wrap" style={{ background: "var(--color-surface)", color: "var(--color-status-failed)" }}>{err}</pre>
           )}
         </section>
 
-        {/* COMPARE mode → two side-by-side timelines, no individual mode timeline */}
-        {mode === "compare" && (
-          <CompareTimelines
-            jockey={cmpJockey}
-            agent={cmpAgent}
-            fps={fps}
-            assetCache={assetCache}
-          />
-        )}
-
-        {/* RIGHT: timeline (single-mode only) */}
-        {mode !== "compare" && <section>
+        {/* RIGHT: timeline */}
+        <section>
           <div className="flex items-baseline justify-between">
             <div>
-              <div className="label">§ II · Timeline · <span style={{ color: "var(--color-cue)" }}>{mode === "agent" ? "AgentCore" : "Jockey direct"}</span></div>
+              <div className="label">§ II · Timeline · <span style={{ color: "var(--color-cue)" }}>AgentCore</span></div>
               {plan && (
                 <p className="font-display text-2xl mt-1" style={{ fontVariationSettings: '"opsz" 144, "wght" 600' }}>
                   "{plan.title || "Rough Cut"}"
@@ -718,7 +572,7 @@ export function RoughCut() {
 
           {busy && (
             <p className="caret font-display text-2xl" style={{ color: "var(--color-ink-soft)" }}>
-              {mode === "agent" ? "Agent reasoning · " : "Reading dailies · "}{elapsed}s
+              Agent reasoning · {elapsed}s
             </p>
           )}
 
@@ -749,7 +603,7 @@ export function RoughCut() {
               {/* Back-to-back HLS preview — instant, no MediaConvert stitch. */}
               <div className="mb-6">
                 <ChannelPlayer
-                  channel={planToChannel(plan, `single-${mode}`, assetCache)}
+                  channel={planToChannel(plan, "agent", assetCache)}
                   autoplay={false}
                   loop={false}
                 />
@@ -775,7 +629,7 @@ export function RoughCut() {
               </ol>
             </>
           )}
-        </section>}
+        </section>
       </div>
     </div>
   );
@@ -812,189 +666,6 @@ function planToChannel(plan: RoughCutPlan, idPrefix: string, assetCache: Record<
     programs,
     total_duration_sec: total,
   };
-}
-
-function ModeToggle({ mode, onChange }: { mode: Mode; onChange: (m: Mode) => void }) {
-  const opts: { id: Mode; label: string; hint: string }[] = [
-    { id: "jockey",  label: "Jockey direct", hint: "/v1.3/responses · structured output" },
-    { id: "agent",   label: "Agent",         hint: "AgentCore Runtime · Strands · multi-tool" },
-    { id: "compare", label: "Compare",       hint: "run both · side-by-side" },
-  ];
-  return (
-    <div className="rule mt-4 mb-6">
-      <div className="flex flex-wrap items-end gap-8 pb-3">
-        {opts.map((o) => {
-          const on = mode === o.id;
-          return (
-            <button
-              key={o.id}
-              onClick={() => onChange(o.id)}
-              className="text-left"
-              style={{
-                color: on ? "var(--color-cue)" : "var(--color-ink-soft)",
-                borderBottom: on ? "2px solid var(--color-cue)" : "2px solid transparent",
-                paddingBottom: 4,
-                marginBottom: -2,
-              }}
-            >
-              <div className="font-display text-xl" style={{ fontVariationSettings: '"opsz" 144, "wght" 600' }}>
-                {o.label}
-              </div>
-              <div className="label mt-0.5" style={{ color: "var(--color-ink-faint)" }}>{o.hint}</div>
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function CompareTimelines({
-  jockey, agent, fps, assetCache,
-}: {
-  jockey: CompareSide;
-  agent: CompareSide;
-  fps: number;
-  assetCache: Record<string, Asset>;
-}) {
-  const summary = (s: CompareSide) => {
-    if (!s.plan) return null;
-    const clips = s.plan.scenes.reduce((n, sc) => n + (sc.clips?.length || 0), 0);
-    return { clips, scenes: s.plan.scenes.length, dur: totalDuration(s.plan) };
-  };
-  const sJ = summary(jockey);
-  const sA = summary(agent);
-
-  // Quick-glance asset overlap.
-  const setOf = (s: CompareSide) => new Set<string>(
-    s.plan ? s.plan.scenes.flatMap((sc) => sc.clips.map((c) => c.video_reference)) : []
-  );
-  const sj = setOf(jockey), sa = setOf(agent);
-  const overlap = [...sj].filter((id) => sa.has(id)).length;
-  const onlyJockey = [...sj].filter((id) => !sa.has(id)).length;
-  const onlyAgent  = [...sa].filter((id) => !sj.has(id)).length;
-
-  return (
-    <section>
-      {/* Diff summary */}
-      {(sJ || sA) && (
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-8 text-sm">
-          <DiffStat label="wall-clock" left={fmtMs(jockey.elapsed)} right={fmtMs(agent.elapsed)} />
-          <DiffStat label="scenes"     left={sJ ? String(sJ.scenes) : "—"} right={sA ? String(sA.scenes) : "—"} />
-          <DiffStat label="clips"      left={sJ ? String(sJ.clips)  : "—"} right={sA ? String(sA.clips)  : "—"} />
-          <DiffStat label="duration"   left={sJ ? fmtDuration(sJ.dur) : "—"} right={sA ? fmtDuration(sA.dur) : "—"} />
-          <DiffStat label="asset overlap" left={`${overlap} shared`} right={`${onlyJockey}/${onlyAgent} unique`} />
-        </div>
-      )}
-
-      <div className="grid lg:grid-cols-2 gap-8">
-        <CompareColumn title="Jockey direct" subtitle="/v1.3/responses" side={jockey} fps={fps} assetCache={assetCache} />
-        <CompareColumn title="Agent"         subtitle="AgentCore · Strands" side={agent}  fps={fps} assetCache={assetCache} />
-      </div>
-    </section>
-  );
-}
-
-function CompareColumn({
-  title, subtitle, side, fps, assetCache,
-}: {
-  title: string;
-  subtitle: string;
-  side: CompareSide;
-  fps: number;
-  assetCache: Record<string, Asset>;
-}) {
-  const totalSec = side.plan ? totalDuration(side.plan) : 0;
-  const clipCount = side.plan ? side.plan.scenes.reduce((n, sc) => n + (sc.clips?.length || 0), 0) : 0;
-
-  return (
-    <section className="border p-5" style={{ borderColor: "var(--color-rule)", background: "var(--color-surface)" }}>
-      <div className="flex items-baseline justify-between gap-3">
-        <div>
-          <div className="label" style={{ color: "var(--color-cue)" }}>{title}</div>
-          <div className="font-mono text-xs mt-1" style={{ color: "var(--color-ink-soft)" }}>{subtitle}</div>
-          {side.elapsed > 0 && (
-            <div className="font-mono text-xs mt-1" style={{ color: "var(--color-ink-faint)" }}>
-              took <span style={{ color: side.plan ? "var(--color-cue)" : "var(--color-status-failed)" }}>{fmtMs(side.elapsed)}</span>
-            </div>
-          )}
-        </div>
-        {side.plan && (
-          <div className="text-right">
-            <div className="font-mono text-xl" style={{ color: "var(--color-cue)" }}>{fmtDuration(totalSec)}</div>
-            <div className="label">{side.plan.scenes.length} scenes · {clipCount} clips</div>
-          </div>
-        )}
-      </div>
-      <div className="rule mt-3 mb-4" />
-
-      {side.busy && (
-        <p className="caret font-display text-xl" style={{ color: "var(--color-ink-soft)" }}>
-          assembling…
-        </p>
-      )}
-
-      {side.err && (
-        <pre className="font-mono text-xs p-3 whitespace-pre-wrap" style={{ background: "var(--color-paper)", color: "var(--color-status-failed)" }}>
-          {side.err}
-        </pre>
-      )}
-
-      {side.plan && (
-        <>
-          {side.plan.title && (
-            <p className="font-display text-xl mt-1 mb-1" style={{ fontVariationSettings: '"opsz" 144, "wght" 600' }}>
-              "{side.plan.title}"
-            </p>
-          )}
-          {side.plan.notes && (
-            <p className="text-xs italic mb-4 max-w-2xl" style={{ color: "var(--color-ink-soft)" }}>
-              — {side.plan.notes}
-            </p>
-          )}
-
-          {/* Back-to-back HLS preview — same player as Channels. */}
-          <div className="mb-4">
-            <ChannelPlayer
-              channel={planToChannel(side.plan, `cmp-${title.toLowerCase()}`, assetCache)}
-              autoplay={false}
-              loop={false}
-            />
-          </div>
-
-          <ol className="space-y-4">
-            {side.plan.scenes.map((sc, i) => (
-              <SceneBlock key={sc.scene_id || i} scene={sc} index={i} fps={fps} assetCache={assetCache} />
-            ))}
-          </ol>
-        </>
-      )}
-
-      {!side.busy && !side.plan && !side.err && (
-        <p className="text-xs" style={{ color: "var(--color-ink-faint)" }}>
-          Hit "compare" to populate this column.
-        </p>
-      )}
-    </section>
-  );
-}
-
-function DiffStat({ label, left, right }: { label: string; left: string; right: string }) {
-  return (
-    <div>
-      <div className="label" style={{ color: "var(--color-ink-faint)" }}>{label}</div>
-      <div className="grid grid-cols-2 gap-2 mt-1 text-xs">
-        <span className="font-mono">{left}</span>
-        <span className="font-mono" style={{ color: "var(--color-cue)" }}>{right}</span>
-      </div>
-    </div>
-  );
-}
-
-function fmtMs(ms: number): string {
-  if (!ms) return "—";
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
 }
 
 function SceneBlock({
@@ -1161,25 +832,6 @@ function ClipRow({ index, clip, asset, assetCache, onSwap }: {
   );
 }
 
-function ModeBadge({ entry }: { entry: RoughCutHistoryEntry }) {
-  const m = entry.mode || "jockey";
-  const label = m === "compare" ? "compare" : m === "agent" ? "agent" : "jockey";
-  const color = m === "compare" ? "var(--color-cue)" : "var(--color-ink-faint)";
-  return (
-    <span
-      className="font-mono text-[9px] px-1.5 py-px"
-      style={{
-        color,
-        border: `1px solid ${color}`,
-        textTransform: "uppercase",
-        letterSpacing: 1,
-      }}
-    >
-      {label}
-    </span>
-  );
-}
-
 function HistoryStrip({
   entries, activeId, onRestore, onDelete,
 }: {
@@ -1216,12 +868,9 @@ function HistoryStrip({
               onClick={() => onRestore(e)}
             >
               <div className="flex items-baseline justify-between gap-2">
-                <div className="flex items-baseline gap-2">
-                  <span className="label" style={{ color: active ? "var(--color-cue)" : "var(--color-ink-faint)" }}>
-                    {relativeTime(e.created_at)}
-                  </span>
-                  <ModeBadge entry={e} />
-                </div>
+                <span className="label" style={{ color: active ? "var(--color-cue)" : "var(--color-ink-faint)" }}>
+                  {relativeTime(e.created_at)}
+                </span>
                 <button
                   className="label hover:text-[var(--color-status-failed)]"
                   style={{ color: "var(--color-ink-faint)" }}
@@ -1246,26 +895,9 @@ function HistoryStrip({
                   {e.ks_name}
                 </div>
               )}
-              {e.mode === "compare" ? (
-                <div className="mt-2 grid grid-cols-2 gap-2 text-[10px] font-mono">
-                  <div>
-                    <span style={{ color: "var(--color-ink-faint)" }}>jockey · </span>
-                    <span style={{ color: e.compare?.jockey.plan ? "var(--color-cue)" : "var(--color-status-failed)" }}>
-                      {e.compare?.jockey.plan ? fmtMs(e.compare.jockey.elapsed_ms) : "failed"}
-                    </span>
-                  </div>
-                  <div>
-                    <span style={{ color: "var(--color-ink-faint)" }}>agent · </span>
-                    <span style={{ color: e.compare?.agent.plan ? "var(--color-cue)" : "var(--color-status-failed)" }}>
-                      {e.compare?.agent.plan ? fmtMs(e.compare.agent.elapsed_ms) : "failed"}
-                    </span>
-                  </div>
-                </div>
-              ) : (
-                <div className="mt-2 label" style={{ color: rendered ? "var(--color-status-ready)" : "var(--color-ink-faint)" }}>
-                  {rendered ? "✓ rendered" : "edl only"}
-                </div>
-              )}
+              <div className="mt-2 label" style={{ color: rendered ? "var(--color-status-ready)" : "var(--color-ink-faint)" }}>
+                {rendered ? "✓ rendered" : "edl only"}
+              </div>
             </div>
           );
         })}

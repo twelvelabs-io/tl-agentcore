@@ -1,16 +1,9 @@
 // chat lambda — WebSocket handler for the tl-agentcore demo UI.
 //
-// Two flows reach this lambda over the WebSocket:
-//
-//  1. mode === "agentcore"  →  invoke the AgentCore Runtime (Strands agent
-//                              container). The actual work runs in an
-//                              async self-invoke because runs can take
-//                              60-300s and API Gateway WS has a hard 30s
-//                              integration cap.
-//
-//  2. mode === "jockey"     →  passthrough to TwelveLabs /v1.3/responses
-//                              for the Jockey-managed-orchestrator
-//                              comparison demo.
+// The only flow this lambda handles is mode === "agentcore", which invokes
+// the AgentCore Runtime (Strands agent container). The actual work runs in
+// an async self-invoke because runs can take 60-300s and API Gateway WS
+// has a hard 30s integration cap.
 //
 // Auth: $connect verifies a Cognito access token from the URL query string
 // (browsers can't set headers on a WS open). Once the connection is up,
@@ -77,10 +70,9 @@ async function handleWsMessage(event) {
   try { body = JSON.parse(event.body || "{}"); }
   catch { await post({ type: "error", message: "invalid json body" }); return { statusCode: 200 }; }
 
-  if (body.mode === "jockey")    return handleJockeyDirect(body, post);
   if (body.mode === "agentcore") return handleAgentCore(event, body, post);
 
-  await post({ type: "error", message: "set mode to 'agentcore' or 'jockey'" });
+  await post({ type: "error", message: "set mode to 'agentcore'" });
   return { statusCode: 200 };
 }
 
@@ -188,76 +180,6 @@ async function handleAgentCoreAsync(event) {
   } finally {
     clearInterval(heartbeat);
   }
-}
-
-// ──────────────── Jockey-direct path (comparison demo) ────────────────
-async function handleJockeyDirect(body, post) {
-  const { SecretsManagerClient, GetSecretValueCommand } = await import("@aws-sdk/client-secrets-manager");
-  const sm = new SecretsManagerClient({});
-
-  const { knowledge_store_id, prompt, instructions, session_id, text_format, include, model } = body;
-  if (!knowledge_store_id || !prompt) {
-    await post({ type: "error", message: "missing knowledge_store_id or prompt" });
-    return { statusCode: 200 };
-  }
-
-  let key;
-  try {
-    const r = await sm.send(new GetSecretValueCommand({ SecretId: process.env.TL_API_KEY_SECRET }));
-    key = r.SecretString;
-  } catch (e) {
-    await post({ type: "error", message: `key load failed: ${errorString(e)}` });
-    return { statusCode: 200 };
-  }
-
-  const tlBase = process.env.TL_BASE_URL || "https://api.twelvelabs.io/v1.3";
-  const payload = {
-    model: model || "jockey1.0",
-    knowledge_store_id,
-    input: [{ type: "message", role: "user", content: prompt }],
-  };
-  if (instructions) payload.instructions = instructions;
-  if (session_id)   payload.session_id = session_id;
-  if (text_format)  payload.text = { format: text_format };
-  if (include)      payload.include = include;
-
-  let r;
-  try {
-    r = await fetch(`${tlBase}/responses`, {
-      method: "POST",
-      headers: { "x-api-key": key, "content-type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-  } catch (e) {
-    await post({ type: "error", message: `fetch failed: ${errorString(e)}` });
-    return { statusCode: 200 };
-  }
-
-  const txt = await r.text();
-  let json;
-  try { json = JSON.parse(txt); }
-  catch {
-    await post({ type: "error", message: `non-json from TL (${r.status}): ${txt.slice(0, 300)}` });
-    return { statusCode: 200 };
-  }
-
-  if (!r.ok) {
-    await post({ type: "error", message: `TL ${r.status}: ${json?.message || JSON.stringify(json)}` });
-    return { statusCode: 200 };
-  }
-
-  const chunks = [];
-  for (const o of json.output || []) {
-    if (o.type !== "message") continue;
-    for (const c of o.content || []) {
-      if (c.type === "output_text") chunks.push(c.text);
-    }
-  }
-
-  await post({ type: "session", session_id: json.session_id });
-  await post({ type: "result", text: chunks.join("\n"), session_id: json.session_id, usage: json.usage });
-  await post({ type: "done" });
-  return { statusCode: 200 };
 }
 
 function errorString(e) {

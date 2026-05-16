@@ -12,8 +12,8 @@ const HOSTED_UI = (ENV.VITE_COGNITO_HOSTED_UI_DOMAIN || "").replace(/\/$/, "");
 const CLIENT_ID = ENV.VITE_COGNITO_CLIENT_ID || "";
 const SCOPES = "openid email profile";
 
-const LS_TOKENS = "jockey-lab.tokens";
-const LS_PKCE = "jockey-lab.pkce-verifier";
+const LS_TOKENS = "tl-agentcore.tokens";
+const LS_PKCE = "tl-agentcore.pkce-verifier";
 
 export type Tokens = {
   access_token: string;

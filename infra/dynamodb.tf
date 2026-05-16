@@ -1,9 +1,7 @@
 # kb_cache — pre-computed per-knowledge-store profile + per-asset summaries.
-# Mirrors the role of Jockey's internal Postgres mini-ontology / content-profile
-# layer. Without this, the agent has to re-derive context (Pegasus/Marengo
-# calls) every turn; with it, the agent reads cached digests in single-digit
-# milliseconds and only falls through to the public TL API for fine-grained
-# work.
+# Without this, the agent re-derives context (Pegasus/Marengo calls) every
+# turn; with it, the agent reads cached digests in single-digit milliseconds
+# and only falls through to the public TL API for fine-grained work.
 #
 # Two item shapes share the table:
 #   pk = "ks#<knowledge_store_id>"  sk = "OVERVIEW"        → corpus digest

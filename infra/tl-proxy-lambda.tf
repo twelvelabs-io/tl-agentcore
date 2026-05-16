@@ -55,7 +55,7 @@ resource "aws_lambda_function" "tl_proxy" {
   handler          = "index.handler"
   filename         = data.archive_file.tl_proxy.output_path
   source_code_hash = data.archive_file.tl_proxy.output_base64sha256
-  # Jockey survey calls (1300+ trailer KB) routinely need 90-180s.
+  # Large-KB list_assets / structured search can take 90-180s; lift the timeout.
   timeout     = 300
   memory_size = 512
 

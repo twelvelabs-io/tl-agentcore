@@ -1,5 +1,6 @@
-// Tiny proxy that hides the TL_API_KEY from the browser and pipes
-// Server-Sent Events through transparently for streamed Jockey responses.
+// Local dev proxy that hides TL_API_KEY from the browser and forwards
+// /tl/* to api.twelvelabs.io. SSE pipes through transparently. In
+// production the equivalent is the tl_proxy Lambda behind CloudFront.
 //
 // Reads TL_API_KEY (and optional TL_BASE_URL) from the parent project's .env.
 // Streams every request body through unchanged so multipart uploads work.
@@ -104,5 +105,5 @@ app.all(/^\/tl\/.*/, async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`jockey-lab proxy → ${BASE_URL}  (key ${API_KEY.slice(0, 12)}...)  http://localhost:${PORT}`);
+  console.log(`tl-agentcore proxy → ${BASE_URL}  (key ${API_KEY.slice(0, 12)}...)  http://localhost:${PORT}`);
 });
