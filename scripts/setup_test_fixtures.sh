@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Idempotent setup for the Playwright E2E test KS.
 #
-# Creates (or reuses) a TwelveLabs knowledge store named "tl-agentcore-e2e"
-# attached to a Marengo + Pegasus index, ingests one short public MP4,
-# polls until it's ready, and writes TEST_KS_ID into ui/e2e/.env.test.
+# Creates (or reuses) a TwelveLabs index + knowledge store, registers a
+# short public MP4 as an asset, attaches it to the KS, polls until ready,
+# and writes TEST_KS_ID into ui/e2e/.env.test.
 #
 # Requires:
 #   TL_API_KEY    — TwelveLabs API key
@@ -25,9 +25,9 @@ H_AUTH=(-H "x-api-key: ${TL_API_KEY}")
 H_JSON=(-H "content-type: application/json")
 KS_NAME="tl-agentcore-e2e"
 INDEX_NAME="tl-agentcore-e2e-index"
-# Big Buck Bunny — stable public test MP4, ~10 min, royalty-free.
-# Good enough that Marengo finds varied moments to rank.
-SAMPLE_URL="${E2E_SAMPLE_URL:-https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4}"
+# 10-second, 1 MB Big Buck Bunny clip. Stable public mirror, royalty-free,
+# small enough that TL ingest finishes in seconds.
+SAMPLE_URL="${E2E_SAMPLE_URL:-https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4}"
 ENV_TEST="ui/e2e/.env.test"
 
 # ─── 1. Index (Marengo 3.0 + Pegasus 1.2) ────────────────────────────────
@@ -38,7 +38,7 @@ INDEX_ID=$(curl -fsS "${H_AUTH[@]}" "$TL/indexes?page_limit=50" \
 if [ -z "$INDEX_ID" ]; then
   echo "    creating new index..."
   INDEX_ID=$(curl -fsS "${H_AUTH[@]}" "${H_JSON[@]}" -X POST "$TL/indexes" \
-    -d "{\"index_name\":\"$INDEX_NAME\",\"models\":[{\"model_name\":\"marengo2.7\",\"model_options\":[\"visual\",\"audio\"]},{\"model_name\":\"pegasus1.2\",\"model_options\":[\"visual\",\"audio\"]}]}" \
+    -d "{\"index_name\":\"$INDEX_NAME\",\"models\":[{\"model_name\":\"marengo3.0\",\"model_options\":[\"visual\",\"audio\"]},{\"model_name\":\"pegasus1.2\",\"model_options\":[\"visual\",\"audio\"]}]}" \
     | python3 -c "import json,sys; print(json.load(sys.stdin)['_id'])")
 fi
 echo "    index_id=$INDEX_ID"
@@ -56,34 +56,52 @@ if [ -z "$KS_ID" ]; then
 fi
 echo "    ks_id=$KS_ID"
 
-# ─── 3. Ingest the sample MP4 (only if KS has no ready items) ─────────────
-ITEMS=$(curl -fsS "${H_AUTH[@]}" "$TL/knowledge-stores/$KS_ID/items?page_limit=10" \
-  | python3 -c "import json,sys; d=json.load(sys.stdin).get('data',[]); print(sum(1 for i in d if i.get('status')=='ready'))")
+# ─── 3. Asset + Marengo index task + KS item ─────────────────────────────
+#
+# Three TL surfaces have to be populated for the agent to see the video:
+#   (a) POST /assets         registers the file in your TL account
+#   (b) POST /tasks          indexes the video inside the Marengo index
+#   (c) POST /knowledge-stores/{ks}/items   links the asset to the KS
+# Step (b) is what makes list_tl_indexes() see a non-zero video_count;
+# without it, the agent rightly bails out with "knowledge store is empty".
 
-if [ "$ITEMS" = "0" ]; then
-  echo "==> Ingesting sample video..."
-  TASK_ID=$(curl -fsS "${H_AUTH[@]}" "${H_JSON[@]}" -X POST "$TL/knowledge-stores/$KS_ID/items" \
-    -d "{\"video_url\":\"$SAMPLE_URL\",\"index_id\":\"$INDEX_ID\"}" \
-    | python3 -c "import json,sys; print(json.load(sys.stdin).get('task_id',''))")
+INDEX_VIDEOS=$(curl -fsS "${H_AUTH[@]}" "$TL/indexes/$INDEX_ID" \
+  | python3 -c "import json,sys; print(json.load(sys.stdin).get('video_count',0))")
+
+if [ "$INDEX_VIDEOS" = "0" ]; then
+  echo "==> Creating asset from $SAMPLE_URL..."
+  ASSET_ID=$(curl -fsS "${H_AUTH[@]}" -X POST "$TL/assets" \
+    -F "url=$SAMPLE_URL" -F "index_id=$INDEX_ID" -F "method=url" \
+    | python3 -c "import json,sys; print(json.load(sys.stdin)['_id'])")
+  echo "    asset_id=$ASSET_ID"
+
+  echo "==> Submitting Marengo indexing task..."
+  TASK_ID=$(curl -fsS "${H_AUTH[@]}" -X POST "$TL/tasks" \
+    -F "index_id=$INDEX_ID" -F "video_url=$SAMPLE_URL" \
+    | python3 -c "import json,sys; print(json.load(sys.stdin)['_id'])")
   echo "    task_id=$TASK_ID"
 
-  echo "==> Polling for ready (this can take 5-15 min)..."
-  for i in $(seq 1 60); do
-    STATUS=$(curl -fsS "${H_AUTH[@]}" "$TL/knowledge-stores/$KS_ID/items?page_limit=10" \
-      | python3 -c "import json,sys; d=json.load(sys.stdin).get('data',[]); print((d[0] if d else {}).get('status','?'))")
-    echo "    [$i] status=$STATUS"
+  echo "==> Polling for task ready (10 s clip — usually a few minutes)..."
+  for i in $(seq 1 40); do
+    STATUS=$(curl -fsS "${H_AUTH[@]}" "$TL/tasks/$TASK_ID" \
+      | python3 -c "import json,sys; print(json.load(sys.stdin).get('status','?'))")
+    echo "    [$i] task=$STATUS"
     if [ "$STATUS" = "ready" ]; then break; fi
-    if [ "$STATUS" = "failed" ]; then echo "ingestion FAILED" >&2; exit 1; fi
-    sleep 30
+    if [ "$STATUS" = "failed" ]; then echo "indexing FAILED" >&2; exit 1; fi
+    sleep 15
   done
+
+  echo "==> Attaching asset to KS..."
+  curl -fsS "${H_AUTH[@]}" "${H_JSON[@]}" -X POST "$TL/knowledge-stores/$KS_ID/items" \
+    -d "{\"asset_id\":\"$ASSET_ID\"}" >/dev/null
+  echo "    attached."
 else
-  echo "==> $ITEMS item(s) already ready; skipping ingest."
+  echo "==> Index already has $INDEX_VIDEOS video(s); skipping ingest."
 fi
 
 # ─── 4. Write TEST_KS_ID into ui/e2e/.env.test ─────────────────────────────
 mkdir -p ui/e2e
 touch "$ENV_TEST"
-# Strip any existing TEST_KS_ID line, then append the fresh one.
 TMP=$(mktemp)
 grep -v "^TEST_KS_ID=" "$ENV_TEST" > "$TMP" || true
 echo "TEST_KS_ID=$KS_ID" >> "$TMP"

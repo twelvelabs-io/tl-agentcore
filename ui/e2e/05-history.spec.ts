@@ -11,7 +11,7 @@ test.describe("RoughCut: history", () => {
     await signedInPage.locator('button:has-text("assemble rough cut")').click();
 
     // Wait for the plan to land.
-    await expect(signedInPage.locator('text="scene"').first()).toBeVisible({
+    await expect(signedInPage.getByText(/^scene \d/i).first()).toBeVisible({
       timeout: 3 * 60_000,
     });
 

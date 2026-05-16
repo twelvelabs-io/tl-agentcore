@@ -45,10 +45,12 @@ async function signInToHostedUi(page: Page, email: string, password: string) {
   // App boot redirects to the Hosted UI. Wait for the username field.
   await page.waitForURL(/amazoncognito\.com/, { timeout: 30_000 });
 
-  // Cognito's classic Hosted UI uses these stable input names.
-  await page.locator('input[name="username"]').fill(email);
-  await page.locator('input[name="password"]').fill(password);
-  await page.locator('input[name="signInSubmitButton"], button[name="signInSubmitButton"], input[type="submit"]').first().click();
+  // Cognito's Hosted UI renders desktop + mobile breakpoints in the same
+  // DOM (two inputs with the same id, one hidden by CSS). Filter to the
+  // visible one before interacting.
+  await page.locator('#signInFormUsername:visible').first().fill(email);
+  await page.locator('#signInFormPassword:visible').first().fill(password);
+  await page.locator('input[name="signInSubmitButton"]:visible').first().click();
 
   // Cognito redirects back to the SPA with ?code=...; the SPA exchanges
   // the code for tokens and strips the query string.

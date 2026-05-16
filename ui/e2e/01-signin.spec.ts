@@ -7,8 +7,8 @@ test.describe("Sign-in flow", () => {
     await page.goto(testConfig.baseUrl);
     // App boot triggers ensureSignedIn() → redirect to Hosted UI.
     await page.waitForURL(/amazoncognito\.com/, { timeout: 30_000 });
-    await expect(page.locator('input[name="username"]')).toBeVisible();
-    await expect(page.locator('input[name="password"]')).toBeVisible();
+    await expect(page.locator('#signInFormUsername:visible').first()).toBeVisible();
+    await expect(page.locator('#signInFormPassword:visible').first()).toBeVisible();
     await context.close();
   });
 

@@ -17,12 +17,12 @@ test.describe("RoughCut: end-to-end plan generation", () => {
 
     // Wait for the plan to render. The agent runs through Sonnet 4.6 +
     // Marengo per beat; allow up to 3 minutes.
-    await expect(signedInPage.locator('text="scene"').first()).toBeVisible({
+    await expect(signedInPage.getByText(/^scene \d/i).first()).toBeVisible({
       timeout: 3 * 60_000,
     });
 
     // The timeline header shows total duration + scene count.
-    await expect(signedInPage.locator('text=/\\d+ scenes? · \\d+ clips?/').first())
+    await expect(signedInPage.getByText(/\d+ scenes? · \d+ clips?/).first())
       .toBeVisible({ timeout: 30_000 });
 
     // The EDL export button appears once a plan lands.
