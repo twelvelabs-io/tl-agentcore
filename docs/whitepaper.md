@@ -101,29 +101,45 @@ A typical six-beat rough-cut turn cascades through the tiers like this:
 sequenceDiagram
     autonumber
     participant U as Producer
-    participant A as Agent (Sonnet 4.6)
-    participant C as profile_cache (DDB)
-    participant M as Marengo /search
-    participant P as Pegasus /analyze
+    participant A as Agent
+    participant C as profile_cache
+    participant M as Marengo
+    participant P as Pegasus
 
-    U->>A: "build me a 60 s action highlight reel"
-    A->>C: get_kb_overview(ks)
-    C-->>A: corpus summary + top moods
-    par fan-out, one per beat
-        A->>C: list_kb_assets(mood="tension")
-        A->>C: list_kb_assets(mood="action")
-        A->>C: list_kb_assets(mood="celebration")
+    U->>+A: build me a 60 s action highlight reel
+
+    rect rgb(220, 252, 231)
+        Note over A,C: Turn 1 · cache scout · sub-10 ms per call
+        A->>+C: get_kb_overview(ks)
+        C-->>-A: corpus summary, top moods
+        par parallel · one call per beat
+            A->>C: list_kb_assets(mood="tension")
+        and
+            A->>C: list_kb_assets(mood="action")
+        and
+            A->>C: list_kb_assets(mood="celebration")
+        end
+        C-->>A: candidate clips per beat
     end
-    C-->>A: candidate clips per beat
-    opt beat without cache match
-        A->>M: marengo_search(ks, "kinetic action")
-        M-->>A: ranked clips (cache-joined)
+
+    rect rgb(219, 234, 254)
+        Note over A,M: Turn 2 · Marengo pass · always, sources alternates · 1–3 s each
+        par parallel · one per beat
+            A->>M: marengo_search(ks, "kinetic action")
+        and
+            A->>M: marengo_search(ks, "tense crowd")
+        and
+            A->>M: marengo_search(ks, "celebration")
+        end
+        M-->>A: ranked clips · rank 1 = primary, 2–4 = alternates
     end
-    opt clip needs richer take-note
-        A->>P: pegasus_analyze(asset_id, prompt)
-        P-->>A: grounded description
+
+    opt one beat lacks a usable take-note
+        A->>+P: pegasus_analyze(asset_id, "describe 0:30–0:38")
+        P-->>-A: grounded description
     end
-    A-->>U: EDL, scenes, in/out, role, take_note
+
+    A-->>-U: EDL · scenes · primary clip + 2–4 alternates per beat
 ```
 
 ### 3.3 Why AgentCore (not Bedrock Agents)
