@@ -1,0 +1,4 @@
+.env.test
+storage-state.json
+playwright-report/
+test-results/
