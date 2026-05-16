@@ -48,25 +48,38 @@ is what Marengo and Pegasus return.
 
 ### 3.1 Component map
 
-```
-        Browser (React + Vite)
-          │  wss + Cognito JWT
-          ▼
-   CloudFront ──► API Gateway WebSocket ──► Chat λ (async self-invoke)
-                                                  │
-                                                  ▼  SigV4 InvokeAgentRuntime
-                                          ┌────────────────────────────┐
-                                          │  AgentCore Runtime         │
-                                          │  Strands · Sonnet 4.6      │
-                                          │  Graviton container (arm64)│
-                                          └──────────┬─────────────────┘
-                                                     │
-            ┌────────────────────────┬───────────────┴────────────┐
-            ▼ Tier-1 cache           ▼ Tier-2 live                ▼ Tier-3 orchestrated
-        DynamoDB                   TwelveLabs API              TwelveLabs Jockey
-        kb_cache table             /v1.3/search                /v1.3/responses
-          (per-asset                /v1.3/analyze              (optional, comparison)
-          profiles)
+```mermaid
+flowchart TD
+    Browser["<b>Browser</b><br/>React + Vite"]
+    CF["CloudFront"]
+    WS["API Gateway<br/>WebSocket"]
+    Chat["<b>Chat λ</b><br/>async self-invoke"]
+    Runtime["<b>AgentCore Runtime</b><br/>Strands · Sonnet 4.6<br/>Graviton container (arm64)"]
+    Cache[("<b>DynamoDB</b><br/>kb_cache table<br/>per-asset profiles")]
+    TLApi["<b>TwelveLabs API</b><br/>/v1.3/search<br/>/v1.3/analyze"]
+    Jockey["<b>TwelveLabs Jockey</b><br/>/v1.3/responses<br/><i>(optional, comparison)</i>"]
+
+    Browser -- "wss + Cognito JWT" --> CF
+    CF --> WS
+    WS --> Chat
+    Chat -- "SigV4<br/>InvokeAgentRuntime" --> Runtime
+    Runtime -- "<b>Tier 1</b> · cache · &lt;10 ms" --> Cache
+    Runtime -- "<b>Tier 2</b> · live · 1–10 s" --> TLApi
+    Runtime -- "<b>Tier 3</b> · orchestrated · 30 s–3 min" --> Jockey
+
+    classDef edge    fill:#fef3e2,stroke:#f59e0b,stroke-width:1px,color:#7c2d12
+    classDef compute fill:#fef9c3,stroke:#ca8a04,stroke-width:1px,color:#713f12
+    classDef hero    fill:#e0e7ff,stroke:#4f46e5,stroke-width:2px,color:#312e81
+    classDef tier1   fill:#dcfce7,stroke:#16a34a,stroke-width:1px,color:#14532d
+    classDef tier2   fill:#dbeafe,stroke:#2563eb,stroke-width:1px,color:#1e3a8a
+    classDef tier3   fill:#f3e8ff,stroke:#9333ea,stroke-width:1px,color:#581c87
+
+    class Browser,CF,WS edge
+    class Chat compute
+    class Runtime hero
+    class Cache tier1
+    class TLApi tier2
+    class Jockey tier3
 ```
 
 ### 3.2 The three-tier tool design
@@ -84,6 +97,37 @@ This mirrors how TwelveLabs Jockey itself works internally: a managed
 agent that pre-computes a per-index "mini-ontology" so most questions are
 answered from cache, with Marengo and Pegasus reached for only when the
 cache is insufficient.
+
+A typical six-beat rough-cut turn cascades through the tiers like this:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as Producer
+    participant A as Agent (Sonnet 4.6)
+    participant C as kb_cache (DDB)
+    participant M as Marengo /search
+    participant P as Pegasus /analyze
+
+    U->>A: "build me a 60 s action highlight reel"
+    A->>C: get_kb_overview(ks)
+    C-->>A: corpus summary + top moods
+    par fan-out, one per beat
+        A->>C: list_kb_assets(mood="tension")
+        A->>C: list_kb_assets(mood="action")
+        A->>C: list_kb_assets(mood="celebration")
+    end
+    C-->>A: candidate clips per beat
+    opt beat without cache match
+        A->>M: marengo_search(ks, "kinetic action")
+        M-->>A: ranked clips (cache-joined)
+    end
+    opt clip needs richer take-note
+        A->>P: pegasus_analyze(asset_id, prompt)
+        P-->>A: grounded description
+    end
+    A-->>U: EDL — scenes, in/out, role, take_note
+```
 
 ### 3.3 Why AgentCore (not Bedrock Agents)
 
@@ -130,13 +174,31 @@ Marengo or Pegasus at runtime.
 
 We ship the same ingestion as a script:
 
-```
-scripts/ingest_kb_cache.py ks_<id>
-  ↓ list /v1.3/knowledge-stores/{ks}/items     (paginated)
-  ↓ N × Pegasus /v1.3/analyze in parallel       (12 concurrent)
-  ↓ N × DDB PutItem (per-asset)
-  + 1 × DDB PutItem (corpus overview)
-kb_cache table
+```mermaid
+flowchart LR
+    Script["<b>scripts/ingest_kb_cache.py</b><br/>ks_&lt;id&gt;"]
+    List["List items<br/>/v1.3/knowledge-stores/{ks}/items<br/><i>(paginated)</i>"]
+    Analyze["<b>Pegasus /v1.3/analyze</b><br/>12 concurrent"]
+    AssetPut["DDB PutItem<br/>N × per-asset"]
+    OverviewPut["DDB PutItem<br/>1 × corpus overview"]
+    Cache[("<b>kb_cache</b><br/>DynamoDB")]
+
+    Script --> List
+    List --> Analyze
+    Analyze --> AssetPut
+    Analyze --> OverviewPut
+    AssetPut --> Cache
+    OverviewPut --> Cache
+
+    classDef script fill:#fef9c3,stroke:#ca8a04,stroke-width:1px,color:#713f12
+    classDef step   fill:#dbeafe,stroke:#2563eb,stroke-width:1px,color:#1e3a8a
+    classDef hero   fill:#e0e7ff,stroke:#4f46e5,stroke-width:2px,color:#312e81
+    classDef store  fill:#dcfce7,stroke:#16a34a,stroke-width:1px,color:#14532d
+
+    class Script script
+    class List,AssetPut,OverviewPut step
+    class Analyze hero
+    class Cache store
 ```
 
 Throughput: roughly 150 assets per minute. A 1,300-clip KB takes about
