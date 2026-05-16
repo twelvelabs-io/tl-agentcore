@@ -2,13 +2,13 @@
 
 **An AgentCore × TwelveLabs reference architecture**
 
-> **Status:** Skeleton draft — May 14, 2026. Shared for scope alignment and
+> **Status:** Skeleton draft, May 14, 2026. Shared for scope alignment and
 > review. Comment freely. Page 1 is the **scope / requirements check-box
 > page**; everything after is a placeholder structure to react against.
 
 ---
 
-## 0 · Scope & requirements — *please react on this page first*
+## 0 · Scope & requirements: *please react on this page first*
 
 > **Goal of this section:** lock the scope before we invest in long-form
 > prose. Add a `✅` next to lines we want in v1; add `⏭️` to defer; comment
@@ -19,7 +19,7 @@
 - AWS Solutions Architects, Bedrock / AgentCore field teams
 - Media-and-entertainment developers and CTOs evaluating agentic video
   workflows on AWS
-- *Not* end-users (producers, editors) — they are the persona we **build
+- *Not* end-users (producers, editors). They are the persona we **build
   for**, not the persona we **write for**.
 
 ### Use case in scope (v1)
@@ -41,30 +41,30 @@
 - ☐ Same shape for **Pegasus 1.5 → 1.7 → 2.0** as they ship.
 - ☐ Same shape for **Marengo 3.0 → 3.5**.
 - ☐ Same shape for any **reasoning model** (Claude Sonnet / Haiku / Opus,
-  Llama, Nova) the customer prefers — we recommend, don't dictate.
+  Llama, Nova) the customer prefers; we recommend, don't dictate.
 - ☐ Same shape for **adjacent verticals**: sports recaps, social cutdowns,
   newsroom dossiers, FAST channels, ad-creative selects. v1 picks one
   vertical (highlights) but the diagrams should obviously stretch.
 
 ### Out of scope (v1, by design)
 
-- Live ingest / encoding (`MediaLive`, `MediaConvert`) — covered separately.
-- Rights / clearance enforcement — referenced as a tool boundary, not
+- Live ingest / encoding (`MediaLive`, `MediaConvert`); covered separately.
+- Rights / clearance enforcement: referenced as a tool boundary, not
   implemented end-to-end (TwelveLabs has a separate rights-DAM white paper).
-- Audience-intelligence reasoning (Nielsen-style segmentation) — referenced
+- Audience-intelligence reasoning (Nielsen-style segmentation); referenced
   as a future tool, not in the v1 demo.
-- Channel programming (FAST/AVOD) — the highlight reel is the leaf; channels
-  are a follow-on white paper.
+- Channel programming (FAST/AVOD); the highlight reel is the leaf, and
+  channels are a follow-on white paper.
 
 ### Open questions to settle in the next sync
 
 1. **Pegasus 1.5 timing.** Bedrock Marketplace ETA? If <8 weeks, do we hold
    publication; if not, ship with API-direct and add a "Now on Bedrock"
    addendum on launch day.
-2. **Joint AWS technical-blog companion** — short version (~1,500 words) on
+2. **Joint AWS technical-blog companion**: short version (~1,500 words) on
    the AWS Machine Learning blog vs. the long-form white paper here.
    James / Adam to confirm MNE intake path.
-3. **Hosted demo URL** — is the existing CloudFront URL share-able with the
+3. **Hosted demo URL.** Is the existing CloudFront URL share-able with the
    whitepaper, or do we stand up a separate "anonymous reviewer" instance?
 4. **Customer pull-quote.** Can WBD comment on record (any tier of attribution)?
 
@@ -82,7 +82,7 @@ Placeholder beats:
   that workflow without writing custom retrieval, custom ranking, or custom
   generative-vision code.
 - A cache-first design pattern (per-asset profiles pre-built with Pegasus,
-  served from DynamoDB) closes a 4× latency gap vs. naïve live calls — and
+  served from DynamoDB) closes a 4× latency gap vs. naïve live calls, and
   is the **single most important design decision** for production use.
 - The architecture generalizes from highlights to sports recaps, ad cutdowns,
   social shorts, and newsroom workflows with no agent-runtime changes.
@@ -102,8 +102,8 @@ Today, "build me a 60-second action highlight reel" is a multi-hour task:
 5. Iterate.
 
 The shared property of every minute spent: **the producer is the only
-component in the system that has watched the video**. Everything else —
-filenames, transcripts, manual logs — is a proxy for what's actually on
+component in the system that has watched the video**. Everything else
+(filenames, transcripts, manual logs) is a proxy for what's actually on
 screen.
 
 ### 2.2 Why classic AWS retrieval doesn't fit
@@ -112,7 +112,7 @@ Bedrock Knowledge Bases is the textbook answer for text retrieval. Video
 has no peer primitive today. Naïve workarounds either:
 
 - **OCR + transcript embed.** Lossy. A speeding car, a held look, a
-  celebration — none of it is text. The retrieval recall is poor for
+  celebration: none of it is text. The retrieval recall is poor for
   precisely the moments producers care about.
 - **CLIP-style frame embed.** Better, but missing temporal context. A
   highlight is *a sequence*, not a frame.
@@ -120,7 +120,7 @@ has no peer primitive today. Naïve workarounds either:
 ### 2.3 What "good" looks like
 
 The agent should be able to ask the library: *"clips that look like a
-celebration after a tense moment"* — and get clip-level results with start
+celebration after a tense moment"*, and get clip-level results with start
 and end timecodes, ranked by semantic match, with a one-line *why*. That's
 exactly what Marengo + Pegasus return.
 
@@ -166,7 +166,7 @@ The agent has access to three speed classes of tool. The system prompt
 | 3 | `ask_jockey` / `ask_followup` | 30 s–3 min | Open-ended Q&A across the corpus |
 
 This mirrors how TwelveLabs Jockey itself works internally (see
-`JOCKEY_INTERNALS.md` reference) — a managed agent that pre-computes a
+`JOCKEY_INTERNALS.md` reference): a managed agent that pre-computes a
 per-index "mini-ontology" so most questions are answered from cache, with
 Marengo/Pegasus reached for only when the cache is insufficient.
 
@@ -187,7 +187,7 @@ async-self-invoke workarounds.
 
 ---
 
-## 4 · The cache-first pattern — *the most important section*
+## 4 · The cache-first pattern: *the most important section*
 
 > If readers take one thing away from this paper, it should be this section.
 
@@ -200,7 +200,7 @@ not interactive. Producers won't use it.
 ### 4.2 What Jockey does internally
 
 TwelveLabs' own managed Jockey agent answers KB-level questions in <2 s
-because it pre-computes — at index time — a per-asset "profile" capturing:
+because it pre-computes, at index time, a per-asset "profile" capturing:
 
 - One-line description
 - Mood tags (tension, action, celebration, …)
@@ -229,9 +229,9 @@ Throughput: ~150 assets/min. A 1,300-clip KB takes ~15 min to ingest.
 
 Three new agent tools read it back at runtime:
 
-- `get_kb_overview(ks_id)` — corpus summary
-- `list_kb_assets(ks_id, mood=…, role=…)` — filtered asset list
-- `lookup_asset_profile(ks_id, asset_id)` — single-asset cached digest
+- `get_kb_overview(ks_id)`: corpus summary
+- `list_kb_assets(ks_id, mood=…, role=…)`: filtered asset list
+- `lookup_asset_profile(ks_id, asset_id)`: single-asset cached digest
 
 ### 4.4 Measured impact
 
@@ -245,7 +245,7 @@ Three new agent tools read it back at runtime:
 the public version of the demo.]*
 
 The cache-first agent ships at parity with the managed Jockey path. The
-"AgentCore as compositional runtime" story isn't a latency penalty — it's
+"AgentCore as compositional runtime" story isn't a latency penalty; it's
 a latency parity, with the orchestration owned by the customer.
 
 ---
@@ -257,12 +257,12 @@ Detailed contract for each tool. *Source of truth:
 
 ### 5.1 `marengo_search(index_id, query_text, knowledge_store_id?)`
 
-Ranked clip-level retrieval. Always pass `knowledge_store_id` when known —
+Ranked clip-level retrieval. Always pass `knowledge_store_id` when known.
 Marengo joins the cache and returns clips already enriched with
 title / one_liner / mood_tags / role_hint, eliminating most follow-up
 Pegasus calls.
 
-*[Request / response example tables — TBD in v2.]*
+*[Request / response example tables: TBD in v2.]*
 
 ### 5.2 `pegasus_analyze(target, prompt)`
 
@@ -275,7 +275,7 @@ Discovery. Skipped when the index is already in context.
 
 ### 5.4 `get_kb_overview` / `list_kb_assets` / `lookup_asset_profile`
 
-The Tier-1 cache tools — see §4.
+The Tier-1 cache tools; see §4.
 
 ### 5.5 `ask_jockey(ks_id, prompt)` *(comparison only)*
 
@@ -289,11 +289,11 @@ divergence.
 
 Terraform-only deployment. Three modules under `infra/`:
 
-1. **`runtime.tf`** — ECS Fargate task def, agent container, IAM role.
+1. **`runtime.tf`**: ECS Fargate task def, agent container, IAM role.
    arm64-only (Graviton).
-2. **`gateway.tf`** — AgentCore Gateway, Cognito JWT authorizer, MCP target
+2. **`gateway.tf`**: AgentCore Gateway, Cognito JWT authorizer, MCP target
    pointing at the runtime.
-3. **`dynamodb.tf`** — `kb_cache` table, `pk = ks_<id>`, `sk = asset_<id>`
+3. **`dynamodb.tf`**: `kb_cache` table, `pk = ks_<id>`, `sk = asset_<id>`
    or `sk = OVERVIEW`.
 
 ```bash
@@ -316,7 +316,7 @@ python scripts/ingest_kb_cache.py ks_<id>
 
 ### 6.1 Hard-won gotchas
 
-*Excerpt — full list in `agent/RUNBOOK.md`.*
+*Excerpt; full list in `agent/RUNBOOK.md`.*
 
 - **AgentCore Runtime is arm64-only.** linux/amd64 images get rejected at
   `CreateAgentRuntime` with `Architecture incompatible`.
@@ -338,11 +338,11 @@ python scripts/ingest_kb_cache.py ks_<id>
 The architecture is **vertical-agnostic** by design. To switch use cases,
 only two things change:
 
-1. **The system prompt** — what the agent is being asked to assemble
+1. **The system prompt**: what the agent is being asked to assemble
    (highlight reel → news recap → ad cutdown → channel block).
-2. **The ingestion profile schema** — what gets cached per asset.
+2. **The ingestion profile schema**: what gets cached per asset.
 
-Worked examples (placeholders — flesh out one per follow-on paper):
+Worked examples (placeholders; flesh out one per follow-on paper):
 
 - **Sports recaps.** Profile schema gains `play_type`, `momentum_shift`,
   `crowd_energy`. Prompt asks for narrative arc, not mood arc.
@@ -361,13 +361,13 @@ runtime (AgentCore) doesn't change. Only the prompt and the cache schema.
 ## 8 · Reference implementation
 
 The companion repository at `github.com/twelvelabs/tl-agentcore` *(to be
-created — currently `~/Dev/tl-agentcore` local)* contains:
+created; currently `~/Dev/tl-agentcore` local)* contains:
 
-- `agent/` — Strands agent + tools (Python)
-- `ui/` — React demo with live tool-trace visualization
-- `infra/` — Terraform for one-command deployment
-- `scripts/` — `ingest_kb_cache.py`
-- `tests/` — end-to-end pipeline test
+- `agent/`: Strands agent + tools (Python)
+- `ui/`: React demo with live tool-trace visualization
+- `infra/`: Terraform for one-command deployment
+- `scripts/`: `ingest_kb_cache.py`
+- `tests/`: end-to-end pipeline test
 
 The reader can `terraform apply` and have a working endpoint in ~15
 minutes (plus the cache-ingestion time for whatever KB they bring).
@@ -378,7 +378,7 @@ minutes (plus the cache-ingestion time for whatever KB they bring).
 
 | Follow-on | Status |
 |---|---|
-| Pegasus 1.5 on Bedrock Marketplace — addendum on launch | pending Bedrock ETA |
+| Pegasus 1.5 on Bedrock Marketplace, addendum on launch | pending Bedrock ETA |
 | Sports-recap variant (white paper #2) | scoped |
 | Newsroom dossier variant (white paper #3) | scoped |
 | FAST-channel programming variant (white paper #4) | scoped |
@@ -387,28 +387,28 @@ minutes (plus the cache-ingestion time for whatever KB they bring).
 
 ---
 
-## Appendix A — Internal references (not for publication)
+## Appendix A: Internal references (not for publication)
 
 These exist in the source repo and inform the paper but should be stripped
 before external distribution:
 
-- `JOCKEY_INTERNALS.md` — TL's managed Jockey agent internals; source of
+- `JOCKEY_INTERNALS.md`: TL's managed Jockey agent internals; source of
   the cache-first pattern.
-- `AWS_CONVERSATION.md` — original architecture-discussion brief; source
+- `AWS_CONVERSATION.md`: original architecture-discussion brief; source
   of §3, §4, §6.
 - Lab demo flow notes (May 14, 2026 sync transcript).
 
 ---
 
-## Appendix B — Open questions for review
+## Appendix B: Open questions for review
 
 1. Should §4 (cache-first pattern) be its own short blog post AND a
    chapter in this paper, or just the chapter?
 2. How explicit do we get about Jockey-vs-agent latency parity? The
    number is favorable; the framing could read as competitive.
 3. Reviewer process: GitHub PR comments on `docs/whitepaper.md`, or
-   Google Docs round-trip? *Meeting agreed Google Drive — confirm.*
-4. Customer co-author / pull-quote — WBD? Other?
+   Google Docs round-trip? *Meeting agreed Google Drive; confirm.*
+4. Customer co-author / pull-quote: WBD? Other?
 
 ---
 
