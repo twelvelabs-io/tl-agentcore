@@ -131,7 +131,7 @@ sequenceDiagram
 | Concern | Bedrock Agents | AgentCore |
 |---|---|---|
 | Long-running multi-step tool calls | 60 s integration cap | Async invoke; multi-minute runs |
-| Framework choice | Bedrock-flavored | Strands · LangGraph · CrewAI · any |
+| Framework choice | Bedrock-flavored | Strands · CrewAI · any |
 | Tool catalog | OpenAPI action groups | MCP via Gateway (or inline) |
 | Identity | IAM only | Cognito JWT end-to-end through Gateway |
 | Compute | Managed | Customer container (arm64 Graviton) |
