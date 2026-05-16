@@ -56,47 +56,44 @@ flowchart TD
     Chat["<b>Chat λ</b><br/>async self-invoke"]
     Runtime["<b>AgentCore Runtime</b><br/>Strands · Sonnet 4.6<br/>Graviton container (arm64)"]
     Cache[("<b>DynamoDB</b><br/>kb_cache table<br/>per-asset profiles")]
-    TLApi["<b>TwelveLabs API</b><br/>/v1.3/search<br/>/v1.3/analyze"]
-    Jockey["<b>TwelveLabs Jockey</b><br/>/v1.3/responses<br/><i>(optional, comparison)</i>"]
+    Marengo["<b>Marengo</b> · /v1.3/search<br/>ranked clip-level retrieval"]
+    Pegasus["<b>Pegasus</b> · /v1.3/analyze<br/>single-video generation"]
 
     Browser -- "wss + Cognito JWT" --> CF
     CF --> WS
     WS --> Chat
     Chat -- "SigV4<br/>InvokeAgentRuntime" --> Runtime
     Runtime -- "<b>Tier 1</b> · cache · &lt;10 ms" --> Cache
-    Runtime -- "<b>Tier 2</b> · live · 1–10 s" --> TLApi
-    Runtime -- "<b>Tier 3</b> · orchestrated · 30 s–3 min" --> Jockey
+    Runtime -- "<b>Tier 2</b> · live · 1–10 s" --> Marengo
+    Runtime -- "<b>Tier 2</b> · live · 5–30 s" --> Pegasus
 
     classDef edge    fill:#fef3e2,stroke:#f59e0b,stroke-width:1px,color:#7c2d12
     classDef compute fill:#fef9c3,stroke:#ca8a04,stroke-width:1px,color:#713f12
     classDef hero    fill:#e0e7ff,stroke:#4f46e5,stroke-width:2px,color:#312e81
     classDef tier1   fill:#dcfce7,stroke:#16a34a,stroke-width:1px,color:#14532d
     classDef tier2   fill:#dbeafe,stroke:#2563eb,stroke-width:1px,color:#1e3a8a
-    classDef tier3   fill:#f3e8ff,stroke:#9333ea,stroke-width:1px,color:#581c87
 
     class Browser,CF,WS edge
     class Chat compute
     class Runtime hero
     class Cache tier1
-    class TLApi tier2
-    class Jockey tier3
+    class Marengo,Pegasus tier2
 ```
 
-### 3.2 The three-tier tool design
+### 3.2 The two-tier tool design
 
-The agent has access to three speed classes of tool. The system prompt
+The agent has access to two speed classes of tool. The system prompt
 requires it to try the fastest tier first.
 
 | Tier | Tool | p50 latency | When |
 |---|---|---|---|
 | 1 | `get_kb_overview` / `list_kb_assets` / `lookup_asset_profile` | <10 ms | Always start here on a known KS |
 | 2 | `marengo_search` / `pegasus_analyze` / `list_tl_indexes` | 1–10 s | Cache miss, or needs in-clip timecodes |
-| 3 | `ask_jockey` / `ask_followup` | 30 s–3 min | Open-ended Q&A across the corpus |
 
-This mirrors how TwelveLabs Jockey itself works internally: a managed
-agent that pre-computes a per-index "mini-ontology" so most questions are
-answered from cache, with Marengo and Pegasus reached for only when the
-cache is insufficient.
+The cache answers structural questions ("what's in this KB?", "find me
+action clips") without ever calling a model at runtime. The live
+primitives kick in only when a beat needs a fine-grained timecode or a
+fresh description that wasn't captured at index time.
 
 A typical six-beat rough-cut turn cascades through the tiers like this:
 
@@ -154,11 +151,10 @@ A 6-beat highlight reel built from `marengo_search` and `pegasus_analyze`
 alone, across a 1,300-clip knowledge store, takes 3–5 minutes. That is
 not interactive. Producers will not use it.
 
-### 4.2 What Jockey does internally
+### 4.2 The shape of a per-asset profile
 
-TwelveLabs' own managed Jockey agent answers KB-level questions in under
-two seconds because it pre-computes, at index time, a per-asset profile
-capturing:
+At index time, every asset in the knowledge store is run through a
+single Pegasus call that produces a structured profile:
 
 - One-line description
 - Mood tags (tension, action, celebration, …)
@@ -166,11 +162,13 @@ capturing:
 - Role hint (establishing, hero, b-roll, …)
 - Subject and entity surface
 
-…and stores it as a DDB row. The agent answers structural questions
-("what's in this KB?", "find me action clips") without ever calling
-Marengo or Pegasus at runtime.
+The profile is stored as a row in a DynamoDB table (`kb_cache`), keyed
+by knowledge-store id and asset id. A single additional row per
+knowledge store rolls those profiles up into a corpus overview: total
+asset count, dominant moods, dominant styles, sample titles. The agent
+reads either at single-digit-millisecond latency.
 
-### 4.3 The same pattern, ported to AgentCore
+### 4.3 Building the cache
 
 We ship the same ingestion as a script:
 
@@ -216,11 +214,11 @@ Three agent tools read it back at runtime:
 |---|---|
 | Live `marengo_search` + `pegasus_analyze` only | ~210 s |
 | Cache-first (Tier 1 → Tier 2 fallback) | ~55 s |
-| Jockey managed equivalent (reference) | ~50 s |
 
-The cache-first agent ships at parity with the managed Jockey path. The
-"AgentCore as compositional runtime" story is not a latency penalty; it
-is latency parity, with the orchestration owned by the customer.
+Cache-first cuts the six-beat highlight job from over three minutes to
+under one. That is the difference between a batch tool a producer uses
+overnight and an interactive tool they use at their desk. The cache is
+the lever; the Strands agent on AgentCore Runtime is the orchestrator.
 
 ---
 
@@ -248,12 +246,6 @@ Discovery. Skipped when the index is already in context.
 ### 5.4 `get_kb_overview` / `list_kb_assets` / `lookup_asset_profile`
 
 The Tier-1 cache tools; see §4.
-
-### 5.5 `ask_jockey(ks_id, prompt)`
-
-Forwards to the managed Jockey orchestrator. Lives in the catalog so the
-demo can show a side-by-side: same prompt, two runtimes, observable
-divergence.
 
 ---
 
