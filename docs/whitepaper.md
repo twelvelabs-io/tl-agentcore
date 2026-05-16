@@ -12,10 +12,6 @@ AgentCore plus TwelveLabs Marengo and Pegasus is the AWS-native path to
 that workflow without writing custom retrieval, custom ranking, or custom
 generative-vision code.
 
-A cache-first design pattern (per-asset profiles pre-built with Pegasus,
-served from DynamoDB) closes a 4× latency gap vs. naïve live calls, and
-is the single most important design decision for production use.
-
 The architecture generalizes from highlights to sports recaps, ad
 cutdowns, social shorts, and newsroom workflows with no agent-runtime
 changes.
@@ -39,18 +35,7 @@ component in the system that has watched the video. Everything else
 (filenames, transcripts, manual logs) is a proxy for what's actually on
 screen.
 
-### 2.2 Why classic AWS retrieval doesn't fit
-
-Bedrock Knowledge Bases is the textbook answer for text retrieval. Video
-has no peer primitive today. Naïve workarounds either:
-
-- **OCR + transcript embed.** Lossy. A speeding car, a held look, a
-  celebration: none of it is text. The retrieval recall is poor for
-  precisely the moments producers care about.
-- **CLIP-style frame embed.** Better, but missing temporal context. A
-  highlight is *a sequence*, not a frame.
-
-### 2.3 What "good" looks like
+### 2.2 What "good" looks like
 
 The agent should be able to ask the library: *"clips that look like a
 celebration after a tense moment"*, and get clip-level results with start
