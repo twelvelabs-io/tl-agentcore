@@ -108,7 +108,7 @@ sequenceDiagram
 
     U->>+A: build me a 60 s action highlight reel
 
-    rect rgb(220, 252, 231)
+    rect rgba(34, 197, 94, 0.12)
         Note over A,C: Turn 1 · cache scout · sub-10 ms per call
         A->>+C: get_kb_overview(ks)
         C-->>-A: corpus summary, top moods
@@ -122,7 +122,7 @@ sequenceDiagram
         C-->>A: candidate clips per beat
     end
 
-    rect rgb(219, 234, 254)
+    rect rgba(59, 130, 246, 0.12)
         Note over A,M: Turn 2 · Marengo pass · always, sources alternates · 1–3 s each
         par parallel · one per beat
             A->>M: marengo_search(ks, "kinetic action")
