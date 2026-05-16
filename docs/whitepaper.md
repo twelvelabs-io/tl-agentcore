@@ -170,7 +170,7 @@ reads either at single-digit-millisecond latency.
 
 ### 4.3 Building the cache
 
-We ship the same ingestion as a script:
+The cache is built by an ingestion script:
 
 ```mermaid
 flowchart LR
@@ -301,16 +301,17 @@ Ingest the cache for an existing KB:
 python scripts/ingest_kb_cache.py ks_<id>
 ```
 
-### 6.1 Hard-won gotchas
+### 6.1 Implementation notes
 
 - **AgentCore Runtime is arm64-only.** linux/amd64 images get rejected at
   `CreateAgentRuntime` with `Architecture incompatible`.
-- **API Gateway WebSocket has a 30 s integration cap.** Cannot be raised.
-  Forces an async self-invoke pattern in the chat lambda.
+- **API Gateway WebSocket has a 30 s integration cap.** It cannot be
+  raised, which forces an async self-invoke pattern in the chat lambda.
 - **Async lambda retry produces phantom duplicate runs.**
   `aws_lambda_function_event_invoke_config { maximum_retry_attempts = 0 }`
   is mandatory; otherwise every timeout fires the agent twice.
-- **`runtime-session-id` must be ≥33 chars.** Short ids get rejected. Pad.
+- **`runtime-session-id` must be ≥33 characters.** Short ids are rejected;
+  pad them before invoking.
 - **AWS provider ≥6.30** is required for `aws_bedrockagentcore_*` resources.
 - **AgentCore Runtime → custom HTTP timeouts.** AWS SDK default
   socketTimeout (180 s) is below the 300 s lambda cap. Set NodeHttpHandler
@@ -366,12 +367,12 @@ minutes, plus the cache-ingestion time for whatever KB they bring.
 
 | Follow-on | Status |
 |---|---|
-| Pegasus 1.5 on Bedrock Marketplace, addendum on launch | pending Bedrock ETA |
-| Sports-recap variant (white paper #2) | scoped |
-| Newsroom dossier variant (white paper #3) | scoped |
-| FAST-channel programming variant (white paper #4) | scoped |
-| Open-source MCP server for TwelveLabs primitives | proposed to AWS |
-| Typed `attach_video_knowledge` primitive in AgentCore | proposed to AWS |
+| Pegasus 1.5 on Bedrock Marketplace | Pending availability |
+| Sports-recap variant | Planned |
+| Newsroom dossier variant | Planned |
+| FAST-channel programming variant | Planned |
+| Open-source MCP server for TwelveLabs primitives | Roadmap |
+| Typed `attach_video_knowledge` primitive in AgentCore | Roadmap |
 
 ---
 
