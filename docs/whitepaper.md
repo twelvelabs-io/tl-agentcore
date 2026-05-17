@@ -20,6 +20,15 @@ taxonomy of moods or roles, no two-tier dispatch logic. One retrieval
 primitive returns ranked clips with timecodes, and the alternates
 producers can swap into the EDL are the natural shape of an ANN result.
 
+The first cut is not the final cut. After the agent emits the initial
+EDL, the producer can keep talking to it. Follow-up turns reuse the
+same AgentCore Runtime session and embed the current plan inline, so
+the agent always reasons over the live state of the cut. The agent
+classifies each follow-up as informational ("what's happening in scene
+2 clip 1?"), structural ("swap that for something more kinetic"), or
+ambiguous, and reaches for `pegasus_analyze` to ground answers about
+specific clips when retrieval similarity alone cannot.
+
 The architecture generalizes from highlights to sports recaps, ad
 cutdowns, social shorts, and newsroom workflows with no agent-runtime
 changes.
@@ -101,7 +110,7 @@ a beat needs prose, not retrieval.
 | Tool | p50 latency | Purpose |
 |---|---|---|
 | `vector_search` (embed + ANN) | ~250 ms | Ranked clip-level retrieval per beat |
-| `pegasus_analyze` | 5–15 s | Take-note generation, called only when the chosen clip lacks one |
+| `pegasus_analyze` | 5–15 s | Look at a specific clip and answer a question about what it visibly contains. Used to ground informational follow-ups in dialogue, not during the first cut. |
 | `list_tl_indexes` | <1 s | Discovery, skipped once the index is in context |
 
 A typical six-beat rough cut runs every beat through `vector_search` in
@@ -122,18 +131,14 @@ flowchart TD
     end
 
     VS --> A2[Agent · ranked clips per beat · rank 1 = primary, 2–5 = alternates]
-    A2 -.->|"opt · primary clip needs a take-note"| P["pegasus_analyze · grounded description"]
-    P -.-> A2
     A2 --> O(["EDL · scenes · primary clip + 2–4 alternates per beat"])
 
     classDef retrieval fill:#dcfce7,stroke:#16a34a,color:#14532d
     classDef agent     fill:#e0e7ff,stroke:#4f46e5,stroke-width:2px,color:#312e81
-    classDef pegasus   fill:#fef3e2,stroke:#f59e0b,color:#7c2d12
     classDef io        fill:#f1f5f9,stroke:#475569,color:#0f172a
 
     class V1,V2,V3,V4,VFan retrieval
     class A1,A2 agent
-    class P pegasus
     class U,O io
 
     style VS fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px,color:#14532d
@@ -158,6 +163,57 @@ For the highlight workflow specifically, a 6-beat rough cut routinely
 needs 8–15 tool calls. The runtime needs to support a 2–3 minute envelope
 without architectural gymnastics. AgentCore does; Bedrock Agents requires
 async-self-invoke workarounds.
+
+### 3.4 Conversation mode
+
+The first cut is rarely the final cut. The agent keeps the same
+AgentCore Runtime session across follow-up turns, so producer messages
+after the initial brief reuse the conversation context the runtime
+already holds. Each follow-up user message also embeds the live EDL
+inline as `[CURRENT PLAN] <plan>{...}</plan> [FOLLOWUP] {message}`, so
+the agent always reasons over the current state of the cut even if
+session memory lapses.
+
+Every follow-up is classified into one of three shapes before the
+agent decides which tools to call:
+
+| Shape | Producer intent (examples) | Tools | Reply |
+|---|---|---|---|
+| **Informational** | "What's visually happening in scene 2 clip 1?" · "Do scenes 1 and 4 feel similar?" · "Is the celebration shot bright enough?" | `pegasus_analyze` on the clip's `asset_id`, grounding the answer in what the model actually sees on screen | Plain prose. No `<plan>` block. |
+| **Structural** | "Swap that for something more kinetic" · "Drop scene 3" · "Extend the cut to 45 seconds" · "Use the rank-2 alternate on scene 4 clip 1" | `vector_search` for fresh candidates, plus existing alternates already on the plan | One or two sentences explaining the change, then a fresh full `<plan>` |
+| **Ambiguous** | (could be either) | none | A single clarifying question |
+
+```mermaid
+flowchart TD
+    Brief(["Producer follow-up message"]) --> Classify{{"agent classifies"}}
+
+    Classify -- informational --> Pegasus["pegasus_analyze · 1+ calls on specific asset_ids"]
+    Pegasus --> Prose["prose answer · no plan change"]
+
+    Classify -- structural --> Search["vector_search · refined beat phrases or reuse alternates"]
+    Search --> NewPlan["new <plan> · UI replaces timeline"]
+
+    Classify -- ambiguous --> Ask["one clarifying question · stop"]
+
+    classDef agent   fill:#e0e7ff,stroke:#4f46e5,stroke-width:2px,color:#312e81
+    classDef pegasus fill:#fef3e2,stroke:#f59e0b,color:#7c2d12
+    classDef retrieval fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef ask     fill:#f3e8ff,stroke:#9333ea,color:#581c87
+    classDef io      fill:#f1f5f9,stroke:#475569,color:#0f172a
+
+    class Classify agent
+    class Pegasus,Prose pegasus
+    class Search,NewPlan retrieval
+    class Ask ask
+    class Brief io
+```
+
+The UI surfaces this as a chat thread that replaces the script input
+once the first plan exists. Agent text deltas stream into the latest
+assistant message as they arrive; the `<plan>` block is hidden from
+the chat view and extracted onto the timeline when the turn finishes.
+A "new cut" button discards the conversation and starts a fresh
+session.
 
 ---
 
@@ -286,9 +342,13 @@ similarly-ranked option in the UI without re-running the agent.
 
 ### 5.2 `pegasus_analyze(target, prompt)`
 
-Single-video generation. Used only when the chosen primary clip needs
-a richer take-note than the embedding similarity score alone conveys
-(for example, *"what specifically happens at 0:32–0:38 in this clip?"*).
+Look at a specific clip and answer a question about what it visibly
+contains: subject, action, framing, mood, on-screen text, dialogue. The
+agent reaches for this tool in conversation mode when the producer asks
+something the embedding rank ordering cannot answer ("what's happening
+in scene 2 clip 1?", "do these two shots feel similar?"). Pass the
+clip's `asset_id` as `target` and the question as `prompt`; the response
+is grounding text the agent paraphrases back to the producer.
 
 ### 5.3 `list_tl_indexes()`
 
