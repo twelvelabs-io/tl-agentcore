@@ -28,6 +28,7 @@ import {
   deleteEntry,
   relativeTime,
   type RoughCutHistoryEntry,
+  type ChatMessage,
 } from "../lib/roughcut-history";
 
 const DEFAULT_FPS_OPTIONS = [
@@ -242,38 +243,50 @@ function extractPlan(text: string): RoughCutPlan | null {
   return null;
 }
 
-async function runAgentRoughCut(
+function newMsgId() {
+  return Math.random().toString(36).slice(2, 10);
+}
+
+function newSessionId() {
+  // AgentCore runtime requires runtime-session-id length >= 33. Pad generously.
+  return `tl-${Date.now()}-${Math.random().toString(36).slice(2, 14)}-padpadpadpadpad`;
+}
+
+/** Remove <plan>...</plan> and JSON code fences from streamed text so the
+ *  chat thread shows only the agent's prose. The full text is still parsed
+ *  separately for plan extraction. */
+function stripPlanBlock(text: string): string {
+  let out = text.replace(/<plan>[\s\S]*?<\/plan>/gi, "");
+  // Open <plan> tag with no close yet: hide everything from there forward
+  // so partial JSON isn't shown mid-stream.
+  const openOnly = out.indexOf("<plan>");
+  if (openOnly >= 0) out = out.slice(0, openOnly);
+  return out.replace(/```(?:json)?\s*[\s\S]*?```/g, "").trim();
+}
+
+/** Stream one agent turn and feed text deltas into onDelta. Returns the full
+ *  accumulated text so the caller can parse a plan out of it. */
+async function streamTurn(
   ksId: string,
-  script: string,
-  onTrace?: (kind: "tool_call" | "tool_result" | "rationale" | "text", payload: unknown) => void,
-): Promise<RoughCutPlan> {
-  const wrappedPrompt = `${AGENT_INSTRUCTIONS}\n\n---\n\nProducer's brief / script:\n${script.trim()}\n\nKnowledge store id: ${ksId}\n\nGo.`;
+  prompt: string,
+  sessionId: string,
+  onDelta: (proseSoFar: string) => void,
+): Promise<string> {
   let acc = "";
   for await (const ev of streamAgentTurn({
     knowledge_store_id: ksId,
-    prompt: wrappedPrompt,
+    prompt,
+    session_id: sessionId,
   })) {
     if (ev.type === "text_delta") {
       acc += ev.delta;
-      onTrace?.("text", acc);
-    } else if (ev.type === "tool_call") {
-      onTrace?.("tool_call", ev);
-    } else if (ev.type === "tool_result") {
-      onTrace?.("tool_result", ev);
-    } else if (ev.type === "rationale") {
-      onTrace?.("rationale", ev);
+      onDelta(stripPlanBlock(acc));
     } else if (ev.type === "error") {
       throw new Error(ev.message);
     }
   }
-  if (!acc.trim()) throw new Error("Agent returned no text — likely the 5-min runtime cap was hit. Try a simpler script.");
-  const raw = extractPlan(acc);
-  if (!raw) throw new Error(`Agent didn't return a parseable <plan>JSON</plan> block.\n\n${acc.slice(0, 600)}`);
-  const clean = sanitizePlan(raw);
-  if (!clean.scenes.length) {
-    throw new Error("Agent returned a plan but every clip had an invalid asset_id or out-of-range timecode. The player would have been empty.");
-  }
-  return clean;
+  if (!acc.trim()) throw new Error("Agent returned no text — likely the 5-min runtime cap was hit. Try a simpler request.");
+  return acc;
 }
 
 export function RoughCut() {
@@ -290,6 +303,9 @@ export function RoughCut() {
   const renderPollRef = useRef<number | null>(null);
   const [history, setHistory] = useState<RoughCutHistoryEntry[]>([]);
   const [activeEntryId, setActiveEntryId] = useState<string | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [sessionId, setSessionId] = useState<string>("");
+  const [followup, setFollowup] = useState("");
 
   // Load history on mount.
   useEffect(() => { setHistory(loadHistory()); }, []);
@@ -359,29 +375,125 @@ export function RoughCut() {
     });
   };
 
+  const updateLastAssistant = (text: string) => {
+    setMessages((m) => {
+      const i = m.length - 1;
+      if (i < 0 || m[i].role !== "assistant") return m;
+      const next = m.slice();
+      next[i] = { ...next[i], text };
+      return next;
+    });
+  };
+
   const generate = async () => {
-    if (!ks || !script.trim()) return;
+    if (!ks || !script.trim() || busy) return;
     setBusy(true); setErr(null); setPlan(null); setElapsed(0);
     setRender(null); setRenderErr(null);
     if (renderPollRef.current) { clearInterval(renderPollRef.current); renderPollRef.current = null; }
+
+    const sid = sessionId || newSessionId();
+    if (!sessionId) setSessionId(sid);
+
+    const userMsg: ChatMessage = { id: newMsgId(), role: "user", text: script };
+    const asstMsg: ChatMessage = { id: newMsgId(), role: "assistant", text: "" };
+    setMessages([userMsg, asstMsg]);
+
     try {
-      const parsed = await runAgentRoughCut(ks._id, script);
-      setPlan(parsed);
+      const wrapped = `${AGENT_INSTRUCTIONS}\n\n---\n\nBrief:\n${script.trim()}\n\nKnowledge store id: ${ks._id}\n\nGo.`;
+      const full = await streamTurn(ks._id, wrapped, sid, updateLastAssistant);
+
+      const raw = extractPlan(full);
+      if (!raw) throw new Error(`Agent didn't return a parseable <plan>JSON</plan> block.\n\n${full.slice(0, 600)}`);
+      const clean = sanitizePlan(raw);
+      if (!clean.scenes.length) {
+        throw new Error("Agent returned a plan but every clip had an invalid asset_id or out-of-range timecode.");
+      }
+      setPlan(clean);
+
+      const finalMessages: ChatMessage[] = [userMsg, { ...asstMsg, text: stripPlanBlock(full) }];
+      setMessages(finalMessages);
+
       const saved = saveEntry({
-        title: parsed.title || "Untitled",
+        title: clean.title || "Untitled",
         script,
         fps,
-        plan: parsed,
+        plan: clean,
         ks_id: ks._id,
         ks_name: ks.name,
+        session_id: sid,
+        messages: finalMessages,
       });
       setActiveEntryId(saved.id);
       setHistory(loadHistory());
     } catch (e) {
       setErr(String(e));
+      updateLastAssistant(`Error: ${String(e)}`);
     } finally {
       setBusy(false);
     }
+  };
+
+  const sendFollowup = async () => {
+    if (!ks || !plan || !followup.trim() || busy) return;
+    const text = followup.trim();
+    setFollowup("");
+    setBusy(true); setErr(null);
+
+    const sid = sessionId || newSessionId();
+    if (!sessionId) setSessionId(sid);
+
+    const userMsg: ChatMessage = { id: newMsgId(), role: "user", text };
+    const asstMsg: ChatMessage = { id: newMsgId(), role: "assistant", text: "" };
+    setMessages((m) => [...m, userMsg, asstMsg]);
+
+    try {
+      const wrapped = `[ks: ${ks._id}]\n\n[CURRENT PLAN]\n<plan>\n${JSON.stringify(plan, null, 2)}\n</plan>\n\n[FOLLOWUP]\n${text}`;
+      const full = await streamTurn(ks._id, wrapped, sid, updateLastAssistant);
+
+      const prose = stripPlanBlock(full);
+      setMessages((m) => {
+        const i = m.length - 1;
+        if (i < 0) return m;
+        const next = m.slice();
+        next[i] = { ...next[i], text: prose };
+        return next;
+      });
+
+      // Structural reply: a fresh <plan> block. Update the timeline.
+      const raw = extractPlan(full);
+      let nextPlan = plan;
+      if (raw) {
+        const clean = sanitizePlan(raw);
+        if (clean.scenes.length) {
+          nextPlan = clean;
+          setPlan(clean);
+        }
+      }
+
+      // Persist conversation + (possibly) updated plan onto the active history entry.
+      if (activeEntryId) {
+        updateEntry(activeEntryId, {
+          plan: nextPlan,
+          messages: [...messages, userMsg, { ...asstMsg, text: prose }],
+        });
+        setHistory(loadHistory());
+      }
+    } catch (e) {
+      setErr(String(e));
+      updateLastAssistant(`Error: ${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const newConversation = () => {
+    setMessages([]);
+    setSessionId("");
+    setPlan(null);
+    setActiveEntryId(null);
+    setFollowup("");
+    setErr(null);
+    setRender(null); setRenderErr(null);
   };
 
   const restoreEntry = (entry: RoughCutHistoryEntry) => {
@@ -391,6 +503,9 @@ export function RoughCut() {
     setErr(null);
     setRenderErr(null);
     setPlan(entry.plan);
+    setMessages(entry.messages || []);
+    setSessionId(entry.session_id || "");
+    setFollowup("");
     if (entry.render?.status === "COMPLETE" && entry.render.output_url) {
       setRender({
         job_id: entry.render.job_id,
@@ -492,31 +607,83 @@ export function RoughCut() {
       />
 
       <div className="grid lg:grid-cols-[1fr_1.4fr] gap-12">
-        {/* LEFT: script input */}
+        {/* LEFT: script input OR conversation thread once a plan exists */}
         <section>
-          <div className="label">§ I · Script</div>
-          <div className="rule mt-3 mb-4" />
-          <textarea
-            className="bg-transparent border w-full p-4 outline-none text-sm leading-relaxed font-mono"
-            style={{ borderColor: "var(--color-rule)", minHeight: "60vh" }}
-            value={script}
-            onChange={(e) => setScript(e.target.value)}
-            placeholder="Paste a script, treatment, or scene-by-scene outline…"
-          />
-          <div className="flex items-center justify-between mt-4">
-            <div className="label" style={{ color: "var(--color-ink-faint)" }}>
-              {script.length.toLocaleString()} chars · free-form prose, fountain, or outline
-            </div>
-            <button
-              className="btn btn-cue"
-              onClick={generate}
-              disabled={busy || !ks || !script.trim()}
-            >
-              {busy ? `assembling… ${elapsed}s` : "assemble rough cut →"}
-            </button>
-          </div>
-          {err && (
-            <pre className="font-mono text-xs mt-4 p-3 whitespace-pre-wrap" style={{ background: "var(--color-surface)", color: "var(--color-status-failed)" }}>{err}</pre>
+          {plan ? (
+            <>
+              <div className="flex items-baseline justify-between">
+                <div className="label">§ I · Conversation</div>
+                <button
+                  className="label hover:text-[var(--color-cue)]"
+                  onClick={newConversation}
+                  disabled={busy}
+                  title="discard this thread and start a new rough cut"
+                >
+                  + new cut
+                </button>
+              </div>
+              <div className="rule mt-3 mb-4" />
+              <ChatThread messages={messages} streaming={busy} />
+              <div className="mt-4">
+                <textarea
+                  className="bg-transparent border w-full p-3 outline-none text-sm font-mono"
+                  style={{ borderColor: "var(--color-rule)", minHeight: 84 }}
+                  rows={3}
+                  value={followup}
+                  onChange={(e) => setFollowup(e.target.value)}
+                  placeholder="ask the agent to swap a clip, extend the cut, describe what's in scene 2…  (⌘↩ to send)"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                      e.preventDefault();
+                      void sendFollowup();
+                    }
+                  }}
+                  disabled={busy}
+                />
+                <div className="flex items-center justify-between mt-2">
+                  <div className="label" style={{ color: "var(--color-ink-faint)" }}>
+                    {busy ? "agent thinking…" : "⌘↩ to send"}
+                  </div>
+                  <button
+                    className="btn btn-cue"
+                    onClick={sendFollowup}
+                    disabled={busy || !followup.trim()}
+                  >
+                    {busy ? "..." : "send →"}
+                  </button>
+                </div>
+              </div>
+              {err && (
+                <pre className="font-mono text-xs mt-4 p-3 whitespace-pre-wrap" style={{ background: "var(--color-surface)", color: "var(--color-status-failed)" }}>{err}</pre>
+              )}
+            </>
+          ) : (
+            <>
+              <div className="label">§ I · Script</div>
+              <div className="rule mt-3 mb-4" />
+              <textarea
+                className="bg-transparent border w-full p-4 outline-none text-sm leading-relaxed font-mono"
+                style={{ borderColor: "var(--color-rule)", minHeight: "60vh" }}
+                value={script}
+                onChange={(e) => setScript(e.target.value)}
+                placeholder="Paste a script, treatment, or scene-by-scene outline…"
+              />
+              <div className="flex items-center justify-between mt-4">
+                <div className="label" style={{ color: "var(--color-ink-faint)" }}>
+                  {script.length.toLocaleString()} chars · free-form prose, fountain, or outline
+                </div>
+                <button
+                  className="btn btn-cue"
+                  onClick={generate}
+                  disabled={busy || !ks || !script.trim()}
+                >
+                  {busy ? `assembling… ${elapsed}s` : "assemble rough cut →"}
+                </button>
+              </div>
+              {err && (
+                <pre className="font-mono text-xs mt-4 p-3 whitespace-pre-wrap" style={{ background: "var(--color-surface)", color: "var(--color-status-failed)" }}>{err}</pre>
+              )}
+            </>
           )}
         </section>
 
@@ -643,6 +810,60 @@ function planToChannel(plan: RoughCutPlan, idPrefix: string, assetCache: Record<
     programs,
     total_duration_sec: total,
   };
+}
+
+function ChatThread({ messages, streaming }: { messages: ChatMessage[]; streaming: boolean }) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+  }, [messages]);
+
+  if (!messages.length) {
+    return (
+      <p className="text-sm py-8" style={{ color: "var(--color-ink-faint)" }}>
+        The conversation will start once the first cut is generated.
+      </p>
+    );
+  }
+
+  return (
+    <div
+      ref={scrollRef}
+      className="space-y-5 overflow-y-auto pr-2"
+      style={{ maxHeight: "55vh" }}
+    >
+      {messages.map((m, i) => {
+        const isUser = m.role === "user";
+        const isLast = i === messages.length - 1;
+        const isStreaming = streaming && isLast && !isUser;
+        return (
+          <div key={m.id}>
+            <div
+              className="label"
+              style={{ color: isUser ? "var(--color-cue)" : "var(--color-ink-faint)" }}
+            >
+              {isUser ? "You" : "Agent"}
+            </div>
+            <p
+              className="text-sm mt-1 whitespace-pre-wrap leading-relaxed"
+              style={{
+                color: isUser ? "var(--color-ink)" : "var(--color-ink-soft)",
+                fontFamily: isUser ? "var(--font-mono)" : undefined,
+              }}
+            >
+              {m.text}
+              {isStreaming && (
+                <span className="caret" style={{ color: "var(--color-cue)" }}>▌</span>
+              )}
+              {isStreaming && !m.text && (
+                <span style={{ color: "var(--color-ink-faint)" }}>thinking…</span>
+              )}
+            </p>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 function SceneBlock({

@@ -5,6 +5,12 @@
 
 import type { RoughCutPlan } from "./edl";
 
+export type ChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+};
+
 export type RoughCutHistoryEntry = {
   id: string;
   created_at: number;
@@ -15,6 +21,12 @@ export type RoughCutHistoryEntry = {
   ks_id?: string;
   ks_name?: string;
   render?: { job_id: string; render_id?: string; output_url?: string; status: string };
+  /** AgentCore runtime session id; reused across follow-up turns so the
+   *  runtime keeps conversation state in its own backing store. */
+  session_id?: string;
+  /** Conversation thread so far. The latest assistant message has the
+   *  prose-only response (the <plan> block has been stripped). */
+  messages?: ChatMessage[];
 };
 
 const KEY = "tl-agentcore.roughcut.history.v1";
