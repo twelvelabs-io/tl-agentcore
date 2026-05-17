@@ -402,22 +402,24 @@ export function RoughCut() {
       const wrapped = `${AGENT_INSTRUCTIONS}\n\n---\n\nBrief:\n${script.trim()}\n\nKnowledge store id: ${ks._id}\n\nGo.`;
       const full = await streamTurn(ks._id, wrapped, sid, updateLastAssistant);
 
+      // Prose-only is a legitimate first response: the agent may legitimately
+      // bail out (empty index, ambiguous brief, missing KS context) and reply
+      // with a plain explanation. Don't treat that as an error - keep the
+      // chat thread visible so the producer sees the explanation and can
+      // follow up.
       const raw = extractPlan(full);
-      if (!raw) throw new Error(`Agent didn't return a parseable <plan>JSON</plan> block.\n\n${full.slice(0, 600)}`);
-      const clean = sanitizePlan(raw);
-      if (!clean.scenes.length) {
-        throw new Error("Agent returned a plan but every clip had an invalid asset_id or out-of-range timecode.");
-      }
-      setPlan(clean);
+      const clean = raw ? sanitizePlan(raw) : null;
+      const hasPlan = !!(clean && clean.scenes.length);
 
       const finalMessages: ChatMessage[] = [userMsg, { ...asstMsg, text: stripPlanBlock(full) }];
       setMessages(finalMessages);
+      if (hasPlan) setPlan(clean);
 
       const saved = saveEntry({
-        title: clean.title || "Untitled",
+        title: hasPlan ? (clean!.title || "Untitled") : "(no plan yet)",
         script,
         fps,
-        plan: clean,
+        plan: hasPlan ? clean! : { scenes: [] } as RoughCutPlan,
         ks_id: ks._id,
         ks_name: ks.name,
         session_id: sid,
@@ -434,7 +436,7 @@ export function RoughCut() {
   };
 
   const sendFollowup = async () => {
-    if (!ks || !plan || !followup.trim() || busy) return;
+    if (!ks || !followup.trim() || busy) return;
     const text = followup.trim();
     setFollowup("");
     setBusy(true); setErr(null);
@@ -447,7 +449,13 @@ export function RoughCut() {
     setMessages((m) => [...m, userMsg, asstMsg]);
 
     try {
-      const wrapped = `[ks: ${ks._id}]\n\n[CURRENT PLAN]\n<plan>\n${JSON.stringify(plan, null, 2)}\n</plan>\n\n[FOLLOWUP]\n${text}`;
+      // If a plan already exists, embed it inline so the agent reasons over
+      // the live state of the cut. If not (e.g. the first turn replied
+      // prose-only because the index was empty and the producer is now
+      // retrying), skip the CURRENT PLAN block.
+      const wrapped = plan
+        ? `[ks: ${ks._id}]\n\n[CURRENT PLAN]\n<plan>\n${JSON.stringify(plan, null, 2)}\n</plan>\n\n[FOLLOWUP]\n${text}`
+        : `${AGENT_INSTRUCTIONS}\n\n---\n\n[ks: ${ks._id}]\n\n[FOLLOWUP]\n${text}`;
       const full = await streamTurn(ks._id, wrapped, sid, updateLastAssistant);
 
       const prose = stripPlanBlock(full);
@@ -473,7 +481,7 @@ export function RoughCut() {
       // Persist conversation + (possibly) updated plan onto the active history entry.
       if (activeEntryId) {
         updateEntry(activeEntryId, {
-          plan: nextPlan,
+          plan: nextPlan || ({ scenes: [] } as RoughCutPlan),
           messages: [...messages, userMsg, { ...asstMsg, text: prose }],
         });
         setHistory(loadHistory());
@@ -607,9 +615,9 @@ export function RoughCut() {
       />
 
       <div className="grid lg:grid-cols-[1fr_1.4fr] gap-12">
-        {/* LEFT: script input OR conversation thread once a plan exists */}
+        {/* LEFT: script input OR conversation thread once any turn has run */}
         <section>
-          {plan ? (
+          {messages.length > 0 ? (
             <>
               <div className="flex items-baseline justify-between">
                 <div className="label">§ I · Conversation</div>
@@ -707,11 +715,21 @@ export function RoughCut() {
           </div>
           <div className="rule mt-3 mb-4" />
 
-          {!plan && !busy && (
+          {!plan && !busy && messages.length === 0 && (
             <p className="text-sm" style={{ color: "var(--color-ink-faint)" }}>
               Paste your script and click <span className="font-mono">assemble rough cut →</span>.
               The cut will appear here scene by scene.
             </p>
+          )}
+
+          {!plan && !busy && messages.length > 0 && (
+            <div data-testid="no-plan-placeholder" className="py-8">
+              <p className="text-sm" style={{ color: "var(--color-ink-soft)" }}>
+                No EDL yet — see the agent's reply in the conversation. Once the
+                blocker is resolved (most often a missing vector index), reply with
+                <span className="font-mono"> "try again"</span> to retry the cut.
+              </p>
+            </div>
           )}
 
           {busy && (
