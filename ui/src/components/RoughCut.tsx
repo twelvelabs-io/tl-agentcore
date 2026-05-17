@@ -110,25 +110,21 @@ const SCHEMA = {
   required: ["title", "scenes"],
 };
 
-// Rough Cut prompt: the AgentCore Strands agent uses one retrieval primitive
-// (vector_search over an S3 Vectors index of Marengo clip embeddings) plus
-// pegasus_analyze when a primary needs a richer take-note.
-const AGENT_INSTRUCTIONS = `You are an experienced film editor assembling a rough cut by orchestrating TwelveLabs primitives. You have one retrieval primitive: \`vector_search\`. Use it once per beat in parallel; emit the EDL.
+// User-message wrapper appended per turn. Restates the retrieval contract
+// for the agent so orchestration stays deterministic across runs and across
+// UI surfaces.
+const AGENT_INSTRUCTIONS = `TASK: compose an EDL from the brief below and the active knowledge_store_id supplied as \`[ks: ks_xxx]\` in this message. One retrieval primitive: \`vector_search\`. Emit one call per beat in parallel, then write the EDL.
 
-## Approach — keep it tight, 1 to 2 turns total
+PROCEDURE
+  Step 1. Parse the brief into N beat phrases, one per intended scene, in narrative order. Write each phrase as a retrieval query: a concrete sensory verb, the dominant subject, and one tonal modifier. Strip articles and stage directions.
+  Step 2. In a single model turn, emit N vector_search calls in parallel. Each call: query_text = the beat phrase, knowledge_store_id = the KS from \`[ks: ks_xxx]\`, k = 5.
+  Step 3. From every response, take rank 1 as the primary clip and ranks 2..k as alternates on the same clip object. Do not redistribute ranks across beats.
+  Step 4. Run the adjacency check: if two consecutive primaries look the same in framing or subject, swap one of them for its rank 2. Assign role based on where the clip sits in the cut (opening leans on establishing or wide; middle alternates medium and close-up; closing leans on hero or held). Take_note is one sentence naming what the rank-1 clip visibly shows for the beat - subject + action + framing. Not a justification of the rank.
+  Step 5. Emit the EDL.
 
-### Turn 1 — parse + parallel vector_search per beat
-Parse the brief into N beat phrases (one per scene, in narrative order). In a single model turn, emit N parallel \`vector_search\` calls, each with:
-- \`query_text\`: the beat phrase (e.g. "kinetic action with crowd reaction", "quiet vineyard wide shot", "celebration after a tense moment")
-- \`knowledge_store_id\`: the active KS from \`[ks: ks_xxx]\` in the user message
-- \`k\`: 5 (rank 1 = primary, ranks 2–5 = alternates)
+\`pegasus_analyze\` is optional: invoke only if the brief explicitly asks for description of a specific clip moment that the rank ordering cannot answer.
 
-### Turn 2 — emit the plan
-Use rank 1 from each \`vector_search\` response as the primary on that beat; ranks 2–5 become the \`alternatives\` array. timecodes come straight from each result's \`start_time\` / \`end_time\` fields.
-
-Only call \`pegasus_analyze\` if you actively need a richer take-note than the similarity rank conveys (e.g. the producer asked something specific about a clip).
-
-## EDL schema
+SCHEMA
 
 <plan>
 {
@@ -161,23 +157,18 @@ Only call \`pegasus_analyze\` if you actively need a richer take-note than the s
 }
 </plan>
 
-## Absolute rules
+REPLY FORMAT
+Exactly two parts, in this order:
+  (a) one or two sentences of plain commentary describing how the brief was decomposed and how strong the top hits look,
+  (b) the JSON above. Strict JSON: no trailing commas, no comments, no markdown fences, no prose after the JSON.
 
-- Emit ALL \`vector_search\` calls IN PARALLEL in one turn — one per beat.
-- \`video_reference\` is the 24-char hex asset_id field returned by \`vector_search\`. Never invent ids; never use filenames.
-- The alternatives on a clip are ranks 2..k from the SAME vector_search response that produced the primary. Do not mix alternates across beats.
-- Lead with 1 to 2 sentences of commentary BEFORE the JSON.
-- Strict JSON: no trailing commas, no comments inside.
+CONSTRAINTS
+  - video_reference comes verbatim from a vector_search response. No filenames, no synthesized ids.
+  - Per-clip duration between 3 and 30 seconds. Per-scene clip count between 3 and 5. Full cut between 30 seconds and 4 minutes.
+  - Time fields are HH:MM:SS with three zero-padded components. No SMPTE frame suffix.
 
-## Duration + range rules (silent clamping if violated)
-
-- HH:MM:SS, three zero-padded components. "00:00:30" yes; "00:00:30:00" no; "0:30" no.
-- Each clip 3-30 seconds.
-- Per scene, 3-5 clips. Per cut, total 30s-4min.
-
-## When the index is empty
-
-If \`vector_search\` returns an empty \`clips\` list for every beat, tell the user the index has not been built for this KS yet and recommend running \`scripts/ingest_vectors.py <ks_id>\`.`;
+EMPTY INDEX
+If vector_search returns \`clips: []\` for every beat, do NOT emit a plan. Reply in plain prose that the embedding index has not been populated for this knowledge_store_id and direct the producer to run \`scripts/ingest_vectors.py <ks_id>\`.`;
 
 // Sanity-check + repair a plan returned by the agent. The agent — even with
 // the prompt rules — sometimes emits SMPTE timecode (HH:MM:SS:FF), uses
