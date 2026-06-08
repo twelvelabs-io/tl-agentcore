@@ -97,34 +97,99 @@ if [ "$INDEX_VIDEOS" = "0" ]; then
   echo "    attached."
 else
   echo "==> Index already has $INDEX_VIDEOS video(s); skipping ingest."
+  # Resolve the existing asset_id so the mirror step still runs on re-runs.
+  ASSET_ID=$(curl -fsS "${H_AUTH[@]}" "$TL/knowledge-stores/$KS_ID/items?page_limit=50" \
+    | python3 -c "import json,sys; d=json.load(sys.stdin).get('data',[]); print((d[0] if d else {}).get('asset_id',''))")
 fi
 
-# ─── 4. Ingest Marengo clip embeddings into the S3 Vector index ───────────
+# ─── 4. Mirror asset bytes into the clips bucket ──────────────────────────
 #
-# Skipped automatically if VECTOR_BUCKET_NAME is unset (lets the script
-# stay useful in scenarios where infra isn't deployed yet). When set, the
-# ingest script is idempotent: re-running for an already-embedded asset
-# just upserts the same vectors.
-if [ -n "${VECTOR_BUCKET_NAME:-}" ]; then
+# Bedrock-native Marengo + Pegasus read media from S3 only (no URL input).
+# We stage every KS asset at clips/<asset_id>.mp4 so ingest_vectors and the
+# runtime Pegasus call can find each one deterministically. The fixture
+# holds three short clips with distinct content (Bunny, Jellyfish, Sintel)
+# so the alternates spec sees real variety, not duplicates.
+filename_to_url() {
+  # Case statement instead of `declare -A` so this works on macOS bash 3.2.
+  case "$1" in
+    Big_Buck_Bunny_360_10s_1MB.mp4) echo "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4" ;;
+    Jellyfish_360_10s_1MB.mp4)      echo "https://test-videos.co.uk/vids/jellyfish/mp4/h264/360/Jellyfish_360_10s_1MB.mp4" ;;
+    Sintel_360_10s_1MB.mp4)         echo "https://test-videos.co.uk/vids/sintel/mp4/h264/360/Sintel_360_10s_1MB.mp4" ;;
+    *) echo "" ;;
+  esac
+}
+
+if [ -n "${CLIPS_BUCKET_NAME:-}" ]; then
+  echo "==> Mirroring each KS asset into s3://${CLIPS_BUCKET_NAME}/clips/"
+  ASSET_IDS=$(curl -fsS "${H_AUTH[@]}" "$TL/knowledge-stores/$KS_ID/items?page_limit=50" \
+    | python3 -c "import json,sys
+for it in json.load(sys.stdin).get('data',[]):
+    print(it.get('asset_id'))")
+  for AID in $ASSET_IDS; do
+    [ -z "$AID" ] && continue
+    FN=$(curl -fsS "${H_AUTH[@]}" "$TL/assets/$AID" \
+          | python3 -c "import json,sys; print(json.load(sys.stdin).get('filename',''))")
+    URL=$(filename_to_url "$FN")
+    if [ -z "$URL" ]; then
+      echo "    [$AID] WARN no source URL mapped for filename '$FN'; skipping"
+      continue
+    fi
+    S3_KEY="clips/${AID}.mp4"
+    echo "    [$AID] $FN -> s3://${CLIPS_BUCKET_NAME}/${S3_KEY}"
+    TMP=$(mktemp -t clip-XXXXX.mp4)
+    curl -fsSL -o "$TMP" "$URL"
+    aws s3 cp "$TMP" "s3://${CLIPS_BUCKET_NAME}/${S3_KEY}" --content-type video/mp4 >/dev/null
+    rm -f "$TMP"
+  done
+else
+  echo "==> CLIPS_BUCKET_NAME not set; skipping S3 mirror"
+  echo "    (export it and re-run to enable Bedrock-native ingest/analysis)"
+fi
+
+# ─── 5. Ingest Marengo clip embeddings into the S3 Vector index ───────────
+#
+# Pure-AWS ingest: calls Bedrock Marengo 3.0 via StartAsyncInvoke against
+# the mirrored S3 object. The TL API is touched only to list KS items.
+if [ -n "${VECTOR_BUCKET_NAME:-}" ] && [ -n "${CLIPS_BUCKET_NAME:-}" ]; then
   echo "==> Ingesting clip embeddings into s3vectors://${VECTOR_BUCKET_NAME}"
   TL_API_KEY="${TL_API_KEY}" \
+    CLIPS_BUCKET_NAME="${CLIPS_BUCKET_NAME}" \
     VECTOR_BUCKET_NAME="${VECTOR_BUCKET_NAME}" \
     VECTOR_INDEX_NAME="${VECTOR_INDEX_NAME:-clips}" \
     AWS_REGION="${AWS_REGION:-us-east-1}" \
     python3 scripts/ingest_vectors.py "$KS_ID"
 else
-  echo "==> VECTOR_BUCKET_NAME not set; skipping vector ingest"
-  echo "    (run scripts/ingest_vectors.py separately when ready)"
+  echo "==> VECTOR_BUCKET_NAME / CLIPS_BUCKET_NAME not set; skipping vector ingest"
+  echo "    (export both and run scripts/ingest_vectors.py separately when ready)"
 fi
 
-# ─── 5. Write TEST_KS_ID into ui/e2e/.env.test ─────────────────────────────
+# ─── 6. Empty KS fixture (no assets, no vectors) ──────────────────────────
+# Used by the empty-index E2E spec to assert that the UI handles the
+# agent's prose-only "the index is empty" response gracefully (no
+# "Error: ..." prefix, no thrown JSON-parse complaint).
+EMPTY_KS_NAME="tl-agentcore-e2e-empty"
+echo "==> Finding or creating empty KS '$EMPTY_KS_NAME'..."
+EMPTY_KS_ID=$(curl -fsS "${H_AUTH[@]}" "$TL/knowledge-stores?page_limit=50" \
+  | python3 -c "import json,sys; d=json.load(sys.stdin).get('data',[]); print(next((k['_id'] for k in d if k.get('name')=='$EMPTY_KS_NAME'), ''))" )
+
+if [ -z "$EMPTY_KS_ID" ]; then
+  echo "    creating new empty KS..."
+  EMPTY_KS_ID=$(curl -fsS "${H_AUTH[@]}" "${H_JSON[@]}" -X POST "$TL/knowledge-stores" \
+    -d "{\"name\":\"$EMPTY_KS_NAME\",\"description\":\"Playwright E2E empty-index fixture (no assets, no vectors)\"}" \
+    | python3 -c "import json,sys; print(json.load(sys.stdin)['_id'])")
+fi
+echo "    empty_ks_id=$EMPTY_KS_ID"
+# Deliberately do NOT attach assets or run ingest_vectors against this KS.
+
+# ─── 7. Write TEST_KS_ID + TEST_EMPTY_KS_ID into ui/e2e/.env.test ─────────
 mkdir -p ui/e2e
 touch "$ENV_TEST"
 TMP=$(mktemp)
-grep -v "^TEST_KS_ID=" "$ENV_TEST" > "$TMP" || true
+grep -vE "^(TEST_KS_ID|TEST_EMPTY_KS_ID)=" "$ENV_TEST" > "$TMP" || true
 echo "TEST_KS_ID=$KS_ID" >> "$TMP"
+echo "TEST_EMPTY_KS_ID=$EMPTY_KS_ID" >> "$TMP"
 mv "$TMP" "$ENV_TEST"
-echo "==> wrote TEST_KS_ID=$KS_ID to $ENV_TEST"
+echo "==> wrote TEST_KS_ID=$KS_ID and TEST_EMPTY_KS_ID=$EMPTY_KS_ID to $ENV_TEST"
 
 echo
 echo "Done. Run E2E with:  cd ui && npm run test:e2e"

@@ -9,8 +9,9 @@
 // numbered steps, etc. — and override the unknown vref/tref elements with
 // our chip components.
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import { getAsset, getItem, type Asset, type KSItem } from "./api";
 import { setState } from "./store";
@@ -114,21 +115,54 @@ function wrapAssetIds(text: string): string {
   return text.replace(ASSET_ID_RE, (_, id) => `<aref id="${id}"></aref>`);
 }
 
+/** Strip `<plan>…</plan>` JSON blocks (the Rough Cut EDL payload) from
+ *  any agent output before it reaches the markdown renderer. The plan
+ *  block is an internal contract between the agent and the Rough Cut
+ *  timeline view — surfacing the raw JSON in a chat thread (e.g. on the
+ *  Agent tab, when a user asks for a reel) dumps a wall of unreadable
+ *  data. Centralizing the strip here means every consumer of
+ *  `ResponseMarkdown` gets this for free. */
+function stripPlanBlocks(text: string): string {
+  // Closed pairs anywhere in the text.
+  let out = text.replace(/<plan>[\s\S]*?<\/plan>/gi, "");
+  // Truncated/streaming case — open tag with no close yet. Hide everything
+  // from there forward so the JSON never paints.
+  const open = out.indexOf("<plan>");
+  if (open >= 0) out = out.slice(0, open);
+  return out.trim();
+}
+
 export function ResponseMarkdown({ text, ksId }: { text: string; ksId?: string }) {
-  if (!text) return null;
-  const prepared = wrapAssetIds(text);
+  // Memoize the prepared markdown AND the components map. Without this,
+  // every render of the parent (e.g. each keystroke in the chat input)
+  // hands react-markdown a brand-new `components` object — react-markdown
+  // treats the new function references as DIFFERENT component types and
+  // unmounts/remounts every <AssetChip>, which resets the chip's resolved
+  // asset state and re-fires its fetch. Result: chips flicker to "loading"
+  // and back on every keystroke. Memoizing keyed on ksId makes the chip
+  // tree stable across unrelated re-renders.
+  const prepared = useMemo(
+    () => (text ? wrapAssetIds(stripPlanBlocks(text)) : ""),
+    [text],
+  );
+  const components = useMemo(
+    () => ({
+      vref: ({ id, start, end }: { id?: string; start?: string; end?: string }) =>
+        id && ksId ? <Vref id={id} ksId={ksId} start={start} end={end} /> :
+        id ? <Tref id={id} /> :
+        null,
+      tref: ({ id }: { id?: string }) => (id ? <Tref id={id} /> : null),
+      aref: ({ id }: { id?: string }) => (id ? <AssetChip id={id} /> : null),
+    }),
+    [ksId],
+  );
+  if (!text || !prepared.trim()) return null;
   return (
     <div className="response-md">
       <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeRaw]}
-        components={{
-          vref: ({ id, start, end }: { id?: string; start?: string; end?: string }) =>
-            id && ksId ? <Vref id={id} ksId={ksId} start={start} end={end} /> :
-            id ? <Tref id={id} /> :
-            null,
-          tref: ({ id }: { id?: string }) => (id ? <Tref id={id} /> : null),
-          aref: ({ id }: { id?: string }) => (id ? <AssetChip id={id} /> : null),
-        } as never}
+        components={components as never}
       >
         {prepared}
       </ReactMarkdown>

@@ -1,0 +1,66 @@
+/* Rough Cut·Lab — Cognito Hosted UI customization.
+ *
+ * Cognito only honors a fixed allow-list of `*-customizable` classes;
+ * unknown selectors fail the SetUICustomization API. This file is
+ * intentionally minimal — only the classes that survived the allow-list
+ * check are kept. Each rule sets one class on its own. */
+
+.background-customizable {
+  background: #0a0a0a;
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+  color: #fafafa;
+}
+
+.banner-customizable {
+  padding: 28px 0 14px;
+  background: transparent;
+}
+
+.label-customizable {
+  font-weight: 500;
+  font-size: 13px;
+  color: #a1a1aa;
+}
+
+.textDescription-customizable {
+  font-size: 13px;
+  color: #a1a1aa;
+  padding-top: 6px;
+}
+
+.inputField-customizable {
+  background: #171717;
+  border: 1px solid #27272a;
+  border-radius: 10px;
+  color: #fafafa;
+  padding: 10px 12px;
+  font-size: 14px;
+  width: 100%;
+  margin: 6px 0 14px;
+}
+
+.submitButton-customizable {
+  background: #fafafa;
+  color: #0a0a0a;
+  border: 1px solid #fafafa;
+  border-radius: 10px;
+  padding: 10px 18px;
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.submitButton-customizable:hover {
+  background: #d4d4d8;
+  border-color: #d4d4d8;
+}
+
+.errorMessage-customizable {
+  background: rgba(201, 140, 132, 0.12);
+  border: 1px solid #c98c84;
+  border-radius: 10px;
+  color: #c98c84;
+  padding: 10px 12px;
+  font-size: 13px;
+  margin: 8px 0;
+}

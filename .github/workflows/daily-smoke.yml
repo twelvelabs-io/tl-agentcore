@@ -1,0 +1,85 @@
+name: daily-smoke
+
+# Daily smoke run against the deployed stack. Runs the chromium suite
+# only (no cross-browser, no MediaConvert), posts a one-line summary to
+# Slack on completion (success or failure), and archives the full
+# report for two weeks.
+#
+# To enable:
+#   1. Set the same E2E secrets as e2e.yml.
+#   2. Add SLACK_WEBHOOK_URL pointing at the channel for build pings.
+#   3. Adjust the cron expression below (UTC) for your team's morning.
+on:
+  schedule:
+    - cron: "0 13 * * *"  # 06:00 PT / 13:00 UTC
+  workflow_dispatch: {}
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install ui deps
+        working-directory: ui
+        run: npm ci
+
+      - name: Install Playwright (chromium only)
+        working-directory: ui
+        run: npx playwright install --with-deps chromium
+
+      - name: Write .env.test
+        working-directory: ui/e2e
+        env:
+          E2E_BASE_URL: ${{ secrets.E2E_BASE_URL }}
+          TEST_USER_EMAIL: ${{ secrets.TEST_USER_EMAIL }}
+          TEST_USER_PASSWORD: ${{ secrets.TEST_USER_PASSWORD }}
+          TEST_KS_ID: ${{ secrets.TEST_KS_ID }}
+          TEST_EMPTY_KS_ID: ${{ secrets.TEST_EMPTY_KS_ID }}
+          TL_API_KEY: ${{ secrets.TL_API_KEY }}
+        run: |
+          cat > .env.test <<EOF
+          E2E_BASE_URL=$E2E_BASE_URL
+          TEST_USER_EMAIL=$TEST_USER_EMAIL
+          TEST_USER_PASSWORD=$TEST_USER_PASSWORD
+          TEST_KS_ID=$TEST_KS_ID
+          TEST_EMPTY_KS_ID=$TEST_EMPTY_KS_ID
+          TL_API_KEY=$TL_API_KEY
+          EOF
+
+      - name: Run smoke (chromium)
+        working-directory: ui
+        run: npx playwright test --project=chromium
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-report-${{ github.run_id }}
+          path: ui/playwright-report
+          retention-days: 14
+
+      - name: Notify Slack on success
+        if: success() && env.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          curl -sX POST -H 'content-type: application/json' \
+            --data "{\"text\": \":white_check_mark: tl-agentcore daily smoke passed (run ${{ github.run_id }})\"}" \
+            "$SLACK_WEBHOOK_URL"
+
+      - name: Notify Slack on failure
+        if: failure() && env.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          curl -sX POST -H 'content-type: application/json' \
+            --data "{\"text\": \":x: tl-agentcore daily smoke FAILED — <https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|run #${{ github.run_id }}>\"}" \
+            "$SLACK_WEBHOOK_URL"

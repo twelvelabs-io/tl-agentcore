@@ -21,13 +21,6 @@ variable "agent_model_id" {
   description = "Bedrock cross-region inference profile for the Strands orchestrator."
 }
 
-variable "tl_api_key" {
-  type        = string
-  default     = ""
-  sensitive   = true
-  description = "TwelveLabs API key. Stored in Secrets Manager; the runtime reads it at startup. Leave blank to manage the secret out-of-band."
-}
-
 # The container URI Terraform feeds the AgentCore Runtime. AgentCore caches
 # the resolved digest of `:latest` at create/update time and doesn't
 # re-resolve when the URI string is unchanged — so pushing a new image to
@@ -44,4 +37,10 @@ variable "seed_admin_email" {
   type        = string
   default     = ""
   description = "Email of the first admin user. Cognito emails them an invite + temporary password on first apply. Leave blank to skip and add users manually."
+}
+
+variable "pegasus_bedrock_model_id" {
+  type        = string
+  default     = "us.twelvelabs.pegasus-1-2-v1:0"
+  description = "Bedrock model id for Pegasus when pegasus_provider = 'bedrock'. Defaults to the us cross-region inference profile of Pegasus 1.2."
 }

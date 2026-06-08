@@ -3,15 +3,24 @@
 import { useEffect, useState } from "react";
 import type { KS } from "./api";
 
+import type { HistoryEntry } from "./roughcut-history";
+
 type State = {
   ks?: KS;
   ksList: KS[];
   ready: boolean;
   // Globally-rendered asset player modal — any chip in any tab can open it.
   activeAssetId?: string;
+  // History drawer (overlay panel from the masthead icon).
+  historyOpen: boolean;
+  // Live-arch right rail. Hidden by default; toggled from the tab header.
+  archOpen: boolean;
+  // A HistoryEntry the App wants restored after a tab switch. The target
+  // tab component consumes (and clears) this on mount via useEffect.
+  pendingRestore?: HistoryEntry;
 };
 
-const initial: State = { ksList: [], ready: false };
+const initial: State = { ksList: [], ready: false, historyOpen: false, archOpen: false };
 
 const listeners = new Set<() => void>();
 let state: State = initial;

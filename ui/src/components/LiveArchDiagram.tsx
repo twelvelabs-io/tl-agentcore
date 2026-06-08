@@ -1,39 +1,52 @@
-// Reusable architecture diagram that lights up nodes as a request flows.
-// Driven by an `activeNode` prop wired to streaming agent trace events.
+// Single architecture diagram covering everything we've shipped:
 //
-// Node IDs:
-//   browser → cloudfront → apigw → chat_lambda → runtime
-//                                                  │
-//                                              gateway (when MCP path)
-//                                                  ↓
-//                                        vector_search · pegasus
+//   ── LIVE FLOW (lights up per agent tool call) ──
+//     Browser → wss/Bedrock AgentCore (Cognito JWT)
+//     Browser → CloudFront → HTTP API → { kb_admin · kb_graph · upload+embed λs }
+//     AgentCore Runtime → 3 tool lanes:
+//       Tier 1 — kb_cache tools → DynamoDB (kb_cache + knowledge_stores + assets + rights + audiences)
+//       Tier 0 — vector_search / find_entity_by_image → S3 Vectors
+//       Tier 2 — pegasus_analyze → Bedrock Pegasus → S3 clips bucket
 //
-// Mapping (handled by callers):
-//   tool_call marengo/pegasus → "marengo_pegasus_tools" (then tl_*)
-//   tool_call vector_search        → "vector_search_tool" (then s3vectors_index)
-//   tool_result / rationale   → "runtime"
-//   text_delta                → "runtime"
-//   done                      → "browser" then null
-//   error                     → null (caller handles error styling separately)
+//   ── OFFLINE / INGEST FLOW (always visible, never highlights) ──
+//     Browser upload → MediaConvert HLS → S3 hls/ bundle
+//     Operator CLI scripts → Bedrock (Marengo · Pegasus · Titan · Claude) → DDB + S3 Vectors
+//     entity-Re-ID Step Functions → SageMaker Async (gdino) → S3 Vectors entity-patches
+//     CodeBuild → ECR (gdino + agent images)
+//
+// No TwelveLabs SaaS calls anywhere — every model runs through Bedrock
+// Marketplace under the customer's IAM.
 
 import { motion } from "motion/react";
 
 export type NodeId =
+  // Live flow
   | "browser"
   | "cloudfront"
   | "apigw"
-  | "chat_lambda"
+  | "kb_admin_lambda"
+  | "kb_graph_lambda"
+  | "presign_upload_lambda"
+  | "embed_clip_start_lambda"
   | "runtime"
   | "gateway"
-  | "lookup_rights"
-  | "audience_tools"
-  | "marengo_pegasus_tools"
   | "vector_search_tool"
-  | "tl_marengo"
-  | "tl_pegasus"
-  | "dynamodb_rights"
-  | "dynamodb_audiences"
-  | "s3vectors_index";
+  | "s3vectors_index"
+  | "pegasus_tool"
+  | "clips_bucket"
+  | "cache_tool"
+  | "ddb_cache"
+  // Offline flow (never lights up live)
+  | "operator_cli"
+  | "ingest_kb_cache_script"
+  | "ingest_vectors_script"
+  | "ingest_entity_thumbs_script"
+  | "build_event_groups_script"
+  | "step_functions"
+  | "mediaconvert"
+  | "sagemaker_async"
+  | "codebuild"
+  | "bedrock_models";
 
 type Activity = "idle" | "active" | "recent";
 
@@ -41,13 +54,10 @@ export function LiveArchDiagram({
   activeNode,
   history = [],
   compact = false,
-  hideStudioPath = false,
 }: {
   activeNode: NodeId | null;
   history?: NodeId[];
   compact?: boolean;
-  /** Hide the Marengo + Pegasus column. */
-  hideStudioPath?: boolean;
 }) {
   const stateOf = (id: NodeId): Activity => {
     if (id === activeNode) return "active";
@@ -56,182 +66,145 @@ export function LiveArchDiagram({
   };
 
   return (
-    <div className={compact ? "max-w-3xl mx-auto" : "max-w-4xl mx-auto"}>
+    <div className={compact ? "max-w-3xl mx-auto" : "max-w-5xl mx-auto"}>
+      <SectionHeader label="LIVE · agent runtime" />
+
       <div className={`flex flex-col items-center mx-auto ${compact ? "max-w-md" : "max-w-2xl"}`}>
-        <ArchCard
-          state={stateOf("browser")}
-          tag="client"
-          title="Browser"
-          sub={compact ? undefined : "React SPA · WebSocket"}
-        />
-        <ArchArrow active={activeNode === "cloudfront"} label="wss://…/live" />
-        <ArchCard
-          state={stateOf("cloudfront")}
-          tag="edge"
-          title="CloudFront"
-          sub={compact ? undefined : "single origin · pass-through"}
-        />
+        <ArchCardInner state={stateOf("browser")}    tag="client"  title="Browser"     sub={compact ? undefined : "React SPA · WebSocket + REST"} />
+        <ArchArrow active={activeNode === "cloudfront"} label="wss + https" />
+        <ArchCardInner state={stateOf("cloudfront")} tag="edge"    title="CloudFront"  sub={compact ? undefined : "single origin · pass-through"} />
         <ArchArrow active={activeNode === "apigw"} />
-        <ArchCard
-          state={stateOf("apigw")}
-          tag="ingress"
-          title="API Gateway"
-          sub={compact ? undefined : "WebSocket · $default"}
-        />
-        <ArchArrow active={activeNode === "chat_lambda"} label="invoke" />
-        <ArchCard
-          state={stateOf("chat_lambda")}
-          tag="service"
-          title="Chat λ"
-          sub={compact ? undefined : "async self-invoke for long runs"}
-        />
-        <ArchArrow active={activeNode === "runtime"} label="InvokeAgentRuntime" />
-        <ArchCard
-          state={stateOf("runtime")}
-          tag="orchestrator"
-          title="AgentCore Runtime"
-          sub="Strands · Sonnet 4.6 · Graviton"
-          highlightAlways
-        />
-        <ArchArrow active={activeNode === "gateway"} label="MCP · Bearer JWT" />
-        <ArchCard
-          state={stateOf("gateway")}
-          tag="tool catalog"
-          title="AgentCore Gateway"
-          sub="MCP · Cognito JWT auth"
-          highlightAlways
-        />
+        <ArchCardInner state={stateOf("apigw")}      tag="ingress" title="API Gateway" sub={compact ? undefined : "HTTP /kb/* · /upload/* · /kb-graph"} />
+      </div>
+
+      {/* Lambda row: kb_admin / kb_graph / upload + embed */}
+      <ArchBranch
+        cols={[
+          activeNode === "kb_admin_lambda",
+          activeNode === "kb_graph_lambda",
+          activeNode === "presign_upload_lambda" || activeNode === "embed_clip_start_lambda",
+        ]}
+      />
+      <div className="grid grid-cols-3 gap-3 max-w-4xl mx-auto">
+        <ArchCardInner compact state={stateOf("kb_admin_lambda")}         tag="http · /kb/*"        title="kb_admin λ"    sub="DDB KS + assets" />
+        <ArchCardInner compact state={stateOf("kb_graph_lambda")}         tag="http · /kb-graph"    title="kb_graph λ"    sub="→ kb_cache" />
+        <ArchCardInner compact state={stateOf("embed_clip_start_lambda")} tag="http · /upload/*"    title="upload + embed λ" sub="presign · MediaConvert · Marengo" />
+      </div>
+
+      <div className={`flex flex-col items-center mx-auto mt-3 ${compact ? "max-w-md" : "max-w-2xl"}`}>
+        <ArchArrow active={activeNode === "runtime"} label="wss /ws · Cognito JWT" />
+        <ArchCardInner state={stateOf("runtime")} tag="orchestrator" title="AgentCore Runtime" sub="Strands · Sonnet 4.6 · Graviton (arm64)" highlightAlways />
       </div>
 
       <ArchBranch
         cols={[
+          activeNode === "cache_tool" || activeNode === "ddb_cache",
           activeNode === "vector_search_tool" || activeNode === "s3vectors_index",
-          ...(hideStudioPath ? [] : [activeNode === "marengo_pegasus_tools" || activeNode === "tl_marengo" || activeNode === "tl_pegasus"]),
-          activeNode === "lookup_rights" || activeNode === "dynamodb_rights",
-          activeNode === "audience_tools" || activeNode === "dynamodb_audiences",
+          activeNode === "pegasus_tool" || activeNode === "clips_bucket",
         ]}
       />
 
-      <div className={`grid grid-cols-1 ${gridColsClass(hideStudioPath)} gap-4 max-w-6xl mx-auto`}>
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 max-w-6xl mx-auto">
         <div className="flex flex-col items-center">
-          <ArchCard
-            state={stateOf("vector_search_tool")}
-            tag="retrieval · in-proc"
-            title="vector_search"
-            sub="Marengo text embed · ANN query"
-            highlightAlways
-          />
-          <ArchArrow active={activeNode === "s3vectors_index"} label="QueryVectors · filter ks_id" />
-          <ArchCard
-            state={stateOf("s3vectors_index")}
-            tag="store"
-            title="S3 Vectors"
-            sub="Marengo clip embeddings"
-            highlightAlways
-          />
+          <ArchCardInner compact state={stateOf("cache_tool")} tag="tier 1 · cache" title="kb_cache tools" sub="overview · assets · entities · events · rights · audiences" highlightAlways />
+          <ArchArrow active={activeNode === "ddb_cache"} label="GetItem · Query · <10ms" />
+          <ArchCardInner compact state={stateOf("ddb_cache")} tag="store" title="DynamoDB" sub="kb_cache · knowledge_stores · assets · rights · audiences" highlightAlways />
         </div>
-        {!hideStudioPath && (
-          <div className="flex flex-col items-center">
-            <ArchCard
-              state={stateOf("marengo_pegasus_tools")}
-              tag="tools · in-proc"
-              title="marengo + pegasus"
-              sub="search + analyze"
-            />
-            <ArchArrow
-              active={activeNode === "tl_marengo" || activeNode === "tl_pegasus"}
-              label="x-api-key"
-            />
-            <ArchCard
-              state={
-                activeNode === "tl_marengo" ? "active" :
-                activeNode === "tl_pegasus" ? "active" :
-                stateOf("tl_marengo")
-              }
-              tag="external"
-              title={
-                activeNode === "tl_pegasus" ? "TL Pegasus" :
-                activeNode === "tl_marengo" ? "TL Marengo" :
-                "TL Marengo + Pegasus"
-              }
-              sub={
-                activeNode === "tl_pegasus" ? "/v1.3/analyze" :
-                activeNode === "tl_marengo" ? "/v1.3/search" :
-                "/v1.3/{search,analyze}"
-              }
-            />
+        <div className="flex flex-col items-center">
+          <ArchCardInner compact state={stateOf("vector_search_tool")} tag="tier 0 · retrieval" title="vector_search + find_entity_by_image" sub="Bedrock Marengo / Titan → S3 Vectors" highlightAlways />
+          <ArchArrow active={activeNode === "s3vectors_index"} label="QueryVectors · ks_id filter" />
+          <ArchCardInner compact state={stateOf("s3vectors_index")} tag="store" title="S3 Vectors" sub="clips · entity-thumbs · entity-patches" highlightAlways />
+        </div>
+        <div className="flex flex-col items-center">
+          <ArchCardInner compact state={stateOf("pegasus_tool")} tag="tier 2 · analyze" title="pegasus_analyze" sub="Bedrock Pegasus 1.2" highlightAlways />
+          <ArchArrow active={activeNode === "clips_bucket"} label="reads s3Location" />
+          <ArchCardInner compact state={stateOf("clips_bucket")} tag="store" title="S3 · clips bucket" sub="mirrored asset bytes + HLS bundles" highlightAlways />
+        </div>
+      </div>
+
+      <div className="mt-8">
+        <SectionHeader label="OFFLINE · ingest + operator pipelines" />
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-w-5xl mx-auto">
+          <div className="flex flex-col items-center gap-2">
+            <ArchCardInner compact muted state="idle" tag="operator" title="Operator CLI" sub="scripts/*.py" />
+            <DownTick muted />
+            <div className="w-full grid grid-cols-1 gap-2">
+              <ArchCardInner compact muted state="idle" title="upload + MediaConvert"  sub="Browser PUT → S3 → HLS bundle in s3://clips/hls/" />
+              <ArchCardInner compact muted state="idle" title="ingest_kb_cache"        sub="→ Pegasus → DDB profiles + entities" />
+              <ArchCardInner compact muted state="idle" title="ingest_vectors"         sub="→ Marengo (Bedrock async) → S3 Vectors" />
+              <ArchCardInner compact muted state="idle" title="ingest_entity_thumbs"   sub="→ ffmpeg + Titan → S3 Vectors entity-thumbs" />
+              <ArchCardInner compact muted state="idle" title="build_event_groups"     sub="→ Bedrock Claude → DDB EVENT#" />
+              <ArchCardInner compact muted state="idle" title="seed_rights · seed_audiences" sub="→ DDB" />
+            </div>
           </div>
-        )}
-        <div className="flex flex-col items-center">
-          <ArchCard
-            state={stateOf("lookup_rights")}
-            tag="tool · λ"
-            title="lookup_rights"
-            sub="via Gateway · MCP"
-          />
-          <ArchArrow active={activeNode === "dynamodb_rights"} label="GetItem" />
-          <ArchCard
-            state={stateOf("dynamodb_rights")}
-            tag="store"
-            title="DynamoDB"
-            sub="rights table"
-          />
-        </div>
-        <div className="flex flex-col items-center">
-          <ArchCard
-            state={stateOf("audience_tools")}
-            tag="tools · in-proc"
-            title="audience tools"
-            sub="list + lookup"
-          />
-          <ArchArrow active={activeNode === "dynamodb_audiences"} label="Scan / GetItem" />
-          <ArchCard
-            state={stateOf("dynamodb_audiences")}
-            tag="store"
-            title="DynamoDB"
-            sub="audiences table"
-          />
+
+          <div className="flex flex-col items-center gap-2">
+            <ArchCardInner compact muted state="idle" tag="orchestrator" title="Step Functions · entity-Re-ID" sub="ListAssets → Map(InvokeAsync · EmbedPatches)" />
+            <DownTick muted />
+            <div className="w-full grid grid-cols-1 gap-2">
+              <ArchCardInner compact muted state="idle" tag="autoscale 0..2" title="SageMaker Async Endpoint" sub="gdino (HF) · DeepSORT · Re-ID Triton · ml.g5.xlarge" />
+              <ArchCardInner compact muted state="idle" title="entity_reid_invoke_async λ" sub="presign · InvokeEndpointAsync · poll S3" />
+              <ArchCardInner compact muted state="idle" title="entity_reid_embed_patches λ" sub="patch_b64 → Titan → S3 Vectors entity-patches" />
+              <ArchCardInner compact muted state="idle" tag="image build" title="CodeBuild · ECR" sub="builds + pushes gdino + agent images" />
+              <ArchCardInner compact muted state="idle" tag="Bedrock" title="Foundation models" sub="Marengo · Pegasus · Titan · Claude (haiku · sonnet)" />
+            </div>
+          </div>
         </div>
       </div>
     </div>
   );
 }
 
-function ArchCard({
-  state, tag, title, sub, highlightAlways,
+function SectionHeader({ label }: { label: string }) {
+  return (
+    <div className="text-center mb-3">
+      <span className="label" style={{ color: "var(--color-ink-faint)", letterSpacing: "0.12em" }}>{label}</span>
+      <div className="mx-auto mt-1 h-px max-w-xs" style={{ background: "var(--color-rule)" }} />
+    </div>
+  );
+}
+
+function ArchCardInner({
+  state, tag, title, sub, highlightAlways, compact, muted,
 }: {
   state: Activity;
   tag?: string;
   title: string;
   sub?: string;
   highlightAlways?: boolean;
+  compact?: boolean;
+  muted?: boolean;
 }) {
   const isActive = state === "active";
   const isRecent = state === "recent";
   const isHL = highlightAlways && state === "idle";
 
-  // Color decisions
-  const borderColor =
+  const borderColor = muted ? "color-mix(in oklch, var(--color-rule) 80%, transparent)" :
     isActive ? "var(--color-cue)" :
     isRecent ? "color-mix(in oklch, var(--color-cue) 40%, var(--color-rule))" :
     isHL ? "var(--color-cue)" :
     "var(--color-rule)";
 
   const bgColor =
+    muted ? "color-mix(in oklch, var(--color-surface) 70%, var(--color-paper))" :
     isActive ? "rgba(255, 122, 26, 0.14)" :
     isRecent ? "rgba(255, 122, 26, 0.04)" :
     isHL ? "rgba(255, 122, 26, 0.05)" :
     "var(--color-surface)";
 
   const titleColor =
+    muted ? "var(--color-ink-soft)" :
     isActive || isHL ? "var(--color-cue)" :
-    isRecent ? "var(--color-ink)" :
     "var(--color-ink)";
+
+  const py = compact ? "py-1.5" : "py-2";
+  const titleSize = compact ? "text-sm" : "text-base lg:text-lg";
 
   return (
     <motion.div
-      className="w-full border px-4 py-2"
-      style={{ borderColor, background: bgColor }}
+      className={`w-full border px-3 ${py}`}
+      style={{ borderColor, background: bgColor, opacity: muted ? 0.78 : 1 }}
       animate={isActive ? {
         boxShadow: [
           "0 0 0 0 rgba(255, 122, 26, 0.35)",
@@ -240,21 +213,21 @@ function ArchCard({
       } : { boxShadow: "0 0 0 0 rgba(255, 122, 26, 0)" }}
       transition={isActive ? { duration: 1.4, repeat: Infinity, ease: "easeOut" } : { duration: 0.3 }}
     >
-      <div className="flex items-baseline justify-between gap-3">
+      <div className="flex items-baseline justify-between gap-2">
         <h4
-          className="font-display text-base lg:text-lg"
+          className={`font-display ${titleSize}`}
           style={{ fontVariationSettings: '"opsz" 144, "wght" 600', color: titleColor }}
         >
           {title}
         </h4>
         {tag && (
-          <span className="label whitespace-nowrap" style={{ color: isActive || isHL ? "var(--color-cue)" : "var(--color-ink-faint)" }}>
+          <span className="label whitespace-nowrap text-[9px]" style={{ color: muted ? "var(--color-ink-faint)" : (isActive || isHL ? "var(--color-cue)" : "var(--color-ink-faint)") }}>
             {tag}
           </span>
         )}
       </div>
       {sub && (
-        <div className="font-mono text-[10px] mt-0.5" style={{ color: "var(--color-ink-soft)" }}>
+        <div className="font-mono text-[10px] mt-0.5" style={{ color: muted ? "var(--color-ink-faint)" : "var(--color-ink-soft)" }}>
           {sub}
         </div>
       )}
@@ -297,6 +270,16 @@ function ArchArrow({ active, label }: { active?: boolean; label?: string }) {
   );
 }
 
+function DownTick({ muted }: { muted?: boolean }) {
+  const stroke = muted ? "color-mix(in oklch, var(--color-ink-faint) 60%, transparent)" : "var(--color-ink-faint)";
+  return (
+    <svg width="14" height="20" viewBox="0 0 14 20" aria-hidden>
+      <line x1="7" y1="0" x2="7" y2="15" stroke={stroke} strokeWidth="1" />
+      <polygon points="7,20 3,13 11,13" fill={stroke} />
+    </svg>
+  );
+}
+
 function ArchBranch({ cols }: { cols: boolean[] }) {
   const baseStroke = "var(--color-ink-faint)";
   const stroke = (on?: boolean) => on ? "var(--color-cue)" : baseStroke;
@@ -304,8 +287,6 @@ function ArchBranch({ cols }: { cols: boolean[] }) {
   const width  = (on?: boolean) => on ? 1.5 : 1;
   const anyActive = cols.some(Boolean);
 
-  // N-way fork: vertical stem from center down to spine, spine across N columns,
-  // vertical drop into each column.
   const W = 1100, H = 64, spineY = 16, dropY = 56;
   const center = W / 2;
   const padX = 80;
@@ -313,8 +294,6 @@ function ArchBranch({ cols }: { cols: boolean[] }) {
     ? [center]
     : cols.map((_, i) => padX + (W - padX * 2) * (i / (cols.length - 1)));
 
-  // For each pair of adjacent column xs, draw a spine segment whose color
-  // reflects whichever side is active.
   const spineSegments = colXs.slice(0, -1).map((x, i) => ({
     x1: x, x2: colXs[i + 1],
     active: cols[i] || cols[i + 1],
@@ -323,19 +302,13 @@ function ArchBranch({ cols }: { cols: boolean[] }) {
   return (
     <div className="flex justify-center my-3 overflow-x-auto">
       <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} className="overflow-visible" aria-hidden style={{ minWidth: 640 }}>
-        {/* center stem */}
         <line x1={center} y1="0" x2={center} y2={spineY} stroke={stroke(anyActive)} strokeWidth="1" />
-        {/* spine */}
         {spineSegments.map((s, i) => (
-          <line
-            key={i}
-            x1={s.x1} y1={spineY} x2={s.x2} y2={spineY}
-            stroke={stroke(s.active)}
-            strokeWidth={width(s.active)}
-            strokeDasharray={dash(s.active)}
-          />
+          <line key={i} x1={s.x1} y1={spineY} x2={s.x2} y2={spineY}
+                stroke={stroke(s.active)}
+                strokeWidth={width(s.active)}
+                strokeDasharray={dash(s.active)} />
         ))}
-        {/* drops + arrowheads */}
         {colXs.map((x, i) => (
           <g key={i}>
             <line x1={x} y1={spineY} x2={x} y2={dropY}
@@ -351,25 +324,21 @@ function ArchBranch({ cols }: { cols: boolean[] }) {
   );
 }
 
-// Up to 4 default columns: s3vectors · pegasus · rights · audiences.
-// hideStudio drops one. Tailwind needs literal class names so we resolve to
-// a fixed string here rather than building it dynamically.
-function gridColsClass(hideStudio: boolean): string {
-  const cols = 4 - (hideStudio ? 1 : 0);
-  if (cols === 4) return "md:grid-cols-4";
-  if (cols === 3) return "md:grid-cols-3";
-  return "md:grid-cols-2";
-}
+// ─── Tool → lane classification ─────────────────────────────────────────────
+const CACHE_TOOLS = new Set([
+  "get_kb_overview", "list_kb_assets", "lookup_asset_profile",
+  "lookup_rights", "list_audiences", "lookup_audience",
+  "find_cached_entity_appearances", "list_cached_entities",
+  "list_kb_events", "lookup_event",
+]);
 
-// --- helper for callers: derive the activeNode from a streamed agent event ---
 export function nodeForEvent(ev: { type: string; tool?: string }): NodeId | null {
   if (ev.type === "session") return "runtime";
   if (ev.type === "tool_call") {
     const t = ev.tool || "";
-    if (t === "vector_search") return "vector_search_tool";
-    if (t === "pegasus_analyze" || t === "list_tl_indexes") return "marengo_pegasus_tools";
-    if (t === "lookup_rights" || t === "lookup-rights") return "lookup_rights";
-    if (t === "list_audiences" || t === "lookup_audience") return "audience_tools";
+    if (t === "vector_search" || t === "find_entity_by_image") return "vector_search_tool";
+    if (t === "pegasus_analyze") return "pegasus_tool";
+    if (CACHE_TOOLS.has(t)) return "cache_tool";
     return "runtime";
   }
   if (ev.type === "tool_result") return "runtime";
@@ -379,13 +348,10 @@ export function nodeForEvent(ev: { type: string; tool?: string }): NodeId | null
   return null;
 }
 
-// --- helper: which downstream node a tool call bounces to after ~400ms ---
 export function downstreamFor(toolName: string | undefined): NodeId | null {
   if (!toolName) return null;
-  if (toolName === "vector_search") return "s3vectors_index";
-  if (toolName === "list_tl_indexes") return "tl_marengo";
-  if (toolName === "pegasus_analyze") return "tl_pegasus";
-  if (toolName.includes("rights")) return "dynamodb_rights";
-  if (toolName.includes("audience")) return "dynamodb_audiences";
+  if (toolName === "vector_search" || toolName === "find_entity_by_image") return "s3vectors_index";
+  if (toolName === "pegasus_analyze") return "clips_bucket";
+  if (CACHE_TOOLS.has(toolName))      return "ddb_cache";
   return null;
 }

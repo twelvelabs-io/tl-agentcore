@@ -1,53 +1,74 @@
 @import "tailwindcss";
 
 /*
- * tl-agentcore Rough Cut Lab — editorial / edit-suite hybrid.
- * Filmic dark palette with one warm amber accent.
+ * Rough Cut Lab — TwelveLabs Playground aesthetic, dark.
+ * Pure black/white as the only accent (matches playground.twelvelabs.io
+ * exactly, inverted for dark mode). Sans-serif throughout. Generous
+ * border-radius. Soft peach as the warm secondary, used sparingly for
+ * status / friendliness.
  */
 
 @theme {
-  --font-display: "Fraunces", "Charter", "Georgia", serif;
-  --font-body: "Geist", ui-sans-serif, system-ui, sans-serif;
+  /* Single sans throughout. Inter handles both display and body weights.
+     JetBrains Mono for code + tabular numerics. */
+  --font-display: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-body: "Inter", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", monospace;
 
-  /* Filmic charcoal — warmer than pure black, sits well behind video */
-  --color-paper: #0c0d0e;
-  --color-ink: #ebe6da;          /* warm bone */
-  --color-ink-soft: #a09a8d;
-  --color-ink-faint: #6b6660;
-  --color-rule: #232527;
-  --color-surface: #14161a;
-  --color-surface-2: #1b1e23;
+  /* Zinc-leaning neutrals. True dark, near-black paper. */
+  --color-paper: #0a0a0a;
+  --color-ink: #fafafa;          /* zinc-50 */
+  --color-ink-soft: #a1a1aa;     /* zinc-400 — ~7.6:1 on paper, ~6.5:1 on surface */
+  --color-ink-faint: #9a9aa3;    /* ~7.2:1 on paper, ~5.6:1 on surface — clears AA on both */
+  --color-rule: #27272a;         /* zinc-800 */
+  --color-surface: #171717;      /* zinc-900 */
+  --color-surface-2: #262626;    /* zinc-800-ish elevated */
 
-  /* Single accent, used sparingly: hot amber. Says "active / cue / scrubber". */
-  --color-cue: #ff7a1a;
-  --color-cue-soft: #ffae6e;
-  --color-cue-deep: #c2530b;
+  /* Accent = pure white (the dark-mode inversion of the playground's
+     pure-black emphasis). Used on filled CTAs, active tab borders,
+     scrubber positions. */
+  --color-cue: #fafafa;
+  --color-cue-soft: #d4d4d8;     /* zinc-300, hover state */
+  --color-cue-deep: #a1a1aa;     /* zinc-400, recent state */
 
-  /* Status colours — muted, not festive */
-  --color-status-ready: #7fb289;
-  --color-status-pending: #c9a26d;
-  --color-status-failed: #c97a72;
+  /* Warm secondary — soft peach, the playground's only non-neutral hue.
+     Sits on badges, the success pip, and human warmth moments. */
+  --color-warm: #ffcab0;         /* peach */
+  --color-warm-soft: #ffe0d0;
+  --color-warm-deep: #c79278;
+
+  /* Status colours — quiet, neutral-warm */
+  --color-status-ready: #8db4a0;
+  --color-status-pending: #ffcab0;
+  --color-status-failed: #c98c84;
+
+  /* Radius scale — playground-style rounded corners */
+  --radius-card: 14px;
+  --radius-btn: 10px;
+  --radius-pill: 9999px;
 }
 
 html, body, #root {
   height: 100%;
+  overflow: hidden;
 }
 
 body {
   background: var(--color-paper);
   color: var(--color-ink);
   font-family: var(--font-body);
-  font-feature-settings: "ss01", "ss02", "cv11";
+  font-feature-settings: "ss01", "cv05", "cv11", "calt";
   font-variant-ligatures: common-ligatures;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* Editorial display type uses optical-size + soft variable axes for character */
+/* Display type — same Inter as body, just heavier weight + tighter
+   tracking. No serif. Sizes are set per-instance via Tailwind text-*
+   utilities; this class only governs weight / tracking / features. */
 .font-display {
   font-family: var(--font-display);
-  font-variation-settings: "opsz" 144, "SOFT" 30;
+  font-weight: 600;
   letter-spacing: -0.022em;
 }
 
@@ -56,12 +77,14 @@ body {
   font-feature-settings: "cv02", "cv11", "ss02", "zero";
 }
 
-/* Section number / label small-caps — periodicals feel */
+/* Small secondary label — sentence-case, playground-aligned (no
+   editorial small-caps tracking). Used for masthead micro-text, form
+   labels, helper copy, status descriptors. */
 .label {
   font-family: var(--font-body);
-  text-transform: uppercase;
-  letter-spacing: 0.18em;
-  font-size: 11px;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 12px;
   font-weight: 500;
   color: var(--color-ink-soft);
 }
@@ -81,6 +104,11 @@ body {
 }
 
 /* Caret blink for streaming text */
+@keyframes rc-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
 @keyframes caret-blink {
   0%, 49% { opacity: 1; }
   50%, 100% { opacity: 0; }
@@ -116,38 +144,56 @@ body {
 *::-webkit-scrollbar-thumb { background: var(--color-rule); border-radius: 4px; }
 *::-webkit-scrollbar-track { background: transparent; }
 
-/* Buttons */
+/* Buttons — playground-style. Secondary is outlined-rounded, primary
+   (.btn-cue) is white-filled with dark text, ~10px radius. */
 .btn {
   font-family: var(--font-body);
   font-size: 13px;
   font-weight: 500;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  padding: 10px 18px;
+  letter-spacing: 0;
+  text-transform: none;
+  padding: 9px 16px;
   border: 1px solid var(--color-rule);
   background: transparent;
   color: var(--color-ink);
+  border-radius: var(--radius-btn);
   cursor: pointer;
-  transition: border-color 120ms ease, background-color 120ms ease, color 120ms ease;
+  transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease, transform 140ms ease;
 }
 .btn:hover { border-color: var(--color-ink-soft); }
+.btn:active { transform: translateY(0.5px); }
 .btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.btn-cue {
-  border-color: var(--color-cue);
-  color: var(--color-cue);
+/* Compact variant for dense toolbars where vertical space matters more
+   than the bigger primary CTA. Same shape, smaller box. */
+.btn-sm {
+  font-size: 12px;
+  padding: 5px 12px;
 }
-.btn-cue:hover {
+.btn-cue {
   background: var(--color-cue);
   color: var(--color-paper);
+  border-color: var(--color-cue);
+  font-weight: 600;
+}
+.btn-cue:hover {
+  background: var(--color-cue-soft);
+  border-color: var(--color-cue-soft);
+}
+.btn-cue:disabled {
+  background: var(--color-rule);
+  border-color: var(--color-rule);
+  color: var(--color-ink-faint);
+  opacity: 1;
 }
 
-/* Editorial textarea — invisible chrome, type does the work */
+/* Brief / question textarea — invisible chrome, type does the work.
+   Sans-serif, medium weight, slightly tightened tracking. */
 .editorial-input {
   font-family: var(--font-display);
-  font-variation-settings: "opsz" 144, "SOFT" 30;
-  font-size: 36px;
-  line-height: 1.18;
-  letter-spacing: -0.022em;
+  font-weight: 500;
+  font-size: 28px;
+  line-height: 1.25;
+  letter-spacing: -0.018em;
   background: transparent;
   border: 0;
   outline: 0;
@@ -160,33 +206,39 @@ body {
   font-style: italic;
 }
 
-/* Tab bar — periodicals masthead */
+/* Tab bar — pill style, playground-aligned. Active tab has a filled
+   subtle background. */
 .tab {
   font-family: var(--font-body);
-  text-transform: uppercase;
-  letter-spacing: 0.22em;
-  font-size: 11px;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 13px;
   font-weight: 500;
   color: var(--color-ink-soft);
-  padding-bottom: 6px;
-  border-bottom: 1px solid transparent;
+  padding: 6px 12px;
+  border-radius: var(--radius-btn);
   cursor: pointer;
-  transition: color 120ms ease, border-color 120ms ease;
+  transition: color 140ms ease, background-color 140ms ease;
 }
-.tab:hover { color: var(--color-ink); }
+.tab:hover {
+  color: var(--color-ink);
+  background: var(--color-surface);
+}
 .tab[data-active="true"] {
-  color: var(--color-cue);
-  border-bottom-color: var(--color-cue);
+  color: var(--color-ink);
+  background: var(--color-surface-2);
 }
 
-/* Clip card — feels like an EDL row */
+/* Clip card — soft rounded surface, thin border, peach-tint hover. */
 .clip-card {
   border: 1px solid var(--color-rule);
   background: var(--color-surface);
-  transition: border-color 120ms ease, transform 120ms ease;
+  border-radius: var(--radius-card);
+  transition: border-color 160ms ease, transform 160ms ease, background-color 160ms ease;
 }
 .clip-card:hover {
-  border-color: var(--color-cue);
+  border-color: var(--color-ink-soft);
+  background: var(--color-surface-2);
   transform: translateY(-1px);
 }
 
@@ -203,12 +255,13 @@ body {
 .pip-pending { background: var(--color-status-pending); animation: caret-blink 1.4s ease-in-out infinite; }
 .pip-failed { background: var(--color-status-failed); }
 
-/* Inline video reference chip — rendered for <vref> tags in prose */
+/* Inline video reference chip — rendered for <vref> tags in prose.
+   Pill-shaped, ink-on-surface, peach glyph for the play-marker. */
 .vref {
   display: inline-flex;
   align-items: baseline;
   gap: 6px;
-  padding: 2px 8px 3px;
+  padding: 2px 10px 3px;
   margin: 0 2px;
   border: 1px solid var(--color-rule);
   background: var(--color-surface);
@@ -218,12 +271,12 @@ body {
   vertical-align: baseline;
   color: var(--color-ink);
   cursor: help;
-  transition: border-color 120ms ease, background 120ms ease;
+  transition: border-color 140ms ease, background 140ms ease;
   white-space: nowrap;
-  border-radius: 1px;
+  border-radius: var(--radius-pill);
 }
-.vref:hover { border-color: var(--color-cue); background: var(--color-surface-2); }
-.vref-glyph { color: var(--color-cue); font-size: 0.9em; transform: translateY(1px); }
+.vref:hover { border-color: var(--color-ink-soft); background: var(--color-surface-2); }
+.vref-glyph { color: var(--color-warm); font-size: 0.9em; transform: translateY(1px); }
 .vref-missing { color: var(--color-ink-soft); border-style: dashed; }
 .vref-missing .vref-glyph { color: var(--color-ink-faint); }
 .vref-missing .vref-name { font-family: var(--font-mono); font-size: 0.78em; }
@@ -233,7 +286,7 @@ body {
 .vref-range {
   font-family: var(--font-mono);
   font-size: 0.78em;
-  color: var(--color-cue);
+  color: var(--color-ink-soft);
   letter-spacing: 0;
   margin-left: 6px;
   padding-left: 6px;
@@ -258,17 +311,18 @@ body {
 .response-md code {
   font-family: var(--font-mono);
   font-size: 0.86em;
-  padding: 1px 6px;
+  padding: 2px 7px;
   background: var(--color-surface);
   border: 1px solid var(--color-rule);
-  border-radius: 1px;
+  border-radius: 6px;
 }
 .response-md pre {
   font-family: var(--font-mono);
   font-size: 0.84em;
   background: var(--color-surface);
   border: 1px solid var(--color-rule);
-  padding: 12px 14px;
+  border-radius: var(--radius-card);
+  padding: 14px 16px;
   overflow-x: auto;
 }
 .response-md pre code { background: transparent; border: 0; padding: 0; }
@@ -323,6 +377,32 @@ body {
   border-top: 1px solid var(--color-rule);
   margin: 1.4em 0;
 }
+.response-md table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1em 0;
+  font-size: 0.92em;
+  display: block;
+  overflow-x: auto;
+}
+.response-md thead {
+  background: color-mix(in oklch, var(--color-surface) 80%, var(--color-paper));
+}
+.response-md th, .response-md td {
+  border: 1px solid var(--color-rule);
+  padding: 0.45em 0.7em;
+  text-align: left;
+  vertical-align: top;
+}
+.response-md th {
+  font-weight: 600;
+  color: var(--color-ink);
+  font-family: var(--font-display);
+  letter-spacing: -0.005em;
+}
+.response-md tbody tr:nth-child(even) {
+  background: color-mix(in oklch, var(--color-surface) 50%, var(--color-paper));
+}
 .vref-name { font-weight: 500; letter-spacing: -0.005em; }
 .vref-meta {
   font-family: var(--font-mono);
@@ -331,18 +411,20 @@ body {
   letter-spacing: 0;
 }
 
-/* Persona chip */
+/* Persona chip — pill, playground-aligned. Active = filled white. */
 .persona {
   font-family: var(--font-body);
-  text-transform: uppercase;
-  letter-spacing: 0.16em;
-  font-size: 11px;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 13px;
   font-weight: 500;
-  padding: 8px 14px;
+  padding: 7px 14px;
   border: 1px solid var(--color-rule);
   color: var(--color-ink-soft);
+  background: transparent;
+  border-radius: var(--radius-pill);
   cursor: pointer;
-  transition: all 120ms ease;
+  transition: all 140ms ease;
   white-space: nowrap;
 }
 .persona:hover { color: var(--color-ink); border-color: var(--color-ink-soft); }
@@ -350,6 +432,21 @@ body {
   color: var(--color-paper);
   background: var(--color-cue);
   border-color: var(--color-cue);
+}
+
+/* Warm peach badge — used for avatar pills, friendliness moments,
+   anywhere we want a touch of human warmth. Matches the LB avatar pill
+   on the playground. */
+.warm-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  background: var(--color-warm);
+  color: #2a1810;
+  font-weight: 500;
+  font-size: 13px;
+  border-radius: var(--radius-pill);
 }
 
 /* Channel player — hover-revealed custom controls. We don't use the native
@@ -360,3 +457,74 @@ body {
   opacity: 1 !important;
 }
 
+
+/* ─── Knowledge-graph nodes ──────────────────────────────────────────────
+ * Three node kinds (asset / entity / event) with size + accent variations.
+ * Borders use the design system's amber cue; backgrounds are paper-toned
+ * so the d3-force layout reads cleanly against the film-perforation page.
+ */
+
+.kg-node {
+  background: var(--color-surface);
+  border: 1px solid var(--color-rule);
+  padding: 8px 12px;
+  font-family: var(--font-sans);
+  min-width: 80px;
+  max-width: 200px;
+  text-align: center;
+  pointer-events: auto;
+}
+.kg-node-tag {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-ink-faint);
+  line-height: 1;
+}
+.kg-node-title {
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-variation-settings: "opsz" 144, "wght" 500;
+  color: var(--color-ink);
+  margin-top: 4px;
+  line-height: 1.15;
+  word-break: break-word;
+}
+.kg-node-sub {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--color-ink-soft);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kg-node-asset {
+  border-color: color-mix(in oklch, var(--color-cue) 25%, var(--color-rule));
+}
+.kg-node-entity {
+  border-color: color-mix(in oklch, var(--color-cue) 50%, var(--color-rule));
+  background: color-mix(in oklch, var(--color-cue) 4%, var(--color-surface));
+}
+.kg-node-entity-sm { font-size: 11px; }
+.kg-node-entity-md { font-size: 13px; }
+.kg-node-entity-lg {
+  font-size: 14px;
+  border-color: var(--color-cue);
+  background: color-mix(in oklch, var(--color-cue) 10%, var(--color-surface));
+}
+.kg-node-event {
+  border-color: var(--color-cue);
+  border-width: 2px;
+  background: color-mix(in oklch, var(--color-cue) 14%, var(--color-surface));
+  min-width: 220px;
+}
+.kg-node-event .kg-node-title { color: var(--color-cue); font-size: 15px; }
+
+.react-flow__attribution { display: none; }
+.react-flow__controls button {
+  background: var(--color-surface);
+  border-color: var(--color-rule);
+}

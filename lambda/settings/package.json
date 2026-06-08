@@ -1,0 +1,10 @@
+{
+  "name": "settings",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.700.0",
+    "aws-jwt-verify": "^5.1.0"
+  }
+}

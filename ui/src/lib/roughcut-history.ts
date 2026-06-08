@@ -1,7 +1,8 @@
-// Per-browser archive of generated rough cuts. Stored in localStorage so a
-// reload (or a re-deploy) doesn't wipe the producer's work. We cap at 20
-// entries — plans are small, but unbounded growth eventually trips the 5MB
-// localStorage ceiling.
+// Per-browser archive of generated rough cuts AND free-form Agent
+// sessions. Stored in localStorage as a single mixed list so the History
+// drawer can render them together in chronological order. We cap at 30
+// entries; plans + chat threads are small, but unbounded growth
+// eventually trips the 5MB localStorage ceiling.
 
 import type { RoughCutPlan } from "./edl";
 
@@ -12,6 +13,7 @@ export type ChatMessage = {
 };
 
 export type RoughCutHistoryEntry = {
+  kind: "rough_cut";
   id: string;
   created_at: number;
   title: string;
@@ -29,41 +31,65 @@ export type RoughCutHistoryEntry = {
   messages?: ChatMessage[];
 };
 
-const KEY = "tl-agentcore.roughcut.history.v1";
-const MAX = 20;
+export type AgentHistoryEntry = {
+  kind: "agent";
+  id: string;
+  created_at: number;
+  /** First user question — used as the entry's display title. */
+  title: string;
+  session_id?: string;
+  ks_id?: string;
+  ks_name?: string;
+  turns: AgentTurnSnapshot[];
+};
 
-function read(): RoughCutHistoryEntry[] {
+export type AgentTurnSnapshot = {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  elapsedMs?: number;
+};
+
+export type HistoryEntry = RoughCutHistoryEntry | AgentHistoryEntry;
+
+const KEY = "tl-agentcore.roughcut.history.v1";
+const MAX = 30;
+
+function read(): HistoryEntry[] {
   try {
     const raw = localStorage.getItem(KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) return [];
+    // Back-compat: older entries had no `kind` field; they were all
+    // rough cuts. Stamp them so the new union type holds.
+    return parsed.map((e: any) => ({ kind: "rough_cut", ...e })) as HistoryEntry[];
   } catch { return []; }
 }
 
-function write(list: RoughCutHistoryEntry[]) {
+function write(list: HistoryEntry[]) {
   try { localStorage.setItem(KEY, JSON.stringify(list.slice(0, MAX))); } catch {}
 }
 
-export function loadHistory(): RoughCutHistoryEntry[] {
-  return read();
+export function loadHistory(): HistoryEntry[] {
+  return read().sort((a, b) => b.created_at - a.created_at);
 }
 
-export function saveEntry(entry: Omit<RoughCutHistoryEntry, "id" | "created_at">): RoughCutHistoryEntry {
-  const full: RoughCutHistoryEntry = {
+export function saveEntry<T extends HistoryEntry>(entry: Omit<T, "id" | "created_at">): T {
+  const full = {
     ...entry,
     id: Math.random().toString(36).slice(2, 8) + Date.now().toString(36),
     created_at: Date.now(),
-  };
+  } as T;
   write([full, ...read()]);
   return full;
 }
 
-export function updateEntry(id: string, patch: Partial<RoughCutHistoryEntry>): RoughCutHistoryEntry | undefined {
+export function updateEntry<T extends HistoryEntry>(id: string, patch: Partial<T>): T | undefined {
   const list = read();
   const i = list.findIndex((e) => e.id === id);
   if (i < 0) return undefined;
-  const next = { ...list[i], ...patch };
+  const next = { ...list[i], ...patch } as T;
   list[i] = next;
   write(list);
   return next;

@@ -1,5 +1,7 @@
-// Browser-side TwelveLabs client. Talks to /tl/* (proxied to api.twelvelabs.io
-// by server/proxy.mjs, which holds the api key).
+// Browser-side AWS-native client. Talks to /kb/* (kb_admin λ → DynamoDB)
+// and /upload/* (presign_upload + embed_clip_start λs). No TwelveLabs API
+// involvement — KS + asset records, HLS playback URLs, and all metadata
+// live in AWS-managed stores under this account.
 
 export type KS = {
   _id: string;
@@ -30,7 +32,38 @@ export type Asset = {
 
 import { getAccessToken } from "./auth";
 
-const BASE = "/tl";
+// All endpoints proxied here are AWS-native (kb_admin λ + DynamoDB).
+const BASE = "/kb";
+
+// ─── Knowledge-graph BFF ───────────────────────────────────────────────────
+// The Graph tab reads kb_cache directly via a small Lambda — separate path
+// from /tl/* because the data is server-side, not a TL API passthrough.
+
+export type GraphNode =
+  | { id: string; kind: "asset"; data: { asset_id: string; title: string; one_liner: string; mood_tags: string[]; role_hint: string | null; visual_style: string | null } }
+  | { id: string; kind: "entity"; data: { name: string; canonical: string; kind_label: string; appearance_count: number; asset_ids: string[]; aliases: string[] } }
+  | { id: string; kind: "event"; data: { event_id: string; description: string; cluster_size: number; confidence: number; participating_assets: string[]; mood_signature: string[] } };
+
+export type GraphEdge = {
+  id: string;
+  source: string;
+  target: string;
+  kind: "appears_in" | "participates_in";
+};
+
+export type GraphPayload = {
+  ks_id: string;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  counts: { assets: number; entities: number; events: number; edges: number };
+};
+
+export async function fetchKbGraph(ks_id: string): Promise<GraphPayload> {
+  const headers = await authHeaders();
+  const r = await fetch(`/kb-graph?ks_id=${encodeURIComponent(ks_id)}`, { headers });
+  if (!r.ok) throw new Error(`kb-graph ${r.status}: ${await r.text().catch(() => "")}`);
+  return r.json();
+}
 const DEMO_PASSWORD = import.meta.env.VITE_DEMO_PASSWORD || "";
 
 async function authHeaders(): Promise<Record<string, string>> {
@@ -86,19 +119,86 @@ export const addItem = (ksId: string, assetId: string) =>
 export const getItem = (ksId: string, itemId: string) =>
   call<KSItem>("GET", `/knowledge-stores/${ksId}/items/${itemId}`);
 
-// ---- Assets ----
-export const uploadAssetFromUrl = async (url: string): Promise<Asset> => {
-  const fd = new FormData();
-  fd.append("method", "url");
-  fd.append("url", url);
-  // Always opt in — without these, the asset has no playback URL or thumbnail
-  // and the Assets tab can only render filename + size for it.
-  fd.append("enable_hls", "true");
-  fd.append("enable_thumbnail", "true");
-  const res = await fetch(`${BASE}/assets`, { method: "POST", body: fd, headers: await authHeaders() });
-  if (!res.ok) throw new Error(`upload failed: ${res.status} ${await res.text()}`);
-  return res.json();
+/** Detach an item from the KS. The underlying asset row stays in DDB. */
+export const removeItem = (ksId: string, itemId: string) =>
+  call<void>("DELETE", `/knowledge-stores/${ksId}/items/${itemId}`);
+
+// ---- Upload (presigned-URL path; bypasses 10 MB API Gateway cap) ----
+export type PresignedUpload = {
+  key: string;
+  put_url: string;
+  get_url: string;
+  content_type: string;
 };
+
+export async function presignUpload(filename: string, content_type: string): Promise<PresignedUpload> {
+  const res = await fetch("/upload/presign", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...(await authHeaders()) },
+    body: JSON.stringify({ filename, content_type }),
+  });
+  if (!res.ok) throw new Error(`presign failed: ${res.status} ${await res.text()}`);
+  return res.json() as Promise<PresignedUpload>;
+}
+
+/** Promote a freshly-uploaded clip into the AWS-native pipeline. One call:
+ *  - mints a server-side asset_id (24-hex)
+ *  - writes the assets DDB row with status=pending
+ *  - copies uploads/<key> → clips/<asset_id>.mp4 (canonical Bedrock path)
+ *  - kicks off MediaConvert HLS transcode → s3://<clips>/hls/<asset_id>/
+ *  - starts Bedrock Marengo async embed
+ *  Returns the new asset_id + HLS playback URL. Both MediaConvert and
+ *  Marengo complete asynchronously; hls_finalize flips the row to ready
+ *  when the HLS manifest lands. */
+export type StartEmbedResult = {
+  asset_id: string;
+  invocation_arn: string;
+  knowledge_store_id: string;
+  s3_uri: string;
+  hls_manifest_url: string | null;
+  mediaconvert_job_id: string | null;
+};
+
+export async function startAutoEmbed(
+  key: string,
+  knowledge_store_id: string,
+  filename?: string,
+): Promise<StartEmbedResult> {
+  const res = await fetch("/upload/embed", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...(await authHeaders()) },
+    body: JSON.stringify({ key, knowledge_store_id, filename }),
+  });
+  if (!res.ok) throw new Error(`embed start failed: ${res.status} ${await res.text()}`);
+  return res.json() as Promise<StartEmbedResult>;
+}
+
+/** PUT a Blob/File to a presigned URL with progress streaming. */
+export function s3PutWithProgress(
+  putUrl: string,
+  file: File,
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", putUrl);
+    if (file.type) xhr.setRequestHeader("Content-Type", file.type);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) onProgress(e.loaded, e.total);
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) resolve();
+      else reject(new Error(`S3 PUT ${xhr.status}: ${xhr.responseText.slice(0, 200)}`));
+    };
+    xhr.onerror = () => reject(new Error("S3 PUT failed (network)"));
+    xhr.send(file);
+  });
+}
+
+// ---- Assets ----
+// `uploadAssetFromUrl` is gone — the AWS-native flow mints asset_ids
+// server-side inside startAutoEmbed and writes the DDB row from there.
+// Library.tsx no longer needs a separate "create asset from URL" step.
 
 export const getAsset = (id: string) => call<Asset>("GET", `/assets/${id}`);
 

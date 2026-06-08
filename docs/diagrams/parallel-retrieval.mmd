@@ -1,0 +1,25 @@
+flowchart TD
+    U(["Producer · build me a 60 s action highlight reel"]) --> A1[Agent · parse brief into beats]
+
+    A1 --> VFan{{"parallel fan-out · one vector_search per beat"}}
+
+    subgraph VS["vector_search · S3 Vectors · ~250 ms each"]
+      direction TB
+      VFan --> V1["beat: cold-open landscape"]
+      VFan --> V2["beat: kinetic action"]
+      VFan --> V3["beat: tense crowd"]
+      VFan --> V4["beat: celebration"]
+    end
+
+    VS --> A2[Agent · ranked clips per beat · rank 1 = primary, 2–5 = alternates]
+    A2 --> O(["EDL · scenes · primary clip + 2–4 alternates per beat"])
+
+    classDef retrieval fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef agent     fill:#e0e7ff,stroke:#4f46e5,stroke-width:2px,color:#312e81
+    classDef io        fill:#f1f5f9,stroke:#475569,color:#0f172a
+
+    class V1,V2,V3,V4,VFan retrieval
+    class A1,A2 agent
+    class U,O io
+
+    style VS fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px,color:#14532d

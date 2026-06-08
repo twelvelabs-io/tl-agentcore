@@ -155,13 +155,33 @@ export async function getAccessToken(): Promise<string | null> {
   return null;
 }
 
-export function decodeIdToken(): { email?: string; name?: string; sub?: string } | null {
+export function decodeIdToken(): { email?: string; name?: string; sub?: string; "cognito:groups"?: string[] } | null {
   const t = loadTokens();
   if (!t?.id_token) return null;
   try {
     const payload = t.id_token.split(".")[1];
     return JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
   } catch { return null; }
+}
+
+/** Decode the *access* token (different from the id token — only access
+ *  tokens carry `cognito:groups` reliably). Returns null if absent or
+ *  unparseable. */
+export function decodeAccessToken(): { sub?: string; username?: string; "cognito:groups"?: string[] } | null {
+  const t = loadTokens();
+  if (!t?.access_token) return null;
+  try {
+    const payload = t.access_token.split(".")[1];
+    return JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
+  } catch { return null; }
+}
+
+/** True when the signed-in user's access token carries the `admins` group
+ *  claim. Used to gate admin-only UI like the Users tab. */
+export function isAdmin(): boolean {
+  const tok = decodeAccessToken();
+  const groups = tok?.["cognito:groups"];
+  return Array.isArray(groups) && groups.includes("admins");
 }
 
 export function signOut() {

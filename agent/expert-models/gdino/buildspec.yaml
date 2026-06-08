@@ -1,0 +1,43 @@
+# CodeBuild buildspec for the GDINO Triton expert-model container.
+#
+# Triggered by the aws_codebuild_project.gdino project. Source is uploaded
+# to s3://<clips>/codebuild-src/gdino.zip — must include the
+# agent/expert-models/gdino/ directory (and only that directory's contents
+# need to be the build context). buildspec.yaml itself is at
+# agent/expert-models/gdino/buildspec.yaml inside the zip.
+
+version: 0.2
+
+# ECR_REPO and AWS_REGION come from the CodeBuild project's
+# environment_variable config — see aws_codebuild_project.gdino in
+# infra/sagemaker-processing.tf. No buildspec-level env: block is needed
+# (and CodeBuild rejects an empty `variables:` map).
+
+phases:
+  pre_build:
+    commands:
+      - echo "Logging in to ECR ($AWS_REGION)..."
+      - aws ecr get-login-password --region "$AWS_REGION" |
+          docker login --username AWS --password-stdin "$ECR_REPO"
+      - export TAG="v$(date -u +%Y%m%d%H%M%S)"
+      - echo "Tag will be $TAG"
+
+  build:
+    commands:
+      - cd agent/expert-models/gdino
+      - echo "Building $ECR_REPO:$TAG (linux/amd64 — Triton base, no GPU at build time)"
+      - docker build
+          --platform linux/amd64
+          -t "$ECR_REPO:$TAG"
+          -t "$ECR_REPO:latest"
+          .
+
+  post_build:
+    commands:
+      - echo "Pushing tags..."
+      - docker push "$ECR_REPO:$TAG"
+      - docker push "$ECR_REPO:latest"
+      - echo "GDINO_IMAGE_TAG=$TAG"
+      # Echoing the tag as the last line lets the orchestrator (or operator
+      # script) grep it out of the build logs. The terraform state for the
+      # SageMaker Processing Job spec reads gdino_image_tag from a tfvar.

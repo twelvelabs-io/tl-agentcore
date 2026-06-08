@@ -25,6 +25,10 @@ export type TestConfig = {
   userEmail: string;
   userPassword: string;
   ksId: string;
+  emptyKsId: string;
+  /** Per-run throwaway KS created in _global-setup.ts; used by the
+   *  Library upload + mutation specs. */
+  mutationsKsId: string;
 };
 
 function requireEnv(name: string): string {
@@ -38,7 +42,13 @@ export const testConfig: TestConfig = {
   userEmail: requireEnv("TEST_USER_EMAIL"),
   userPassword: requireEnv("TEST_USER_PASSWORD"),
   ksId: requireEnv("TEST_KS_ID"),
-};
+  emptyKsId: requireEnv("TEST_EMPTY_KS_ID"),
+  // Per-run throwaway KS — populated by _global-setup.ts. Module-load
+  // can race that file write, so fall back to an env-var probe lazily
+  // via a getter; specs that don't touch it (the majority) don't pay
+  // the cost of requiring it up front.
+  get mutationsKsId() { return requireEnv("TEST_MUTATIONS_KS_ID"); },
+} as TestConfig;
 
 /** Drive the Cognito Hosted UI sign-in form once and persist tokens. */
 async function signInToHostedUi(page: Page, email: string, password: string) {
@@ -97,9 +107,42 @@ export const test = base.extend<Fixtures>({
     // Sanity: we're back on the SPA and the masthead shows the brand.
     await expect(page.locator('h1', { hasText: "Rough Cut" })).toBeVisible({ timeout: 30_000 });
 
+    // Force the active KS to the populated test fixture before each spec.
+    // The SPA defaults to ksList[0], which is whichever KS the TL API
+    // returns first — newest-first today, so the empty-index fixture lands
+    // there and breaks every plan-generation spec. Selecting explicitly
+    // makes the suite deterministic regardless of KS creation order.
+    await selectKs(page, testConfig.ksId);
+
     await use(page);
     await context.close();
   },
 });
+
+/** Make `ksId` the active knowledge base before the spec body runs. Opens
+ * the masthead picker, clicks the matching row, and waits for the dropdown
+ * to fully collapse. The `▼/▲` indicator in the masthead toggles with the
+ * `open` state, so we use that as the close signal — checking for the
+ * dropdown rows themselves can race against React's re-render. */
+export async function selectKs(page: Page, ksId: string): Promise<void> {
+  const picker = page.locator('button:has-text("Knowledge base")').first();
+  await expect(picker).toBeVisible({ timeout: 15_000 });
+  // The masthead button shows the first 28 chars of the active id; if that
+  // already matches, no UI dance is needed.
+  const alreadyActive = await picker.locator(`text=${ksId.slice(0, 28)}`).count();
+  if (alreadyActive === 0) {
+    await picker.click();
+    const option = page.locator(`button:has-text("${ksId}")`).first();
+    await expect(option).toBeVisible({ timeout: 5_000 });
+    await option.click();
+  }
+  // Either way, make sure the dropdown ends up CLOSED before returning so
+  // subsequent locator clicks in the spec don't hit the overlay. The closed
+  // state is signalled by `▼` in the masthead button.
+  if ((await picker.locator("text=▲").count()) > 0) {
+    await picker.click();
+  }
+  await expect(picker.locator("text=▼")).toBeVisible({ timeout: 5_000 });
+}
 
 export { expect };

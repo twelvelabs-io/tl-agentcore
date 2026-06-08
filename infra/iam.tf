@@ -15,6 +15,17 @@ data "aws_iam_policy_document" "runtime_assume" {
   }
 }
 
+# Shared assume-role policy for any Lambda function in this stack.
+data "aws_iam_policy_document" "lambda_assume" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "Service"
+      identifiers = ["lambda.amazonaws.com"]
+    }
+  }
+}
+
 resource "aws_iam_role" "runtime" {
   name               = "${local.fqname}-runtime"
   assume_role_policy = data.aws_iam_policy_document.runtime_assume.json
@@ -57,12 +68,6 @@ data "aws_iam_policy_document" "runtime_perms" {
       "arn:aws:bedrock:*:${data.aws_caller_identity.current.account_id}:inference-profile/*",
     ]
   }
-  # Read the TL API key from Secrets Manager.
-  statement {
-    sid       = "ReadTLKey"
-    actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
-    resources = [aws_secretsmanager_secret.tl_api_key.arn]
-  }
   # Query the S3 Vectors index. QueryVectors + GetVectors are required to
   # use metadata filters and return metadata in the response.
   statement {
@@ -74,6 +79,32 @@ data "aws_iam_policy_document" "runtime_perms" {
     resources = [
       aws_s3vectors_vector_bucket.clips.vector_bucket_arn,
       "${aws_s3vectors_vector_bucket.clips.vector_bucket_arn}/index/*",
+    ]
+  }
+  # Read mirrored clip bytes so Bedrock can fetch them for Pegasus
+  # analysis. Bedrock InvokeModel with s3Location requires the caller
+  # principal (this runtime role) to have s3:GetObject on the URI.
+  statement {
+    sid       = "ReadClipBytes"
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.clips.arn}/*"]
+  }
+  # Read the Jockey-shaped DDB tables. kb_cache is Query-driven (single-
+  # table pk/sk); rights and audiences are GetItem + Scan. Write access
+  # belongs to the operator (ingest-kb-cache.py + seed-*.py), not the
+  # runtime — the runtime only reads.
+  statement {
+    sid = "ReadCacheTables"
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:Query",
+      "dynamodb:Scan",
+      "dynamodb:BatchGetItem",
+    ]
+    resources = [
+      aws_dynamodb_table.kb_cache.arn,
+      aws_dynamodb_table.rights.arn,
+      aws_dynamodb_table.audiences.arn,
     ]
   }
 }

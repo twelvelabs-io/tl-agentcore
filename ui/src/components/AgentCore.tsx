@@ -1,16 +1,26 @@
 // "Agent" tab — chat with the Strands agent on AgentCore Runtime.
-// The agent has one retrieval primitive (vector_search over an S3 Vector
-// index of Marengo clip embeddings) plus pegasus_analyze for take-notes
-// and list_tl_indexes for discovery. The right rail surfaces the live
-// architecture diagram so a viewer can watch each tool fire as the agent
-// reasons.
+//
+// Same three-pane shape as the Rough Cut studio:
+//   ┌─ Left rail ─┬─ Center ──────────────────┬─ Right rail ─┐
+//   │ Question +  │ Latest agent response      │ Live arch    │
+//   │ chat thread │ (the hero), or suggestions │ sidebar      │
+//   └─────────────┴───────────────────────────┴──────────────┘
+// No page scroll; each pane scrolls internally where content overflows.
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
 import { agentEnabled, streamAgentTurn } from "../lib/agent-api";
 import { ResponseMarkdown } from "../lib/vref";
-import { useStore } from "../lib/store";
-import { LiveArchDiagram, nodeForEvent, downstreamFor, type NodeId } from "./LiveArchDiagram";
+import { useStore, setState as setGlobal } from "../lib/store";
+import { LiveArchSidebar } from "./LiveArchSidebar";
+import { nodeForEvent, downstreamFor, type NodeId } from "./LiveArchDiagram";
+import { ArchHandle } from "../App";
+import {
+  saveEntry,
+  updateEntry,
+  type AgentHistoryEntry,
+  type AgentTurnSnapshot,
+} from "../lib/roughcut-history";
 
 type Turn = {
   id: string;
@@ -31,9 +41,33 @@ export function AgentCore() {
   const [err, setErr] = useState<string | null>(null);
   const [activeNode, setActiveNode] = useState<NodeId | null>(null);
   const [nodeHistory, setNodeHistory] = useState<NodeId[]>([]);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const [historyEntryId, setHistoryEntryId] = useState<string | null>(null);
+  const responseRef = useRef<HTMLDivElement>(null);
+  const threadRef = useRef<HTMLDivElement>(null);
+
+  // Consume any pending restore the drawer leaves in the global store.
+  // Subscribing (vs reading once on mount) covers two paths: cross-tab
+  // restore (AgentCore is mounting fresh) AND in-tab restore (AgentCore
+  // is already mounted; the store update is what we react to).
+  const pendingRestore = useStore((s) => s.pendingRestore);
+  useEffect(() => {
+    if (pendingRestore && pendingRestore.kind === "agent") {
+      setTurns(pendingRestore.turns.map((t) => ({ id: t.id, role: t.role, text: t.text, elapsedMs: t.elapsedMs })));
+      setSessionId(pendingRestore.session_id);
+      setHistoryEntryId(pendingRestore.id);
+      setErr(null);
+      setGlobal({ pendingRestore: undefined });
+    }
+  }, [pendingRestore]);
 
   if (!enabled) return <NotDeployed />;
+
+  const recordNode = (n: NodeId) => {
+    setActiveNode((prev) => {
+      if (prev && prev !== n) setNodeHistory((h) => h.includes(prev) ? h : [...h, prev]);
+      return n;
+    });
+  };
 
   const send = async () => {
     if (!ks || !draft.trim() || busy) return;
@@ -43,25 +77,15 @@ export function AgentCore() {
     const aTurn: Turn = { id: rid(), role: "assistant", text: "", streaming: true };
     setTurns((ts) => [...ts, userTurn, aTurn]);
     setBusy(true);
-    setActiveNode("chat_lambda");
+    setActiveNode("runtime");
     setNodeHistory([]);
-    const recordNode = (n: NodeId) => {
-      setActiveNode((prev) => {
-        if (prev && prev !== n) setNodeHistory((h) => h.includes(prev) ? h : [...h, prev]);
-        return n;
-      });
-    };
     const t0 = Date.now();
 
-    // No additional routing scaffold — the agent's system prompt already
-    // handles tier discipline (cache → live primitives).
-    const guardedPrompt = text;
-
+    let acc = "";
     try {
-      let acc = "";
       for await (const ev of streamAgentTurn({
         knowledge_store_id: ks._id,
-        prompt: guardedPrompt,
+        prompt: text,
         session_id: sessionId,
       })) {
         const node = nodeForEvent(ev as { type: string; tool?: string });
@@ -77,12 +101,12 @@ export function AgentCore() {
         } else if (ev.type === "text_delta") {
           acc += ev.delta;
           setTurns((ts) => ts.map((t) => t.id === aTurn.id ? { ...t, text: acc } : t));
+          responseRef.current?.scrollTo({ top: 1e9 });
         } else if (ev.type === "error") {
           setErr(ev.message);
         } else if (ev.type === "done") {
           setTimeout(() => setActiveNode(null), 1200);
         }
-        scrollRef.current?.scrollTo({ top: 1e9 });
       }
     } catch (e) {
       setErr(String(e));
@@ -90,105 +114,220 @@ export function AgentCore() {
       const elapsedMs = Date.now() - t0;
       setTurns((ts) => ts.map((t) => t.id === aTurn.id ? { ...t, streaming: false, elapsedMs } : t));
       setBusy(false);
+
+      // Persist this session to history. Snapshots are built from
+      // local state we tracked through the loop: userTurn (already in
+      // turns), aTurn (id known) with the accumulated text on it (we
+      // were updating that into turns as deltas arrived; rather than
+      // wait for the async setTurns updater above, we reconstruct the
+      // final shape synchronously from `acc` + the previous turns).
+      const snapshots: AgentTurnSnapshot[] = [
+        ...turns.filter((t) => !t.streaming && t.id !== aTurn.id),
+        { id: userTurn.id, role: "user", text: userTurn.text },
+        { id: aTurn.id, role: "assistant", text: acc, elapsedMs },
+      ];
+      const title = userTurn.text;
+      if (historyEntryId) {
+        updateEntry<AgentHistoryEntry>(historyEntryId, {
+          turns: snapshots,
+          session_id: sessionId,
+        });
+      } else {
+        const saved = saveEntry<AgentHistoryEntry>({
+          kind: "agent",
+          title,
+          session_id: sessionId,
+          ks_id: ks?._id,
+          ks_name: ks?.name,
+          turns: snapshots,
+        });
+        setHistoryEntryId(saved.id);
+      }
+      window.dispatchEvent(new Event("history:updated"));
     }
   };
 
-  const reset = () => { setTurns([]); setSessionId(undefined); setErr(null); };
+  const reset = () => {
+    setTurns([]);
+    setSessionId(undefined);
+    setErr(null);
+    setHistoryEntryId(null);
+  };
+
+  // The center pane shows the most-recent assistant turn (the hero); if no
+  // turns yet, it shows suggestions. Older turns are visible in the left
+  // rail's chat thread.
+  const heroTurn = [...turns].reverse().find((t) => t.role === "assistant") || null;
+  const heroQuestion = (() => {
+    if (!heroTurn) return null;
+    const i = turns.findIndex((t) => t.id === heroTurn.id);
+    return i > 0 ? turns[i - 1] : null;
+  })();
+
+  // Auto-scroll the chat history to the bottom on new turns.
+  useEffect(() => { threadRef.current?.scrollTo({ top: 1e9 }); }, [turns.length]);
+
+  const archOpen = useStore((s) => s.archOpen);
 
   return (
-    <div className="grid lg:grid-cols-[1fr_360px] gap-12">
-      <section>
-        <div className="label">§ I · Question</div>
-        <div className="rule mt-3 mb-6" />
-
-        <div className="border-b pb-4" style={{ borderColor: "var(--color-rule)" }}>
+    <div
+      className="grid h-full min-h-0"
+      style={{ gridTemplateColumns: archOpen ? "320px 1fr 320px" : "320px 1fr" }}
+    >
+      {/* LEFT RAIL — question + chat history */}
+      <aside className="flex flex-col min-h-0 border-r" style={{ borderColor: "var(--color-rule)" }}>
+        {/* § Question */}
+        <div className="px-5 pt-5 pb-4 border-b" style={{ borderColor: "var(--color-rule)" }}>
+          <div className="flex items-center justify-between">
+            <span className="label">§ Question</span>
+            <div className="flex items-center gap-3">
+              <button
+                className="label hover:text-[var(--color-ink)] transition-colors"
+                onClick={() => setGlobal({ historyOpen: true })}
+                title="history"
+              >
+                history
+              </button>
+              {turns.length > 0 && (
+                <button
+                  className="label hover:text-[var(--color-ink)] transition-colors"
+                  onClick={reset}
+                  disabled={busy}
+                  title="discard this thread and start a new session"
+                >
+                  + new session
+                </button>
+              )}
+            </div>
+          </div>
           <textarea
-            className="editorial-input"
-            rows={2}
-            placeholder="Ask anything about the active knowledge base. Try: 'find a Brad Pitt drama and check its EMEA broadcast clearance'."
+            className="bg-transparent border w-full p-3 mt-3 outline-none text-sm font-mono rounded-[var(--radius-card)]"
+            style={{ borderColor: "var(--color-rule)", minHeight: 96 }}
+            rows={3}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
+            placeholder="Ask anything about the active knowledge base…  (⌘↩)"
             onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(); } }}
+            disabled={busy}
           />
-          <div className="flex items-center justify-between mt-3">
+          <div className="flex items-center justify-between mt-2">
             <div className="label" style={{ color: "var(--color-ink-faint)" }}>
-              ⌘↩ to send · sigv4 → InvokeAgentRuntime · Strands · Sonnet 4.6 · vector retrieval
+              {busy ? "thinking…" : "⌘↩ to send"}
             </div>
-            <div className="flex gap-2">
-              <button className="btn" onClick={reset} disabled={busy || !turns.length}>new session</button>
-              <button className="btn btn-cue" onClick={send} disabled={busy || !draft.trim() || !ks}>
-                {busy ? "thinking…" : "ask →"}
-              </button>
-            </div>
+            <button className="btn btn-cue" onClick={send} disabled={busy || !draft.trim() || !ks}>
+              {busy ? "..." : "ask →"}
+            </button>
           </div>
         </div>
 
-        <div ref={scrollRef} className="mt-12 space-y-12 max-h-[60vh] overflow-y-auto pr-2">
-          {turns.map((t) => (
-            <motion.div key={t.id} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
-              {t.role === "user" ? (
-                <div>
-                  <div className="label">Asked</div>
-                  <p className="font-display text-3xl leading-snug mt-2 max-w-2xl">"{t.text}"</p>
-                </div>
-              ) : (
-                <div>
-                  <div className="flex items-baseline gap-3">
-                    <div className="label" style={{ color: "var(--color-cue)" }}>Strands · AgentCore</div>
-                    {t.elapsedMs && (
-                      <div className="label" style={{ color: "var(--color-ink-faint)" }}>
-                        {(t.elapsedMs / 1000).toFixed(1)}s
+        {/* § Thread — past turns in chronological order */}
+        {turns.length > 0 && (
+          <div className="flex flex-col min-h-0 flex-1">
+            <div className="px-5 pt-3 pb-2">
+              <span className="label">§ Thread · {turns.filter((t) => t.role === "user").length}</span>
+            </div>
+            <div ref={threadRef} className="flex-1 min-h-0 overflow-y-auto px-5 pb-4 space-y-3">
+              {turns.map((t) => {
+                const isLatestAssistant = heroTurn && t.id === heroTurn.id;
+                return (
+                  <div key={t.id} className="text-xs leading-relaxed">
+                    {t.role === "user" ? (
+                      <div>
+                        <div className="label text-[10px]" style={{ color: "var(--color-ink-faint)" }}>You</div>
+                        <p className="mt-0.5 font-mono" style={{ color: "var(--color-ink)" }}>{t.text}</p>
+                      </div>
+                    ) : (
+                      <div
+                        className={`p-2 rounded-[8px] ${isLatestAssistant ? "border" : ""}`}
+                        style={isLatestAssistant ? { borderColor: "var(--color-rule)", background: "var(--color-surface)" } : undefined}
+                      >
+                        <div className="flex items-baseline justify-between">
+                          <div className="label text-[10px]" style={{ color: "var(--color-cue)" }}>Agent</div>
+                          {t.elapsedMs && (
+                            <div className="font-mono text-[9px]" style={{ color: "var(--color-ink-faint)" }}>
+                              {(t.elapsedMs / 1000).toFixed(1)}s
+                            </div>
+                          )}
+                        </div>
+                        <p className="mt-0.5 truncate" style={{ color: "var(--color-ink-soft)" }}>
+                          {t.streaming ? "…" : (t.text.slice(0, 120) + (t.text.length > 120 ? "…" : ""))}
+                        </p>
                       </div>
                     )}
                   </div>
-                  <div className={`mt-2 ${t.streaming ? "caret" : ""}`}>
-                    {t.text ? <ResponseMarkdown text={t.text} ksId={ks?._id} /> : (t.streaming ? null : <p style={{ color: "var(--color-ink-soft)" }}>(no text)</p>)}
-                  </div>
-                </div>
-              )}
-            </motion.div>
-          ))}
-
-          {!turns.length && <Suggestions onPick={setDraft} />}
-          {err && <pre className="font-mono text-xs p-3" style={{ background: "var(--color-surface)", color: "var(--color-status-failed)", whiteSpace: "pre-wrap" }}>{err}</pre>}
-        </div>
-      </section>
-
-      {/* Right rail — what the agent has at its disposal */}
-      <aside className="lg:border-l lg:pl-8" style={{ borderColor: "var(--color-rule)" }}>
-        <div className="label">§ II · Tools</div>
-        <div className="rule mt-3 mb-4" />
-        <ToolRow name="vector_search"   hint="Marengo embed + S3 Vectors ANN · ranked clips per beat" />
-        <ToolRow name="pegasus_analyze" hint="TL · take-note for the chosen primary clip" />
-        <ToolRow name="list_tl_indexes" hint="TL · discover Marengo indexes (rarely needed)" />
-
-        <div className="label mt-12">§ III · Stack</div>
-        <div className="rule mt-3 mb-4" />
-        <Field label="Orchestrator" mono>Strands · Sonnet 4.6</Field>
-        <div className="mt-3"><Field label="Host" mono>AgentCore Runtime · arm64</Field></div>
-        <div className="mt-3"><Field label="Tool catalog" mono>AgentCore Gateway · MCP</Field></div>
-        <div className="mt-3"><Field label="Identity" mono>Cognito JWT through-flow</Field></div>
-
-        <div className="label mt-12">§ IV · Session</div>
-        <div className="rule mt-3 mb-4" />
-        <Field label="Knowledge store" mono>{ks?._id || "—"}</Field>
-        <div className="mt-4"><Field label="Runtime session" mono>{sessionId || "(new on first turn)"}</Field></div>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </aside>
 
-      <section className="lg:col-span-2 mt-16 pt-12 border-t" style={{ borderColor: "var(--color-rule)" }}>
-        <div className="label">§ V · Live architecture</div>
-        <p className="font-display text-3xl lg:text-4xl mt-2 max-w-3xl leading-tight">
-          The Cognito JWT flows from <span style={{ color: "var(--color-cue)" }}>browser</span> all the way to the
-          MCP Gateway. Nodes light up as the agent reasons.
-        </p>
-        <p className="text-sm mt-3 max-w-2xl" style={{ color: "var(--color-ink-soft)" }}>
-          Single CloudFront origin, single WebSocket, single user identity end-to-end.
-          The agent calls tools through AgentCore Gateway-as-MCP — typed tool catalog,
-          bearer-JWT auth, OTEL traces.
-        </p>
-        <div className="rule mt-6 mb-10" />
-        <LiveArchDiagram activeNode={activeNode} history={nodeHistory} />
+      {/* CENTER — the latest agent response, rendered large. */}
+      <section className="flex flex-col min-h-0 overflow-hidden">
+        {!turns.length && (
+          <div className="flex-1 min-h-0 overflow-y-auto px-10 py-12">
+            <Suggestions onPick={setDraft} />
+          </div>
+        )}
+
+        {turns.length > 0 && (
+          <>
+            <div className="px-8 pt-5 pb-3 border-b flex items-baseline justify-between" style={{ borderColor: "var(--color-rule)" }}>
+              <div>
+                <div className="label">§ Response</div>
+                {heroQuestion && (
+                  <p className="mt-1 text-lg font-display tracking-tight truncate max-w-[60ch]">
+                    "{heroQuestion.text}"
+                  </p>
+                )}
+              </div>
+              {heroTurn?.elapsedMs && !heroTurn.streaming && (
+                <div className="font-mono text-sm" style={{ color: "var(--color-ink-soft)" }}>
+                  {(heroTurn.elapsedMs / 1000).toFixed(1)}s
+                </div>
+              )}
+            </div>
+            <div ref={responseRef} className="flex-1 min-h-0 overflow-y-auto px-8 py-6">
+              {heroTurn ? (
+                <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }}>
+                  {heroTurn.text ? (
+                    <div className={heroTurn.streaming ? "caret" : ""}>
+                      <ResponseMarkdown text={heroTurn.text} ksId={ks?._id} />
+                    </div>
+                  ) : (
+                    <p className="caret font-display text-2xl" style={{ color: "var(--color-ink-soft)" }}>
+                      Agent reasoning…
+                    </p>
+                  )}
+                </motion.div>
+              ) : (
+                <p className="text-sm" style={{ color: "var(--color-ink-soft)" }}>
+                  Send a question on the left to begin.
+                </p>
+              )}
+              {err && (
+                <pre className="font-mono text-xs mt-6 p-3 whitespace-pre-wrap rounded-[var(--radius-card)]" style={{ background: "var(--color-surface)", color: "var(--color-status-failed)" }}>
+                  {err}
+                </pre>
+              )}
+            </div>
+          </>
+        )}
       </section>
+
+      {/* RIGHT RAIL — live arch sidebar (same component as Rough Cut).
+          Hidden by default; the <ArchHandle/> on the viewport's right edge
+          slides this in/out. */}
+      {archOpen && (
+        <aside className="flex flex-col min-h-0 border-l" style={{ borderColor: "var(--color-rule)" }}>
+          <LiveArchSidebar
+            activeNode={activeNode}
+            history={nodeHistory}
+            sessionId={sessionId}
+          />
+        </aside>
+      )}
+      <ArchHandle />
     </div>
   );
 }
@@ -203,51 +342,47 @@ function Suggestions({ onPick }: { onPick: (s: string) => void }) {
     "What's the most kinetic moment in this corpus?",
   ];
   return (
-    <div className="py-12">
+    <div className="max-w-2xl">
       <div className="label">Try</div>
-      <ul className="mt-2 space-y-2 max-w-xl">
+      <ul className="mt-3 space-y-3">
         {samples.map((s) => (
           <li key={s}>
-            <button className="font-display text-2xl text-left hover:text-[var(--color-cue)]" onClick={() => onPick(s)}>
+            <button
+              className="font-display text-2xl text-left leading-snug hover:text-[var(--color-ink)] transition-colors"
+              style={{ color: "var(--color-ink-soft)" }}
+              onClick={() => onPick(s)}
+            >
               "{s}"
             </button>
           </li>
         ))}
       </ul>
-    </div>
-  );
-}
-
-function ToolRow({ name, hint }: { name: string; hint: string }) {
-  return (
-    <div className="mb-3">
-      <div className="font-mono text-sm" style={{ color: "var(--color-cue)" }}>{name}</div>
-      <div className="text-xs mt-0.5" style={{ color: "var(--color-ink-soft)" }}>{hint}</div>
-    </div>
-  );
-}
-
-function Field({ label, children, mono }: { label: string; children: React.ReactNode; mono?: boolean }) {
-  return (
-    <div>
-      <div className="label" style={{ color: "var(--color-ink-faint)" }}>{label}</div>
-      <div className={`mt-1 ${mono ? "font-mono text-xs break-all" : "text-sm"}`}>{children}</div>
+      <p className="text-sm mt-10 max-w-md" style={{ color: "var(--color-ink-faint)" }}>
+        Tiered agent on AgentCore Runtime — tools route from the DDB knowledge
+        cache (<span className="font-mono">get_kb_overview</span>,{" "}
+        <span className="font-mono">list_kb_assets</span>) through S3 Vectors{" "}
+        (<span className="font-mono">vector_search</span>,{" "}
+        <span className="font-mono">find_entity_by_image</span>) to Bedrock
+        Pegasus (<span className="font-mono">pegasus_analyze</span>) for
+        on-demand take-notes. Every model is invoked via Bedrock; no
+        TwelveLabs SaaS dependency. Open the right rail (▣) to watch each
+        lane light up as the agent calls it.
+      </p>
     </div>
   );
 }
 
 function NotDeployed() {
   return (
-    <div className="py-24">
+    <div className="h-full overflow-y-auto px-8 py-12 max-w-3xl mx-auto">
       <div className="label">AgentCore stack not configured</div>
-      <p className="font-display text-5xl mt-3 max-w-2xl leading-tight">
+      <p className="font-display text-3xl mt-3 leading-tight">
         The Strands agent isn't wired yet.
       </p>
-      <p className="mt-6 text-sm max-w-2xl" style={{ color: "var(--color-ink-soft)" }}>
-        From the project root: <span className="font-mono">cd infra-agentcore && terraform apply</span>,
-        push the agent container with <span className="font-mono">bash build-agent.sh</span>, then re-apply{" "}
-        <span className="font-mono">infra/</span> with{" "}
-        <span className="font-mono">-var agentcore_runtime_arn=&lt;…&gt;</span>.
+      <p className="mt-6 text-sm" style={{ color: "var(--color-ink-soft)" }}>
+        From the project root: <span className="font-mono">cd infra && terraform apply</span>,
+        push the agent container with <span className="font-mono">bash build-agent.sh</span>, then re-apply
+        with <span className="font-mono">-var agent_image_tag=v&lt;ts&gt;</span>.
       </p>
     </div>
   );

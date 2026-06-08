@@ -1,0 +1,22 @@
+flowchart TD
+    Brief(["Producer follow-up message"]) --> Classify{{"agent classifies"}}
+
+    Classify -- informational --> Pegasus["pegasus_analyze · 1+ calls on specific asset_ids"]
+    Pegasus --> Prose["prose answer · no plan change"]
+
+    Classify -- structural --> Search["vector_search · refined beat phrases or reuse alternates"]
+    Search --> NewPlan["new <plan> · UI replaces timeline"]
+
+    Classify -- ambiguous --> Ask["one clarifying question · stop"]
+
+    classDef agent   fill:#e0e7ff,stroke:#4f46e5,stroke-width:2px,color:#312e81
+    classDef pegasus fill:#fef3e2,stroke:#f59e0b,color:#7c2d12
+    classDef retrieval fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef ask     fill:#f3e8ff,stroke:#9333ea,color:#581c87
+    classDef io      fill:#f1f5f9,stroke:#475569,color:#0f172a
+
+    class Classify agent
+    class Pegasus,Prose pegasus
+    class Search,NewPlan retrieval
+    class Ask ask
+    class Brief io

@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>tl-agentcore whitepaper diagrams</title>
+<style>
+  :root { --fg: #0f172a; --muted: #475569; --bg: #fafaf9; --card: #ffffff; --border: #e2e8f0; --accent: #4f46e5; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { padding: 28px 32px 12px; }
+  header h1 { margin: 0 0 6px; font-size: 22px; }
+  header p { margin: 0; color: var(--muted); }
+  main { padding: 16px 32px 48px; display: grid; gap: 24px; max-width: 1200px; margin: 0 auto; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
+  .card h2 { margin: 0 0 4px; font-size: 16px; }
+  .card .sub { color: var(--muted); margin: 0 0 14px; font-size: 13px; }
+  .actions { display: flex; gap: 8px; margin: 14px 0 0; }
+  button { font: inherit; background: var(--accent); color: white; border: 0; padding: 8px 14px; border-radius: 7px; cursor: pointer; }
+  button.secondary { background: white; color: var(--accent); border: 1px solid var(--accent); }
+  button:hover { filter: brightness(1.08); }
+  .diagram-wrap { background: white; padding: 12px; border-radius: 6px; overflow: auto; min-height: 80px; }
+  .diagram-wrap svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+  footer { color: var(--muted); padding: 0 32px 32px; font-size: 13px; max-width: 1200px; margin: 0 auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>tl-agentcore whitepaper — diagrams</h1>
+  <p>Renders the four Mermaid blocks from <code>docs/whitepaper.md</code> as SVGs. Use the buttons below each diagram to download a PNG and paste it into the Google Doc.</p>
+</header>
+
+<main>
+  <section class="card">
+    <h2>§3.1 · Component map</h2>
+    <p class="sub">Anchor for reviewer comment #6 ("Is there a better way to visualize the flow here? Maybe a flowchart…").</p>
+    <div class="diagram-wrap"><pre class="mermaid" id="d1">
+flowchart TD
+    Browser["<b>Browser</b><br/>React + Vite"]
+    CF["CloudFront"]
+    WS["API Gateway<br/>WebSocket"]
+    Chat["<b>Chat λ</b><br/>async self-invoke"]
+    Runtime["<b>AgentCore Runtime</b><br/>Strands · Sonnet 4.6<br/>Graviton container (arm64)"]
+    Vectors[("<b>S3 Vectors</b><br/>multi-modal clip embeddings<br/>visual · audio · transcription")]
+    Clips[("<b>S3 · clips bucket</b><br/>mirrored asset bytes<br/>clips/&lt;asset_id&gt;.mp4")]
+    Marengo["<b>Bedrock · Marengo 3.0</b><br/>StartAsyncInvoke<br/>visual + audio + transcription embeddings"]
+    Pegasus["<b>Bedrock · Pegasus 1.2</b><br/>InvokeModel<br/>clip analysis"]
+
+    Browser -- "wss + Cognito JWT" --> CF
+    CF --> WS
+    WS --> Chat
+    Chat -- "SigV4<br/>InvokeAgentRuntime" --> Runtime
+    Runtime -- "1 · embed beat phrase (text · sync) · ~200 ms" --> Marengo
+    Marengo -. "query vector + 3 anchor vectors (cached)" .-> Runtime
+    Runtime -- "2 · 3 parallel ANN queries · ~50 ms" --> Vectors
+    Vectors -. "fused ranking" .-> Runtime
+    Runtime -- "3 · clip take-note · only on follow-up" --> Pegasus
+    Pegasus -. "reads s3Location" .-> Clips
+
+    classDef edge    fill:#fef3e2,stroke:#f59e0b,stroke-width:1px,color:#7c2d12
+    classDef compute fill:#fef9c3,stroke:#ca8a04,stroke-width:1px,color:#713f12
+    classDef hero    fill:#e0e7ff,stroke:#4f46e5,stroke-width:2px,color:#312e81
+    classDef store   fill:#dcfce7,stroke:#16a34a,stroke-width:1px,color:#14532d
+    classDef bedrock fill:#fce7f3,stroke:#db2777,stroke-width:1px,color:#831843
+
+    class Browser,CF,WS edge
+    class Chat compute
+    class Runtime hero
+    class Vectors,Clips store
+    class Marengo,Pegasus bedrock
+    </pre></div>
+    <div class="actions">
+      <button data-host="d1" data-name="component-map">Download PNG</button>
+      <button class="secondary" data-host="d1" data-name="component-map" data-svg="1">Download SVG</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>§3.2 · Parallel retrieval fan-out</h2>
+    <p class="sub">One <code>vector_search</code> per beat, in parallel, returning the EDL in one agent turn.</p>
+    <div class="diagram-wrap"><pre class="mermaid" id="d2">
+flowchart TD
+    U(["Producer · build me a 60 s action highlight reel"]) --> A1[Agent · parse brief into beats]
+
+    A1 --> VFan{{"parallel fan-out · one vector_search per beat"}}
+
+    subgraph VS["vector_search · S3 Vectors · ~250 ms each"]
+      direction TB
+      VFan --> V1["beat: cold-open landscape"]
+      VFan --> V2["beat: kinetic action"]
+      VFan --> V3["beat: tense crowd"]
+      VFan --> V4["beat: celebration"]
+    end
+
+    VS --> A2[Agent · ranked clips per beat · rank 1 = primary, 2–5 = alternates]
+    A2 --> O(["EDL · scenes · primary clip + 2–4 alternates per beat"])
+
+    classDef retrieval fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef agent     fill:#e0e7ff,stroke:#4f46e5,stroke-width:2px,color:#312e81
+    classDef io        fill:#f1f5f9,stroke:#475569,color:#0f172a
+
+    class V1,V2,V3,V4,VFan retrieval
+    class A1,A2 agent
+    class U,O io
+
+    style VS fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px,color:#14532d
+    </pre></div>
+    <div class="actions">
+      <button data-host="d2" data-name="parallel-retrieval">Download PNG</button>
+      <button class="secondary" data-host="d2" data-name="parallel-retrieval" data-svg="1">Download SVG</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>§3.3 · Conversation-mode classifier</h2>
+    <p class="sub">Anchors for reviewer comments #1 and #4 ("Is there a way to visualize this flowchart? I am only seeing the raw text.").</p>
+    <div class="diagram-wrap"><pre class="mermaid" id="d3">
+flowchart TD
+    Brief(["Producer follow-up message"]) --> Classify{{"agent classifies"}}
+
+    Classify -- informational --> Pegasus["pegasus_analyze · 1+ calls on specific asset_ids"]
+    Pegasus --> Prose["prose answer · no plan change"]
+
+    Classify -- structural --> Search["vector_search · refined beat phrases or reuse alternates"]
+    Search --> NewPlan["new &lt;plan&gt; · UI replaces timeline"]
+
+    Classify -- ambiguous --> Ask["one clarifying question · stop"]
+
+    classDef agent   fill:#e0e7ff,stroke:#4f46e5,stroke-width:2px,color:#312e81
+    classDef pegasus fill:#fef3e2,stroke:#f59e0b,color:#7c2d12
+    classDef retrieval fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef ask     fill:#f3e8ff,stroke:#9333ea,color:#581c87
+    classDef io      fill:#f1f5f9,stroke:#475569,color:#0f172a
+
+    class Classify agent
+    class Pegasus,Prose pegasus
+    class Search,NewPlan retrieval
+    class Ask ask
+    class Brief io
+    </pre></div>
+    <div class="actions">
+      <button data-host="d3" data-name="conversation-mode">Download PNG</button>
+      <button class="secondary" data-host="d3" data-name="conversation-mode" data-svg="1">Download SVG</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>§4.3 · Ingest pipeline</h2>
+    <p class="sub">Upstream ingest: Marengo async-invoke → S3 Vectors. Runs once per knowledge store.</p>
+    <div class="diagram-wrap"><pre class="mermaid" id="d4">
+flowchart LR
+    Script["<b>scripts/ingest_vectors.py</b><br/>ks_&lt;id&gt;"]
+    Mirror["Stage asset bytes<br/>s3://&lt;clips&gt;/clips/&lt;asset_id&gt;.mp4"]
+    Embed["<b>Bedrock · Marengo 3.0</b><br/>StartAsyncInvoke<br/>embeddingOption: V, A, T"]
+    Output[("<b>S3 · async output</b><br/>embeddings/&lt;inv_id&gt;/output.json<br/>3 segments per clip")]
+    Batch["PutVectors · batched<br/>one row per (clip, modality)"]
+    Index[("<b>S3 Vectors</b><br/>tl-agentcore-clips")]
+
+    Script --> Mirror
+    Mirror --> Embed
+    Embed --> Output
+    Output --> Batch
+    Batch --> Index
+
+    classDef script  fill:#fef9c3,stroke:#ca8a04,stroke-width:1px,color:#713f12
+    classDef step    fill:#dbeafe,stroke:#2563eb,stroke-width:1px,color:#1e3a8a
+    classDef bedrock fill:#fce7f3,stroke:#db2777,stroke-width:1px,color:#831843
+    classDef store   fill:#dcfce7,stroke:#16a34a,stroke-width:1px,color:#14532d
+
+    class Script script
+    class Mirror,Batch step
+    class Embed bedrock
+    class Output,Index store
+    </pre></div>
+    <div class="actions">
+      <button data-host="d4" data-name="ingest-pipeline">Download PNG</button>
+      <button class="secondary" data-host="d4" data-name="ingest-pipeline" data-svg="1">Download SVG</button>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <p>If a download yields a blurry image, open the SVG in Preview/Inkscape and export at 2x — vector SVG is the safest source for re-export at any resolution.</p>
+</footer>
+
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: false, theme: "default", securityLevel: "loose", flowchart: { htmlLabels: true, useMaxWidth: false } });
+  await mermaid.run({ querySelector: "pre.mermaid" });
+
+  function svgEl(host) {
+    return document.querySelector(`#${host}`).querySelector("svg") || document.querySelector(`#${host} ~ * svg`) || document.querySelector(`#${host}`)?.parentElement?.querySelector("svg");
+  }
+
+  function downloadBlob(blob, name) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = name; document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 200);
+  }
+
+  function downloadSVG(host, name) {
+    const svg = document.querySelector(`#${host}`).closest(".card").querySelector("svg");
+    if (!svg) return alert("Diagram not yet rendered.");
+    const s = new XMLSerializer().serializeToString(svg);
+    downloadBlob(new Blob([s], { type: "image/svg+xml;charset=utf-8" }), `${name}.svg`);
+  }
+
+  function downloadPNG(host, name) {
+    const svg = document.querySelector(`#${host}`).closest(".card").querySelector("svg");
+    if (!svg) return alert("Diagram not yet rendered.");
+    // Make sure width/height attributes exist so canvas sizing is reliable
+    const rect = svg.getBoundingClientRect();
+    const w = Math.ceil(rect.width) || svg.viewBox.baseVal.width || 1200;
+    const h = Math.ceil(rect.height) || svg.viewBox.baseVal.height || 800;
+    const scale = 2; // 2x for crisp paste-in
+    const clone = svg.cloneNode(true);
+    clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+    clone.setAttribute("width", w);
+    clone.setAttribute("height", h);
+    const s = new XMLSerializer().serializeToString(clone);
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = w * scale; canvas.height = h * scale;
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "white";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.scale(scale, scale);
+      ctx.drawImage(img, 0, 0);
+      canvas.toBlob(b => downloadBlob(b, `${name}.png`), "image/png");
+    };
+    img.onerror = () => alert("PNG export failed (likely a CORS / data-URI issue). Try the SVG download.");
+    img.src = "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(s)));
+  }
+
+  document.querySelectorAll("button[data-host]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const host = btn.dataset.host, name = btn.dataset.name;
+      if (btn.dataset.svg) downloadSVG(host, name);
+      else downloadPNG(host, name);
+    });
+  });
+</script>
+</body>
+</html>

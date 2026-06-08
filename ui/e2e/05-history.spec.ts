@@ -1,8 +1,8 @@
 import { test, expect } from "./fixtures";
 
 test.describe("RoughCut: history", () => {
-  test("a generated plan is saved to the history strip and restorable", async ({ signedInPage }) => {
-    await signedInPage.locator('button:has-text("Rough Cut")').first().click();
+  test("a generated plan is saved to history and restorable from the drawer", async ({ signedInPage }) => {
+    await signedInPage.locator('button.tab:has-text("Rough Cut")').first().click();
 
     const uniqueMarker = `e2e-${Date.now().toString(36)}`;
     await signedInPage.locator("textarea").first().fill(
@@ -15,15 +15,14 @@ test.describe("RoughCut: history", () => {
       timeout: 3 * 60_000,
     });
 
-    // The history strip renders one card per saved entry. The latest
-    // entry's title is what we'll find.
-    const historyCards = signedInPage.locator(".grid").locator('div:has-text("edl only"), div:has-text("rendered")');
-    await expect(historyCards.first()).toBeVisible({ timeout: 10_000 });
+    // Open the history drawer from the masthead.
+    // History trigger is now in-page (left rail of each tab) — small label button.
+await signedInPage.locator('button:has-text("history")').first().click();
 
-    // Click the most-recently-created history card. The active one has
-    // the orange highlight via inline borderColor — we just click the
-    // first card (newest first).
-    const newest = signedInPage.locator('div[style*="rgba(255, 122, 26"]').first();
-    await expect(newest).toBeVisible({ timeout: 5_000 });
+    // Drawer header is "§ History" and the count line confirms at least
+    // one saved cut is in localStorage. Both are inside aside.fixed.
+    const drawer = signedInPage.locator('aside.fixed');
+    await expect(drawer.locator('text=§ History').first()).toBeVisible({ timeout: 5_000 });
+    await expect(drawer.locator('text=/\\d+ saved cuts? · stored locally/')).toBeVisible({ timeout: 5_000 });
   });
 });

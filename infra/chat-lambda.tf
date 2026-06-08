@@ -51,12 +51,6 @@ data "aws_iam_policy_document" "chat_perms" {
       "${aws_bedrockagentcore_agent_runtime.this.agent_runtime_arn}/*",
     ]
   }
-  # Read the TL API key (forwarded to the AgentCore Runtime container).
-  statement {
-    sid       = "ReadTLKey"
-    actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
-    resources = [aws_secretsmanager_secret.tl_api_key.arn]
-  }
   # Self-invoke (async pattern that escapes the WS 30s integration cap).
   statement {
     sid     = "SelfInvoke"
@@ -99,8 +93,6 @@ resource "aws_lambda_function" "chat" {
       AGENTCORE_RUNTIME_ARN = aws_bedrockagentcore_agent_runtime.this.agent_runtime_arn
       COGNITO_USER_POOL_ID  = aws_cognito_user_pool.this.id
       COGNITO_CLIENT_ID     = aws_cognito_user_pool_client.spa.id
-      TL_API_KEY_SECRET     = aws_secretsmanager_secret.tl_api_key.name
-      TL_BASE_URL           = "https://api.twelvelabs.io/v1.3"
     }
   }
 }

@@ -20,6 +20,8 @@ export default defineConfig({
   workers: 1,
   retries: process.env.CI ? 1 : 0,
   reporter: [["list"], ["html", { open: "never", outputFolder: "playwright-report" }]],
+  globalSetup:    "./e2e/_global-setup.ts",
+  globalTeardown: "./e2e/_global-teardown.ts",
 
   // Real agent runs hit AgentCore Runtime + Marengo + Pegasus. A 6-beat
   // rough-cut routinely needs 60-120 s, so the per-test timeout is
@@ -40,6 +42,33 @@ export default defineConfig({
     {
       name: "chromium",
       use: { ...devices["Desktop Chrome"] },
+    },
+    // Firefox + WebKit projects run a curated smoke set, not the full
+    // suite. Goal: catch obvious cross-browser breakage (CSS variable
+    // fallback, focus management, FormData uploads) without booking
+    // multiple hours of agent runs per CI cycle on browsers where HLS
+    // playback + WebSocket streaming behave differently.
+    {
+      name: "firefox",
+      use: { ...devices["Desktop Firefox"] },
+      testMatch: [
+        "01-signin.spec.ts",
+        "02-ks-picker.spec.ts",
+        "07-agent-tab.spec.ts",
+        "11-library.spec.ts",
+        "18-keyboard-shortcuts.spec.ts",
+      ],
+    },
+    {
+      name: "webkit",
+      use: { ...devices["Desktop Safari"] },
+      testMatch: [
+        "01-signin.spec.ts",
+        "02-ks-picker.spec.ts",
+        "07-agent-tab.spec.ts",
+        "11-library.spec.ts",
+        "18-keyboard-shortcuts.spec.ts",
+      ],
     },
   ],
 });

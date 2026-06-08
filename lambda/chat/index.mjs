@@ -151,16 +151,58 @@ async function handleAgentCoreAsync(event) {
       return { statusCode: 200 };
     }
 
-    let raw = "";
+    // The Runtime now streams Server-Sent Events. Each frame is
+    // `data: {json}\n\n`. We parse incrementally and forward each
+    // event to the WS connection as it arrives — that's how the UI
+    // sees per-tool events (tool_call, tool_result) live, instead of
+    // waiting for the full agent run to finish.
+    let buffer = "";
+    let answerText = "";
+    let eventsEmitted = 0;
+    const flush = async () => {
+      let idx;
+      while ((idx = buffer.indexOf("\n\n")) >= 0) {
+        const frame = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        // Each SSE frame may contain multiple `data:` lines; concat them.
+        const dataLines = frame
+          .split("\n")
+          .map((l) => l.trim())
+          .filter((l) => l.startsWith("data:"))
+          .map((l) => l.slice(5).trim());
+        if (!dataLines.length) continue;
+        const json = dataLines.join("");
+        let evt;
+        try { evt = JSON.parse(json); } catch { continue; }
+        // Track the assembled answer text in case the agent's final
+        // `result` event is missed — we still want a coherent fallback.
+        if (evt?.type === "text_delta" && typeof evt.delta === "string") {
+          answerText += evt.delta;
+        } else if (evt?.type === "result" && typeof evt.text === "string") {
+          answerText = evt.text;
+        }
+        eventsEmitted += 1;
+        await post(evt);
+      }
+    };
+
     try {
       if (resp.response?.transformToString) {
-        raw = await resp.response.transformToString();
+        buffer += await resp.response.transformToString();
+        await flush();
       } else if (resp.response) {
         for await (const chunk of resp.response) {
-          if (chunk?.payload?.transformToString) raw += await chunk.payload.transformToString();
-          else if (typeof chunk === "string") raw += chunk;
-          else if (chunk instanceof Uint8Array) raw += decoder.decode(chunk);
+          if (chunk?.payload?.transformToString) buffer += await chunk.payload.transformToString();
+          else if (typeof chunk === "string") buffer += chunk;
+          else if (chunk instanceof Uint8Array) buffer += decoder.decode(chunk);
+          await flush();
         }
+      }
+      // Drain anything left without a trailing \n\n (some SDK chunkings
+      // emit the final frame without a separator).
+      if (buffer.trim()) {
+        buffer += "\n\n";
+        await flush();
       }
     } catch (e) {
       await post({ type: "error", message: `read response: ${errorString(e)}` });
@@ -168,13 +210,19 @@ async function handleAgentCoreAsync(event) {
       return { statusCode: 200 };
     }
 
-    let answerText = raw;
-    try {
-      const j = JSON.parse(raw);
-      if (typeof j?.text === "string") answerText = j.text;
-    } catch { /* not JSON, send as-is */ }
-
-    await post({ type: "text_delta", delta: answerText });
+    // Legacy fallback: if the upstream agent is still the old
+    // non-streaming shape (returns one JSON `{"text": "..."}` blob),
+    // no `data:` frames will have parsed and `eventsEmitted` stays 0.
+    // Treat the remaining buffer as that legacy payload.
+    if (eventsEmitted === 0 && buffer.trim()) {
+      try {
+        const j = JSON.parse(buffer.trim());
+        const t = typeof j?.text === "string" ? j.text : buffer.trim();
+        await post({ type: "text_delta", delta: t });
+      } catch {
+        await post({ type: "text_delta", delta: buffer.trim() });
+      }
+    }
     await post({ type: "done" });
     return { statusCode: 200 };
   } finally {

@@ -1,0 +1,23 @@
+flowchart LR
+    Script["<b>scripts/ingest_vectors.py</b><br/>ks_&lt;id&gt;"]
+    Mirror["Stage asset bytes<br/>s3://&lt;clips&gt;/clips/&lt;asset_id&gt;.mp4"]
+    Embed["<b>Bedrock · Marengo 3.0</b><br/>StartAsyncInvoke<br/>embeddingOption: V, A, T"]
+    Output[("<b>S3 · async output</b><br/>embeddings/&lt;inv_id&gt;/output.json<br/>3 segments per clip")]
+    Batch["PutVectors · batched<br/>one row per (clip, modality)"]
+    Index[("<b>S3 Vectors</b><br/>tl-agentcore-clips")]
+
+    Script --> Mirror
+    Mirror --> Embed
+    Embed --> Output
+    Output --> Batch
+    Batch --> Index
+
+    classDef script  fill:#fef9c3,stroke:#ca8a04,stroke-width:1px,color:#713f12
+    classDef step    fill:#dbeafe,stroke:#2563eb,stroke-width:1px,color:#1e3a8a
+    classDef bedrock fill:#fce7f3,stroke:#db2777,stroke-width:1px,color:#831843
+    classDef store   fill:#dcfce7,stroke:#16a34a,stroke-width:1px,color:#14532d
+
+    class Script script
+    class Mirror,Batch step
+    class Embed bedrock
+    class Output,Index store

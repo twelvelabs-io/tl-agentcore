@@ -133,3 +133,13 @@ resource "aws_cognito_user_pool_client" "spa" {
     refresh_token = "days"
   }
 }
+
+# Hosted-UI customization — themes the sign-in page to match the SPA's
+# playground-aligned dark palette. Cognito only honors a fixed set of
+# *-customizable class hooks; the CSS file targets those. Logo skipped
+# (the 100x60 px limit can't accommodate the wordmark cleanly).
+resource "aws_cognito_user_pool_ui_customization" "this" {
+  user_pool_id = aws_cognito_user_pool.this.id
+  client_id    = aws_cognito_user_pool_client.spa.id
+  css          = file("${path.module}/cognito-ui.css")
+}

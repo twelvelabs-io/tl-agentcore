@@ -7,13 +7,18 @@
 // timeline with EDL export and (Phase 2) a MediaConvert preview render.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { motion } from "motion/react";
+import { motion, AnimatePresence } from "motion/react";
 import { streamAgentTurn } from "../lib/agent-api";
 import { useStore } from "../lib/store";
 import { getAsset, getStitch, startStitch, type Asset, type Channel, type StitchJob } from "../lib/api";
 import { ChannelPlayer } from "./ChannelPlayer";
+import { SmartClipThumb } from "../lib/clip-thumb";
 import { EntityChips } from "./EntityChips";
+import { LiveArchSidebar } from "./LiveArchSidebar";
+import { nodeForEvent, downstreamFor, type NodeId } from "./LiveArchDiagram";
 import { setState as setGlobal } from "../lib/store";
+import { ResponseMarkdown } from "../lib/vref";
+import { ArchHandle } from "../App";
 import {
   fmtDuration,
   generateEDL,
@@ -31,6 +36,11 @@ import {
   type ChatMessage,
 } from "../lib/roughcut-history";
 
+// localStorage key remembering which rough-cut history entry was last
+// active. A page refresh reads this on mount and silently restores the
+// matching entry — producers don't lose their place to a stray ⌘R.
+const LS_LAST_ROUGHCUT_ENTRY = "tl-agentcore.lastRoughCutEntryId";
+
 const DEFAULT_FPS_OPTIONS = [
   { value: 24,    label: "24 fps · cinema (DCP)" },
   { value: 23.976, label: "23.976 fps · digital cinema" },
@@ -43,20 +53,62 @@ const DEFAULT_FPS_OPTIONS = [
 // indexed footage offers and maps it to these three acts. (Earlier versions
 // were specific to a desert/dailies KB; that didn't survive switching to
 // the Movie Trailers KB, so the sample is now mood-based, not content-based.)
-const SAMPLE_SCRIPT = `Cold open: a striking visual that sets a tone. Could be a wide
-landscape, a face in close-up, or a dramatic moment of stillness.
+// Canned brief templates the producer can drop into the textarea — one per
+// cut type the agent recognizes (sizzle / narrative / montage / mood /
+// highlight). Each starts with the cut-type label so the agent's
+// classifier locks onto the right ruleset (clip durations, pacing,
+// adjacency rules) — see SYSTEM_PROMPT step 2 in agent.py.
+type CutType = "sizzle" | "narrative" | "montage" | "mood" | "highlight" | "rough_cut";
 
-Act One — TENSION
-Build atmosphere. Establish a sense of place or a character. Mix wider
-context shots with intimate close-ups. Suggest something is about to happen.
+const BRIEF_TEMPLATES: Record<CutType, { label: string; tagline: string; brief: string }> = {
+  sizzle: {
+    label: "Sizzle reel",
+    tagline: "30–60 s · kinetic · max variety",
+    brief: `Build me a 45-second sizzle reel from the most exciting moments in this collection. Lean kinetic — fast cuts, high energy, dialogue only when it lands hard. Cycle through the strongest visual moments, never two from the same source back-to-back. End on a triumphant or iconic beat that leaves the viewer wanting more.`,
+  },
+  narrative: {
+    label: "Narrative trailer",
+    tagline: "60–120 s · three-act arc · tension → release",
+    brief: `Cut me a 90-second narrative trailer with a clear emotional arc.
 
-Act Two — RELEASE
-The high-energy section. Action, conflict, kinetic motion, fast cuts. Show
-movement, scale, intensity. This is the punchline of the cut.
+Act 1 — SETUP. Establish the world and a protagonist. Wide context shots intercut with intimate close-ups. Suggest something is about to happen.
 
-Act Three — CODA
-The aftermath. A quieter beat — a face, a wide, a held moment. End on
-something that lingers.`;
+Act 2 — CONFLICT. Things escalate. Kinetic, charged, layered. The protagonist faces something.
+
+Act 3 — RESOLUTION. The turn — an iconic line or a single quiet beat that lands the whole story. End on something that lingers.`,
+  },
+  montage: {
+    label: "Montage",
+    tagline: "45 s · rapid cuts · one theme",
+    brief: `Build me a 45-second montage on a single theme — pick a recurring motion, mood, or visual signature that runs through this collection and string the strongest examples together. Target 45 seconds total. Rapid pacing with rapid cuts; per-clip duration should fall between 2 and 4 seconds. No narrative arc required — treat it like a music-video opener, all rhythm.`,
+  },
+  mood: {
+    label: "Mood reel / B-roll",
+    tagline: "120 s · atmospheric · slower pacing",
+    brief: `Compile a 120-second mood reel — atmospheric, contemplative, no rush. Target 120 seconds total. Lean on landscape shots, held faces, ambient moments. Per-clip duration runs slower than other cut types — 8 to 12 seconds each. Similar emotional register throughout. The goal is a vibe, not a story — something an editor could lay under voiceover or score.`,
+  },
+  highlight: {
+    label: "Highlight reel",
+    tagline: "60–180 s · per-event · best moments",
+    brief: `Pull the best individual moments from this collection into a highlight reel. Each scene should be one complete event — don't chop within a beat. Order them so the cut builds: solid early plays leading into the most memorable ones. Aim for 90 seconds.`,
+  },
+  rough_cut: {
+    label: "Rough cut · doc/film",
+    tagline: "3 min · full assembly · story arc",
+    brief: `Assemble a full rough cut — this is the editor's first-pass story assembly for a documentary or short film, NOT a trailer or sizzle. Target 3 minutes. Walk the story from cold open through coda:
+
+— Cold open: a single grounded character or setting beat that pulls the viewer in. ~20 s.
+— Setup: establish the world, the people, the stakes. Wide and intimate, intercut. Bring in interview / voice when it lands a specific fact or feeling.
+— Development: introduce friction, decisions, change. Pace varies — let breath shots sit, let confrontations escalate.
+— Climax: the cut's hardest emotional or factual punch.
+— Coda: a held image or quiet line that resolves the arc.
+
+Use 10–25-second beats — give each scene room to breathe. Mix interview, b-roll, atmospheric, archival as the corpus offers. Reusing a source asset across non-consecutive scenes is fine and expected — different interview takes from the same subject, multiple b-roll angles of the same location, etc. The ONLY hard adjacency rule is no two consecutive scenes from the same asset.`,
+  },
+};
+
+const DEFAULT_CUT_TYPE: CutType = "sizzle";
+const SAMPLE_SCRIPT = BRIEF_TEMPLATES[DEFAULT_CUT_TYPE].brief;
 
 const SCHEMA = {
   type: "object",
@@ -265,12 +317,15 @@ function stripPlanBlock(text: string): string {
 }
 
 /** Stream one agent turn and feed text deltas into onDelta. Returns the full
- *  accumulated text so the caller can parse a plan out of it. */
+ *  accumulated text so the caller can parse a plan out of it.
+ *  `onEvent` (optional) fires for every stream event so callers can
+ *  drive node-tracking on the live architecture sidebar. */
 async function streamTurn(
   ksId: string,
   prompt: string,
   sessionId: string,
   onDelta: (proseSoFar: string) => void,
+  onEvent?: (ev: { type: string; tool?: string }) => void,
 ): Promise<string> {
   let acc = "";
   for await (const ev of streamAgentTurn({
@@ -278,8 +333,16 @@ async function streamTurn(
     prompt,
     session_id: sessionId,
   })) {
+    onEvent?.(ev as { type: string; tool?: string });
     if (ev.type === "text_delta") {
       acc += ev.delta;
+      onDelta(stripPlanBlock(acc));
+    } else if (ev.type === "plan_corrected") {
+      // Runtime rewrote the <plan> JSON to satisfy the duration target.
+      // Replace the running buffer wholesale so extractPlan() picks up the
+      // corrected scenes. Any text_delta that follows (e.g. the enforcer's
+      // note) appends normally.
+      acc = ev.text;
       onDelta(stripPlanBlock(acc));
     } else if (ev.type === "error") {
       throw new Error(ev.message);
@@ -287,6 +350,41 @@ async function streamTurn(
   }
   if (!acc.trim()) throw new Error("Agent returned no text — likely the 5-min runtime cap was hit. Try a simpler request.");
   return acc;
+}
+
+/** Tiny inline spinner — used inside the render button while the stitch
+ *  job is being submitted and while it's progressing. Uses currentColor so
+ *  it inherits the button's text color (looks right on btn-cue and btn). */
+function Spinner({ size = 12 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      aria-hidden
+      style={{ animation: "rc-spin 0.9s linear infinite" }}
+    >
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeOpacity="0.25" strokeWidth="3" fill="none" />
+      <path d="M21 12a9 9 0 0 1-9 9" stroke="currentColor" strokeWidth="3" strokeLinecap="round" fill="none" />
+    </svg>
+  );
+}
+
+/** Renders a clip thumbnail. Delegates to the shared SmartClipThumb so the
+ *  per-clip blocks and the channel-player rail strip always pick the same
+ *  frame for a given clip (brightness-aware midpoint sampling). */
+function ClipThumb({
+  startTime, endTime, asset, height, className = "",
+}: { startTime: string; endTime?: string; asset?: Asset; height: number; className?: string }) {
+  return (
+    <SmartClipThumb
+      start={startTime}
+      end={endTime}
+      asset={asset}
+      className={`rounded-sm overflow-hidden ${className}`}
+      style={{ height }}
+    />
+  );
 }
 
 export function RoughCut() {
@@ -300,15 +398,76 @@ export function RoughCut() {
   const [assetCache, setAssetCache] = useState<Record<string, Asset>>({});
   const [render, setRender] = useState<StitchJob | null>(null);
   const [renderErr, setRenderErr] = useState<string | null>(null);
+  // True between the moment the producer clicks the render button and the
+  // first response from /stitch (MediaConvert CreateJob takes ~2-4s). Lets
+  // the button switch to a busy state immediately instead of looking
+  // unresponsive while the request is in flight.
+  const [renderSubmitting, setRenderSubmitting] = useState(false);
   const renderPollRef = useRef<number | null>(null);
-  const [history, setHistory] = useState<RoughCutHistoryEntry[]>([]);
   const [activeEntryId, setActiveEntryId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [sessionId, setSessionId] = useState<string>("");
   const [followup, setFollowup] = useState("");
 
-  // Load history on mount.
-  useEffect(() => { setHistory(loadHistory()); }, []);
+  // Live arch tracking — drives the right-rail diagram. Updated by the
+  // stream loop in generate() / sendFollowup() as agent events land.
+  const [activeNode, setActiveNode] = useState<NodeId | null>(null);
+  const [nodeHistory, setNodeHistory] = useState<NodeId[]>([]);
+
+  const recordNode = (n: NodeId) => {
+    setActiveNode((prev) => {
+      if (prev && prev !== n) setNodeHistory((h) => h.includes(prev) ? h : [...h, prev]);
+      return n;
+    });
+  };
+  const trackEvent = (ev: { type: string; tool?: string }) => {
+    const node = nodeForEvent(ev);
+    if (node) {
+      recordNode(node);
+      if (ev.type === "tool_call") {
+        const downstream = downstreamFor(ev.tool);
+        if (downstream) setTimeout(() => recordNode(downstream), 400);
+      }
+    }
+    if (ev.type === "done") setTimeout(() => setActiveNode(null), 1200);
+  };
+
+  // Consume any pending restore the drawer leaves in the global store.
+  // Subscribing covers both cross-tab restore (RoughCut mounting fresh)
+  // and in-tab restore (RoughCut already mounted, the store update is
+  // what we react to).
+  const pendingRestore = useStore((s) => s.pendingRestore);
+  useEffect(() => {
+    if (pendingRestore && pendingRestore.kind === "rough_cut") {
+      restoreEntry(pendingRestore);
+      setGlobal({ pendingRestore: undefined });
+    }
+  }, [pendingRestore]);
+
+  // Persist the active entry id across refreshes. On mount, if there's a
+  // remembered id and a matching history row, restore it silently — the
+  // producer doesn't have to re-open History after a refresh.
+  useEffect(() => {
+    if (plan || activeEntryId) return; // only on a fresh mount
+    let lastId: string | null = null;
+    try { lastId = localStorage.getItem(LS_LAST_ROUGHCUT_ENTRY); } catch {}
+    if (!lastId) return;
+    const entries = loadHistory();
+    const entry = entries.find((e) => e.id === lastId && e.kind === "rough_cut") as RoughCutHistoryEntry | undefined;
+    if (entry) restoreEntry(entry);
+    else { try { localStorage.removeItem(LS_LAST_ROUGHCUT_ENTRY); } catch {} }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Keep the remembered id in sync with the in-memory active entry. Cleared
+  // on "new cut" so a refresh after that lands on the empty state, not the
+  // previous plan.
+  useEffect(() => {
+    try {
+      if (activeEntryId) localStorage.setItem(LS_LAST_ROUGHCUT_ENTRY, activeEntryId);
+      else localStorage.removeItem(LS_LAST_ROUGHCUT_ENTRY);
+    } catch {}
+  }, [activeEntryId]);
 
   // Tick the elapsed-time meter while a plan is being generated.
   useEffect(() => {
@@ -399,8 +558,10 @@ export function RoughCut() {
     setMessages([userMsg, asstMsg]);
 
     try {
+      setNodeHistory([]);
+      recordNode("runtime");
       const wrapped = `${AGENT_INSTRUCTIONS}\n\n---\n\nBrief:\n${script.trim()}\n\nKnowledge store id: ${ks._id}\n\nGo.`;
-      const full = await streamTurn(ks._id, wrapped, sid, updateLastAssistant);
+      const full = await streamTurn(ks._id, wrapped, sid, updateLastAssistant, trackEvent);
 
       // Prose-only is a legitimate first response: the agent may legitimately
       // bail out (empty index, ambiguous brief, missing KS context) and reply
@@ -415,7 +576,8 @@ export function RoughCut() {
       setMessages(finalMessages);
       if (hasPlan) setPlan(clean);
 
-      const saved = saveEntry({
+      const saved = saveEntry<RoughCutHistoryEntry>({
+        kind: "rough_cut",
         title: hasPlan ? (clean!.title || "Untitled") : "(no plan yet)",
         script,
         fps,
@@ -426,7 +588,7 @@ export function RoughCut() {
         messages: finalMessages,
       });
       setActiveEntryId(saved.id);
-      setHistory(loadHistory());
+      window.dispatchEvent(new Event("history:updated"));
     } catch (e) {
       setErr(String(e));
       updateLastAssistant(`Error: ${String(e)}`);
@@ -453,10 +615,12 @@ export function RoughCut() {
       // the live state of the cut. If not (e.g. the first turn replied
       // prose-only because the index was empty and the producer is now
       // retrying), skip the CURRENT PLAN block.
+      setNodeHistory([]);
+      recordNode("runtime");
       const wrapped = plan
         ? `[ks: ${ks._id}]\n\n[CURRENT PLAN]\n<plan>\n${JSON.stringify(plan, null, 2)}\n</plan>\n\n[FOLLOWUP]\n${text}`
         : `${AGENT_INSTRUCTIONS}\n\n---\n\n[ks: ${ks._id}]\n\n[FOLLOWUP]\n${text}`;
-      const full = await streamTurn(ks._id, wrapped, sid, updateLastAssistant);
+      const full = await streamTurn(ks._id, wrapped, sid, updateLastAssistant, trackEvent);
 
       const prose = stripPlanBlock(full);
       setMessages((m) => {
@@ -484,7 +648,7 @@ export function RoughCut() {
           plan: nextPlan || ({ scenes: [] } as RoughCutPlan),
           messages: [...messages, userMsg, { ...asstMsg, text: prose }],
         });
-        setHistory(loadHistory());
+        window.dispatchEvent(new Event("history:updated"));
       }
     } catch (e) {
       setErr(String(e));
@@ -529,7 +693,7 @@ export function RoughCut() {
 
   const removeEntry = (id: string) => {
     deleteEntry(id);
-    setHistory(loadHistory());
+    window.dispatchEvent(new Event("history:updated"));
     if (activeEntryId === id) setActiveEntryId(null);
   };
 
@@ -548,10 +712,12 @@ export function RoughCut() {
   const renderPreview = async () => {
     if (!plan) return;
     setRenderErr(null);
+    setRenderSubmitting(true);
     if (renderPollRef.current) { clearInterval(renderPollRef.current); renderPollRef.current = null; }
     try {
       const job = await startStitch(plan);
       setRender(job);
+      setRenderSubmitting(false);
       const entryId = activeEntryId;
       renderPollRef.current = window.setInterval(async () => {
         try {
@@ -570,7 +736,7 @@ export function RoughCut() {
                   status: next.status,
                 },
               });
-              setHistory(loadHistory());
+              window.dispatchEvent(new Event("history:updated"));
             }
           }
         } catch (e) {
@@ -580,6 +746,7 @@ export function RoughCut() {
       }, 3000);
     } catch (e) {
       setRenderErr(String(e));
+      setRenderSubmitting(false);
     }
   };
 
@@ -588,41 +755,141 @@ export function RoughCut() {
     return () => { if (renderPollRef.current) clearInterval(renderPollRef.current); };
   }, []);
 
+  // Three-pane studio. The left rail holds the brief (accordion-collapsing
+  // after the first turn) plus the running chat thread. The center hosts
+  // the timeline. The right rail is a placeholder until Step 5 lands the
+  // live architecture diagram + tool catalog.
+  const hasMessages = messages.length > 0;
+  const briefSummary = script.split("\n").find((l) => l.trim().length > 0)?.trim() || "untitled brief";
+  const archOpen = useStore((s) => s.archOpen);
+
   return (
-    <div>
-      <header className="flex items-baseline justify-between gap-8">
-        <div>
-          <div className="label">§ Rough Cut</div>
-          <p className="font-display text-4xl mt-1 leading-tight">
-            Script → assembled timeline · <span style={{ color: "var(--color-cue)" }}>EDL export</span>
-          </p>
-          <p className="text-sm mt-2 max-w-2xl" style={{ color: "var(--color-ink-soft)" }}>
-            Paste a script, treatment, or scene outline. The reasoning layer reads the dailies in
-            the active knowledge base and assembles a rough cut against your structure.
-            Export as a CMX-3600 EDL — opens in Premiere, Resolve, FCPX, AVID.
-          </p>
-        </div>
-        <Pill label="Frame rate" value={String(fps)} options={DEFAULT_FPS_OPTIONS.map((o) => ({ value: String(o.value), label: o.label }))} onChange={(v) => setFps(Number(v))} />
-      </header>
+    <div
+      className="grid h-full min-h-0"
+      style={{ gridTemplateColumns: archOpen ? "320px 1fr 320px" : "320px 1fr" }}
+    >
+      {/* LEFT RAIL — brief accordion + chat thread */}
+      <aside className="flex flex-col min-h-0 border-r" style={{ borderColor: "var(--color-rule)" }}>
+        {/* § Brief — collapses to a 1-line summary after the first turn */}
+        {hasMessages ? (
+          <details className="border-b group" style={{ borderColor: "var(--color-rule)" }}>
+            <summary className="px-5 py-3 cursor-pointer flex items-center gap-2 hover:bg-[var(--color-surface)] transition-colors list-none">
+              <span className="font-mono text-[10px] group-open:rotate-90 transition-transform inline-block w-2" style={{ color: "var(--color-ink-faint)" }}>▸</span>
+              <span className="label">Brief</span>
+              <span className="text-xs ml-2 truncate flex-1" style={{ color: "var(--color-ink-soft)" }}>
+                {briefSummary.slice(0, 64)}{briefSummary.length > 64 ? "…" : ""}
+              </span>
+            </summary>
+            <div className="px-5 pb-4 pt-2">
+              <textarea
+                className="bg-transparent border w-full p-3 outline-none text-sm leading-relaxed font-mono rounded-[var(--radius-card)]"
+                style={{ borderColor: "var(--color-rule)", minHeight: 200 }}
+                value={script}
+                onChange={(e) => setScript(e.target.value)}
+              />
+              <button
+                className="btn btn-cue mt-3 w-full"
+                onClick={() => { newConversation(); void generate(); }}
+                disabled={busy}
+                title="discard the current conversation and assemble a fresh rough cut from this brief"
+              >
+                {busy ? `re-assembling… ${elapsed}s` : "re-assemble from brief"}
+              </button>
+            </div>
+          </details>
+        ) : (
+          <div className="px-5 pt-5 pb-4 border-b overflow-hidden" style={{ borderColor: "var(--color-rule)" }}>
+            <div className="flex items-center justify-between gap-2 min-w-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="label whitespace-nowrap">§ Brief</span>
+                <Pill
+                  label=""
+                  value={String(fps)}
+                  options={DEFAULT_FPS_OPTIONS.map((o) => ({ value: String(o.value), label: o.label }))}
+                  onChange={(v) => setFps(Number(v))}
+                  // Collapse to just "24 fps" in the rail; full label
+                  // ("24 fps · cinema (DCP)") still shows in the popover.
+                  triggerLabel={(_cur, v) => `${v} fps`}
+                />
+              </div>
+              <button
+                type="button"
+                onClick={() => setGlobal({ historyOpen: true })}
+                title="Browse saved rough cuts"
+                className="shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full font-mono text-[11px] transition-colors hover:text-[var(--color-cue)] hover:border-[var(--color-cue)]"
+                style={{
+                  background: "var(--color-surface)",
+                  border: "1px solid var(--color-rule)",
+                  color: "var(--color-ink-soft)",
+                }}
+              >
+                <span style={{ fontSize: 11 }}>⟲</span>
+                history
+              </button>
+            </div>
+            {/* Canned brief chooser — one chip per cut-type the agent
+                recognizes. Clicking loads that template into the textarea;
+                the producer can then edit before submitting. */}
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              {(Object.keys(BRIEF_TEMPLATES) as CutType[]).map((t) => {
+                const tpl = BRIEF_TEMPLATES[t];
+                const active = script.trim() === tpl.brief.trim();
+                return (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => setScript(tpl.brief)}
+                    title={tpl.tagline}
+                    className="inline-flex items-center px-2 py-0.5 rounded-full font-mono text-[10px] transition-colors"
+                    style={{
+                      background: active ? "var(--color-surface-2)" : "var(--color-surface)",
+                      border: `1px solid ${active ? "var(--color-cue)" : "var(--color-rule)"}`,
+                      color: active ? "var(--color-cue)" : "var(--color-ink-soft)",
+                    }}
+                  >
+                    {tpl.label}
+                  </button>
+                );
+              })}
+            </div>
+            <textarea
+              className="bg-transparent border w-full p-3 mt-2 outline-none text-sm leading-relaxed font-mono rounded-[var(--radius-card)]"
+              style={{ borderColor: "var(--color-rule)", height: "calc(100vh - 410px)", minHeight: 200 }}
+              value={script}
+              onChange={(e) => setScript(e.target.value)}
+              placeholder="Pick a template above, or type your own brief…"
+            />
+            <div className="label mt-2" style={{ color: "var(--color-ink-faint)" }}>
+              {script.length.toLocaleString()} chars
+            </div>
+            <button
+              className="btn btn-cue mt-3 w-full"
+              onClick={generate}
+              disabled={busy || !ks || !script.trim()}
+            >
+              {busy ? `assembling… ${elapsed}s` : "assemble rough cut →"}
+            </button>
+            {err && (
+              <pre className="font-mono text-[11px] mt-3 p-2 whitespace-pre-wrap rounded-[var(--radius-card)]" style={{ background: "var(--color-surface)", color: "var(--color-status-failed)" }}>{err}</pre>
+            )}
+          </div>
+        )}
 
-      <div className="rule mt-4 mb-6" />
-
-      <HistoryStrip
-        entries={history}
-        activeId={activeEntryId}
-        onRestore={restoreEntry}
-        onDelete={removeEntry}
-      />
-
-      <div className="grid lg:grid-cols-[1fr_1.4fr] gap-12">
-        {/* LEFT: script input OR conversation thread once any turn has run */}
-        <section>
-          {messages.length > 0 ? (
-            <>
-              <div className="flex items-baseline justify-between">
-                <div className="label">§ I · Conversation</div>
+        {/* § Chat — visible only after at least one turn has fired */}
+        {hasMessages && (
+          <div className="flex flex-col min-h-0 flex-1">
+            <div className="px-5 pt-3 pb-2 flex items-baseline justify-between">
+              <span className="label">§ Chat</span>
+              <div className="flex items-center gap-3">
                 <button
-                  className="label hover:text-[var(--color-cue)]"
+                  className="label hover:text-[var(--color-ink)] transition-colors"
+                  onClick={() => setGlobal({ historyOpen: true })}
+                  title="history"
+                >
+                  history
+                </button>
+                <button
+                  className="label hover:text-[var(--color-ink)] transition-colors"
                   onClick={newConversation}
                   disabled={busy}
                   title="discard this thread and start a new rough cut"
@@ -630,102 +897,82 @@ export function RoughCut() {
                   + new cut
                 </button>
               </div>
-              <div className="rule mt-3 mb-4" />
+            </div>
+            <div className="flex-1 min-h-0 overflow-y-auto px-5 pb-3">
               <ChatThread messages={messages} streaming={busy} />
-              <div className="mt-4">
-                <textarea
-                  className="bg-transparent border w-full p-3 outline-none text-sm font-mono"
-                  style={{ borderColor: "var(--color-rule)", minHeight: 84 }}
-                  rows={3}
-                  value={followup}
-                  onChange={(e) => setFollowup(e.target.value)}
-                  placeholder="ask the agent to swap a clip, extend the cut, describe what's in scene 2…  (⌘↩ to send)"
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                      e.preventDefault();
-                      void sendFollowup();
-                    }
-                  }}
-                  disabled={busy}
-                />
-                <div className="flex items-center justify-between mt-2">
-                  <div className="label" style={{ color: "var(--color-ink-faint)" }}>
-                    {busy ? "agent thinking…" : "⌘↩ to send"}
-                  </div>
-                  <button
-                    className="btn btn-cue"
-                    onClick={sendFollowup}
-                    disabled={busy || !followup.trim()}
-                  >
-                    {busy ? "..." : "send →"}
-                  </button>
-                </div>
-              </div>
-              {err && (
-                <pre className="font-mono text-xs mt-4 p-3 whitespace-pre-wrap" style={{ background: "var(--color-surface)", color: "var(--color-status-failed)" }}>{err}</pre>
-              )}
-            </>
-          ) : (
-            <>
-              <div className="label">§ I · Script</div>
-              <div className="rule mt-3 mb-4" />
+            </div>
+            <div className="px-5 pb-4 border-t pt-3" style={{ borderColor: "var(--color-rule)" }}>
               <textarea
-                className="bg-transparent border w-full p-4 outline-none text-sm leading-relaxed font-mono"
-                style={{ borderColor: "var(--color-rule)", minHeight: "60vh" }}
-                value={script}
-                onChange={(e) => setScript(e.target.value)}
-                placeholder="Paste a script, treatment, or scene-by-scene outline…"
+                className="bg-transparent border w-full p-2 outline-none text-sm font-mono rounded-[var(--radius-card)]"
+                style={{ borderColor: "var(--color-rule)", minHeight: 64 }}
+                rows={2}
+                value={followup}
+                onChange={(e) => setFollowup(e.target.value)}
+                placeholder="ask the agent to swap, extend, describe a clip…  (⌘↩)"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                    e.preventDefault();
+                    void sendFollowup();
+                  }
+                }}
+                disabled={busy}
               />
-              <div className="flex items-center justify-between mt-4">
+              <div className="flex items-center justify-between mt-2">
                 <div className="label" style={{ color: "var(--color-ink-faint)" }}>
-                  {script.length.toLocaleString()} chars · free-form prose, fountain, or outline
+                  {busy ? "agent thinking…" : "⌘↩ to send"}
                 </div>
                 <button
                   className="btn btn-cue"
-                  onClick={generate}
-                  disabled={busy || !ks || !script.trim()}
+                  onClick={sendFollowup}
+                  disabled={busy || !followup.trim()}
                 >
-                  {busy ? `assembling… ${elapsed}s` : "assemble rough cut →"}
+                  {busy ? "..." : "send →"}
                 </button>
               </div>
               {err && (
-                <pre className="font-mono text-xs mt-4 p-3 whitespace-pre-wrap" style={{ background: "var(--color-surface)", color: "var(--color-status-failed)" }}>{err}</pre>
-              )}
-            </>
-          )}
-        </section>
-
-        {/* RIGHT: timeline */}
-        <section>
-          <div className="flex items-baseline justify-between">
-            <div>
-              <div className="label">§ II · Timeline · <span style={{ color: "var(--color-cue)" }}>AgentCore</span></div>
-              {plan && (
-                <p className="font-display text-2xl mt-1" style={{ fontVariationSettings: '"opsz" 144, "wght" 600' }}>
-                  "{plan.title || "Rough Cut"}"
-                </p>
+                <pre className="font-mono text-[11px] mt-3 p-2 whitespace-pre-wrap rounded-[var(--radius-card)]" style={{ background: "var(--color-surface)", color: "var(--color-status-failed)" }}>{err}</pre>
               )}
             </div>
+          </div>
+        )}
+      </aside>
+
+      {/* CENTER — timeline. Internal scroll; EDL controls dock at bottom. */}
+      <section className="flex flex-col min-h-0 overflow-hidden">
+        <div className="flex items-baseline justify-between px-8 pt-3 pb-2 border-b" style={{ borderColor: "var(--color-rule)" }}>
+          <div>
+            <div className="label">§ Timeline</div>
             {plan && (
-              <div className="text-right">
-                <div className="font-mono text-2xl" style={{ color: "var(--color-cue)" }}>{fmtDuration(totalSec)}</div>
-                <div className="label">{plan.scenes.length} scenes · {clipCount} clips</div>
-              </div>
+              <p className="font-display text-base mt-0.5 tracking-tight">
+                {plan.title || "Rough Cut"}
+              </p>
             )}
           </div>
-          <div className="rule mt-3 mb-4" />
+          {plan && (
+            <div className="text-right">
+              <div className="font-mono text-base">{fmtDuration(totalSec)}</div>
+              <div className="label">{plan.scenes.length} scenes · {clipCount} clips</div>
+            </div>
+          )}
+        </div>
 
+        {/* Scroll container — pt-0 (not py-6) so the sticky rail inside can
+            pin flush against the title bar above with no padding gap. The
+            old pt-6 created a 24px zone where the notes paragraph could
+            scroll up into view ABOVE the pinned rail. Initial content
+            (empty/busy/notes states) gets its own mt-6 to compensate. */}
+        <div className="flex-1 min-h-0 overflow-y-auto px-8 pb-6">
           {!plan && !busy && messages.length === 0 && (
-            <p className="text-sm" style={{ color: "var(--color-ink-faint)" }}>
-              Paste your script and click <span className="font-mono">assemble rough cut →</span>.
+            <p className="text-sm max-w-md mt-6" style={{ color: "var(--color-ink-soft)" }}>
+              Paste a script in the left rail and click <span className="font-mono">assemble rough cut →</span>.
               The cut will appear here scene by scene.
             </p>
           )}
 
           {!plan && !busy && messages.length > 0 && (
-            <div data-testid="no-plan-placeholder" className="py-8">
-              <p className="text-sm" style={{ color: "var(--color-ink-soft)" }}>
-                No EDL yet — see the agent's reply in the conversation. Once the
+            <div data-testid="no-plan-placeholder" className="py-4 mt-6">
+              <p className="text-sm max-w-md" style={{ color: "var(--color-ink-soft)" }}>
+                No EDL yet — see the agent's reply in the chat. Once the
                 blocker is resolved (most often a missing vector index), reply with
                 <span className="font-mono"> "try again"</span> to retry the cut.
               </p>
@@ -733,46 +980,33 @@ export function RoughCut() {
           )}
 
           {busy && (
-            <p className="caret font-display text-2xl" style={{ color: "var(--color-ink-soft)" }}>
-              Agent reasoning · {elapsed}s
+            <p className="caret font-display text-xl mt-6" style={{ color: "var(--color-ink-soft)" }}>
+              <RotatingStatus elapsed={elapsed} />
             </p>
           )}
 
           {plan && (
             <>
-              <div className="flex items-center gap-3 mb-2 flex-wrap">
-                <button className="btn" onClick={downloadEDL}>Export EDL ({fps} fps) ↓</button>
-                <button
-                  className="btn btn-cue"
-                  onClick={renderPreview}
-                  disabled={!!render && render.status !== "ERROR" && render.status !== "CANCELED" && render.status !== "COMPLETE"}
-                >
-                  {render?.status === "PROGRESSING" || render?.status === "SUBMITTED"
-                    ? `rendering… ${render.percent || 0}%`
-                    : render?.status === "COMPLETE"
-                      ? "re-render preview →"
-                      : "Render preview · MediaConvert →"}
-                </button>
-                {render?.status === "COMPLETE" && (
-                  <a className="label hover:text-[var(--color-cue)]" href={render.output_url} target="_blank" rel="noreferrer">
-                    open MP4 in new tab ↗
-                  </a>
-                )}
-              </div>
-              <RenderPanel render={render} err={renderErr} />
-              <div className="mb-6" />
+              {/* Back-to-back HLS preview. The strip below the video is
+                  sticky (see stickyMeta) so the producer can scroll the
+                  scenes list to pick alternates while keeping the rail
+                  pinned at the top. The video itself scrolls away.
+                  NOTE: no wrapper div around ChannelPlayer — sticky needs
+                  the meta block to be a direct child of the scroll
+                  container so its parent extends through the scenes list. */}
+              <ChannelPlayer
+                channel={planToChannel(plan, "agent", assetCache)}
+                autoplay={false}
+                loop={false}
+                stickyMeta
+              />
 
-              {/* Back-to-back HLS preview — instant, no MediaConvert stitch. */}
-              <div className="mb-6">
-                <ChannelPlayer
-                  channel={planToChannel(plan, "agent", assetCache)}
-                  autoplay={false}
-                  loop={false}
-                />
-              </div>
-
+              {/* Notes paragraph between the rail and the scenes — its
+                  natural editorial position. As you scroll, it slides up
+                  UNDER the sticky rail (rail has z-20 + solid background)
+                  so no bleed-through. */}
               {plan.notes && (
-                <p className="text-sm italic mb-6 max-w-2xl" style={{ color: "var(--color-ink-soft)" }}>
+                <p className="text-sm italic mt-6 mb-6 max-w-2xl" style={{ color: "var(--color-ink-soft)" }}>
                   — {plan.notes}
                 </p>
               )}
@@ -789,10 +1023,62 @@ export function RoughCut() {
                   />
                 ))}
               </ol>
+
+              <RenderPanel render={render} err={renderErr} />
             </>
           )}
-        </section>
-      </div>
+        </div>
+
+        {plan && (
+          <div className="border-t px-8 py-1.5 flex items-center gap-2 flex-wrap" style={{ borderColor: "var(--color-rule)" }}>
+            <button className="btn btn-sm" onClick={downloadEDL}>Export EDL ({fps} fps) ↓</button>
+            <button
+              className="btn btn-sm btn-cue"
+              onClick={renderPreview}
+              disabled={renderSubmitting || (!!render && render.status !== "ERROR" && render.status !== "CANCELED" && render.status !== "COMPLETE")}
+            >
+              {renderSubmitting ? (
+                <span className="inline-flex items-center gap-1.5">
+                  <Spinner /> submitting…
+                </span>
+              ) : render?.status === "PROGRESSING" || render?.status === "SUBMITTED" ? (
+                <span className="inline-flex items-center gap-1.5">
+                  <Spinner /> rendering… {render.percent || 0}%
+                </span>
+              ) : render?.status === "COMPLETE" ? (
+                "re-render preview →"
+              ) : (
+                "Render preview →"
+              )}
+            </button>
+            {render?.status === "COMPLETE" && render.output_url && (
+              <a
+                className="label hover:text-[var(--color-ink)] transition-colors"
+                href={render.output_url}
+                download={`rough-cut-${(plan.title || "preview").toLowerCase().replace(/[^a-z0-9]+/g, "-")}.mp4`}
+                title="Download the rendered preview as MP4"
+              >
+                Download MP4 ↓
+              </a>
+            )}
+          </div>
+        )}
+      </section>
+
+      {/* RIGHT RAIL — live architecture sidebar. Pills light up as the
+          agent's tools fire during generate() / sendFollowup() runs.
+          Hidden by default; the <ArchHandle/> on the viewport's right edge
+          slides this in/out. */}
+      {archOpen && (
+        <aside className="flex flex-col min-h-0 border-l" style={{ borderColor: "var(--color-rule)" }}>
+          <LiveArchSidebar
+            activeNode={activeNode}
+            history={nodeHistory}
+            sessionId={sessionId}
+          />
+        </aside>
+      )}
+      <ArchHandle />
     </div>
   );
 }
@@ -831,6 +1117,7 @@ function planToChannel(plan: RoughCutPlan, idPrefix: string, assetCache: Record<
 }
 
 function ChatThread({ messages, streaming }: { messages: ChatMessage[]; streaming: boolean }) {
+  const ks = useStore((s) => s.ks);
   const scrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -849,6 +1136,9 @@ function ChatThread({ messages, streaming }: { messages: ChatMessage[]; streamin
       ref={scrollRef}
       className="space-y-5 overflow-y-auto pr-2"
       style={{ maxHeight: "55vh" }}
+      tabIndex={0}
+      role="region"
+      aria-label="Conversation"
     >
       {messages.map((m, i) => {
         const isUser = m.role === "user";
@@ -862,21 +1152,31 @@ function ChatThread({ messages, streaming }: { messages: ChatMessage[]; streamin
             >
               {isUser ? "You" : "Agent"}
             </div>
-            <p
-              className="text-sm mt-1 whitespace-pre-wrap leading-relaxed"
-              style={{
-                color: isUser ? "var(--color-ink)" : "var(--color-ink-soft)",
-                fontFamily: isUser ? "var(--font-mono)" : undefined,
-              }}
-            >
-              {m.text}
-              {isStreaming && (
-                <span className="caret" style={{ color: "var(--color-cue)" }}>▌</span>
-              )}
-              {isStreaming && !m.text && (
-                <span style={{ color: "var(--color-ink-faint)" }}>thinking…</span>
-              )}
-            </p>
+            {isUser ? (
+              // Producer messages render verbatim (mono, pre-wrap). What
+              // they typed is what they see.
+              <p
+                className="text-sm mt-1 whitespace-pre-wrap leading-relaxed"
+                style={{ color: "var(--color-ink)", fontFamily: "var(--font-mono)" }}
+              >
+                {m.text}
+              </p>
+            ) : (
+              // Agent messages run through ResponseMarkdown so 24-hex
+              // asset_ids become clickable chips, markdown formats, and
+              // any `<plan>` block is stripped (it's already extracted
+              // onto the timeline above).
+              <div className="text-sm mt-1 leading-relaxed" style={{ color: "var(--color-ink-soft)" }}>
+                {m.text ? (
+                  <ResponseMarkdown text={m.text} ksId={ks?._id} />
+                ) : isStreaming ? (
+                  <span style={{ color: "var(--color-ink-faint)" }}>thinking…</span>
+                ) : null}
+                {isStreaming && m.text && (
+                  <span className="caret" style={{ color: "var(--color-cue)" }}>▌</span>
+                )}
+              </div>
+            )}
           </div>
         );
       })}
@@ -939,7 +1239,6 @@ function ClipRow({ index, clip, asset, assetCache, onSwap }: {
   onSwap?: (altIdx: number) => void;
 }) {
   const dur = Math.max(parseTime(clip.end_time) - parseTime(clip.start_time), 0);
-  const thumb = asset?.thumbnail?.representative_url;
   const [altsOpen, setAltsOpen] = useState(false);
   const alts = clip.alternatives || [];
   const hasAlts = alts.length > 0;
@@ -949,13 +1248,7 @@ function ClipRow({ index, clip, asset, assetCache, onSwap }: {
         className="grid grid-cols-[64px_1fr_auto] gap-4 items-center cursor-pointer"
         onClick={() => setGlobal({ activeAssetId: clip.video_reference })}
       >
-      <div
-        className="aspect-video rounded-sm"
-        style={{
-          background: thumb ? `url(${thumb}) center/cover no-repeat` : "var(--color-surface-2)",
-          height: 36,
-        }}
-      />
+      <ClipThumb startTime={clip.start_time} endTime={clip.end_time} asset={asset} height={36} />
       <div>
         <div className="font-mono text-xs" style={{ color: "var(--color-ink-soft)" }}>
           {String(index + 1).padStart(2, "0")} ·{" "}
@@ -990,7 +1283,6 @@ function ClipRow({ index, clip, asset, assetCache, onSwap }: {
             <ul className="mt-2 space-y-1.5">
               {alts.map((alt, k) => {
                 const altAsset = assetCache?.[alt.video_reference];
-                const altThumb = altAsset?.thumbnail?.representative_url;
                 const altDur = Math.max(parseTime(alt.end_time) - parseTime(alt.start_time), 0);
                 return (
                   <li
@@ -998,13 +1290,7 @@ function ClipRow({ index, clip, asset, assetCache, onSwap }: {
                     className="grid grid-cols-[48px_1fr_auto_auto] gap-3 items-center px-2 py-1.5 rounded-sm"
                     style={{ background: "var(--color-surface)" }}
                   >
-                    <div
-                      className="aspect-video rounded-sm"
-                      style={{
-                        background: altThumb ? `url(${altThumb}) center/cover no-repeat` : "var(--color-surface-2)",
-                        height: 28,
-                      }}
-                    />
+                    <ClipThumb startTime={alt.start_time} endTime={alt.end_time} asset={altAsset} height={28} />
                     <div className="min-w-0">
                       <div className="font-mono text-[10px] truncate" style={{ color: "var(--color-ink-soft)" }}>
                         {alt.rank != null && (
@@ -1166,6 +1452,7 @@ function RenderPanel({ render, err }: { render: StitchJob | null; err: string | 
           className="w-full mt-4"
           src={render.output_url}
           controls
+          muted
           playsInline
           style={{ background: "black", maxHeight: 480 }}
         />
@@ -1180,33 +1467,143 @@ function RenderPanel({ render, err }: { render: StitchJob | null; err: string | 
 }
 
 function Pill({
-  label, value, options, onChange,
-}: { label: string; value: string; options: { value: string; label: string }[]; onChange: (v: string) => void }) {
+  label, value, options, onChange, triggerLabel,
+}: {
+  label: string;
+  value: string;
+  options: { value: string; label: string }[];
+  onChange: (v: string) => void;
+  /** Optional override for the collapsed trigger text. If absent, falls
+   *  back to the matched option's full label. Use this to keep the trigger
+   *  narrow in tight rails (e.g. "24 fps") while still rendering the
+   *  expanded label ("24 fps · cinema (DCP)") in the popover. */
+  triggerLabel?: (cur: { value: string; label: string } | undefined, value: string) => string;
+}) {
   const [open, setOpen] = useState(false);
   const cur = options.find((o) => o.value === value);
+  const triggerText = triggerLabel ? triggerLabel(cur, value) : (cur?.label || value);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  // Click outside / Escape closes the popover.
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
   return (
-    <div className="relative">
-      <div className="label">{label}</div>
+    <div ref={rootRef} className="relative inline-block">
+      {label && <div className="label">{label}</div>}
       <button
-        className="font-display text-lg mt-1 flex items-baseline gap-2 hover:text-[var(--color-cue)]"
+        type="button"
         onClick={() => setOpen((v) => !v)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full font-mono text-[11px] whitespace-nowrap transition-colors"
+        style={{
+          background: open ? "var(--color-surface-2)" : "var(--color-surface)",
+          border: "1px solid var(--color-rule)",
+          color: "var(--color-ink-soft)",
+        }}
       >
-        {cur?.label || value}
-        <span className="font-mono text-xs">{open ? "▲" : "▼"}</span>
+        <span style={{ color: "var(--color-ink)" }}>{triggerText}</span>
+        <span style={{ opacity: 0.6, fontSize: 9 }}>{open ? "▲" : "▼"}</span>
       </button>
       {open && (
-        <div className="absolute right-0 z-10 mt-2 py-2 min-w-[280px]" style={{ background: "var(--color-surface)", border: "1px solid var(--color-rule)" }}>
-          {options.map((o) => (
-            <button
-              key={o.value}
-              className="block w-full text-left px-4 py-2 font-display text-base hover:text-[var(--color-cue)] hover:bg-[var(--color-surface-2)]"
-              onClick={() => { onChange(o.value); setOpen(false); }}
-            >
-              {o.label}
-            </button>
-          ))}
+        <div
+          role="listbox"
+          className="absolute left-0 top-full z-20 mt-1 py-1 min-w-[220px] whitespace-nowrap rounded-[10px] shadow-lg"
+          style={{ background: "var(--color-surface)", border: "1px solid var(--color-rule)" }}
+        >
+          {options.map((o) => {
+            const isCur = o.value === value;
+            return (
+              <button
+                key={o.value}
+                type="button"
+                role="option"
+                aria-selected={isCur}
+                className="block w-full text-left px-3 py-1.5 font-mono text-[12px] hover:bg-[var(--color-surface-2)]"
+                style={{ color: isCur ? "var(--color-cue)" : "var(--color-ink)" }}
+                onClick={() => { onChange(o.value); setOpen(false); }}
+              >
+                {isCur && <span className="mr-1" style={{ color: "var(--color-cue)" }}>✓</span>}
+                {o.label}
+              </button>
+            );
+          })}
         </div>
       )}
     </div>
+  );
+}
+
+// Rotating status line shown while the agent is reasoning. Each line is
+// paired with its own dwell duration (ms) so the rhythm isn't a robotic
+// fixed-interval tick. Short pithy lines flick by; longer "what the agent
+// is grinding on" lines linger. Soft fade-and-rise transition between
+// messages keeps it from feeling mechanical.
+const STATUS_LINES: { text: string; ms: number }[] = [
+  { text: "Reading the room",                          ms: 2200 },
+  { text: "Squinting at every clip",                   ms: 1800 },
+  { text: "Asking the music what it thinks",           ms: 2600 },
+  { text: "Auditioning shots in my head",              ms: 2400 },
+  { text: "Pulling the good takes from the slush pile", ms: 2800 },
+  { text: "Checking which trailer has the better light", ms: 3000 },
+  { text: "Doing the part where it sounds like jazz",  ms: 2600 },
+  { text: "Counting protagonists",                     ms: 1800 },
+  { text: "Asking around — anyone seen this person?",  ms: 2800 },
+  { text: "Politely rejecting the obvious choice",     ms: 2400 },
+  { text: "Trimming the fat",                          ms: 1800 },
+  { text: "Avoiding the same shot twice",              ms: 2600 },
+  { text: "Looking for the moment before the moment",  ms: 3000 },
+  { text: "Negotiating with the second act",           ms: 2800 },
+  { text: "Holding for emphasis",                      ms: 1600 },
+  { text: "Picking a quieter beat to land on",         ms: 2400 },
+  { text: "Drafting one-liners for each pick",         ms: 2600 },
+  { text: "Asking if this would play at 2 a.m.",       ms: 2800 },
+  { text: "Sequencing scenes the way a producer would", ms: 2400 },
+  { text: "Putting the kettle on",                     ms: 2000 },
+  { text: "Pretending it's already Friday",            ms: 2000 },
+  { text: "Wrapping it up like an editor on deadline", ms: 2400 },
+  { text: "Final pass — kill the darlings",            ms: 2200 },
+];
+
+function RotatingStatus({ elapsed }: { elapsed: number }) {
+  // Each message has its own dwell. We let the component drive its own
+  // clock (vs. deriving from `elapsed`) so the transition timing is
+  // smooth — `elapsed` only ticks once per second and would create a
+  // saw-toothed cadence pinned to second boundaries.
+  const [idx, setIdx] = useState(0);
+  useEffect(() => {
+    const dwell = STATUS_LINES[idx].ms;
+    const t = setTimeout(() => setIdx((i) => (i + 1) % STATUS_LINES.length), dwell);
+    return () => clearTimeout(t);
+  }, [idx]);
+
+  return (
+    <span className="inline-flex items-baseline gap-2">
+      <AnimatePresence mode="wait" initial={false}>
+        <motion.span
+          key={idx}
+          initial={{ opacity: 0, y: 6, filter: "blur(2px)" }}
+          animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+          exit={{ opacity: 0, y: -6, filter: "blur(2px)" }}
+          transition={{ duration: 0.45, ease: [0.2, 0, 0, 1] }}
+          className="inline-block"
+        >
+          {STATUS_LINES[idx].text}
+        </motion.span>
+      </AnimatePresence>
+      <span style={{ color: "var(--color-ink-faint)" }}>· {elapsed}s</span>
+    </span>
   );
 }

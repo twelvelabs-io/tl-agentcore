@@ -14,8 +14,14 @@ end:
   versioned `aws_bedrockagentcore_agent_runtime_endpoint` for callers.
 - **Vector index.** S3 Vectors bucket holding one Marengo embedding per
   segmented clip, attributed with `asset_id`, `knowledge_store_id`,
-  `start_time`, and `end_time`. The agent's `vector_search` tool
+  `start_sec`, `end_sec`, and `s3_uri`. The agent's `vector_search` tool
   filters by `knowledge_store_id` so a single index serves multiple KSs.
+- **Clips bucket.** Private S3 bucket holding the mirrored asset bytes
+  at `clips/<asset_id>.mp4`. Bedrock's TwelveLabs models read media only
+  from S3 (no URL form is accepted), so both the embedder (Marengo via
+  StartAsyncInvoke) and the analyzer (Pegasus via InvokeModel) point at
+  this bucket. Async-invoke output lands under `embeddings/<id>/` with a
+  seven-day lifecycle rule.
 - **Edge + transport.** CloudFront fronts an S3 bucket of built UI
   assets plus two API Gateway origins: a WebSocket for the chat lambda
   that invokes the runtime, and an HTTP API for the `tl_proxy` lambda
@@ -26,8 +32,13 @@ end:
   admin role to the UI as a claim. The Cognito JWT flows end-to-end
   from browser through CloudFront, through the WebSocket and HTTP APIs,
   and into the lambdas that verify it before invoking the runtime.
-- **Secrets.** The TwelveLabs API key lives in Secrets Manager; both
-  the runtime container and the `tl_proxy` lambda read it at startup.
+- **Secrets.** The TwelveLabs API key lives in Secrets Manager. The
+  `tl_proxy` lambda reads it for the browser playback proxy. The runtime
+  container reads it only when `PEGASUS_PROVIDER=tl_api` is set on the
+  runtime (the opt-in path that swaps `pegasus_analyze` from Bedrock 1.2
+  to TwelveLabs `/v1.3/analyze`, e.g. to use Pegasus 1.5 before it ships
+  to Bedrock Marketplace). With the default `bedrock` setting, the
+  runtime never touches the secret.
 - **Gateway.** `gateway.tf` is documented but not enabled in this
   reference implementation. A future evolution moves the agent tools
   out of the runtime container into MCP-served lambdas behind
@@ -49,12 +60,22 @@ Graviton):
 ./build-agent.sh   # docker buildx build --platform linux/arm64 ...
 ```
 
-Build the vector index for an existing knowledge store. This is what
-makes `vector_search` return clips for that KS at agent runtime:
+Build the vector index for an existing knowledge store. The operator
+stages asset bytes into the clips bucket first (the demo flow does this
+inline in `scripts/setup_test_fixtures.sh`), then runs:
 
 ```bash
+export CLIPS_BUCKET_NAME=$(cd infra && terraform output -raw clips_bucket_name)
+export VECTOR_BUCKET_NAME=$(cd infra && terraform output -raw vector_bucket_name)
+export TL_API_KEY=tlk_...     # only used to enumerate KS items
+
 python scripts/ingest_vectors.py ks_<id>
 ```
+
+The script talks only to AWS (S3, Bedrock, S3 Vectors) once the asset
+bytes are staged. Bedrock Marengo 3.0 runs via StartAsyncInvoke,
+returning the standard `data[].embedding` shape; clip-scope segments are
+upserted into the S3 Vectors index.
 
 ## Implementation notes
 
@@ -75,6 +96,18 @@ Operational gotchas worth knowing before the first apply:
   socketTimeout (180 s) is below the 300 s lambda cap. Set
   NodeHttpHandler `socketTimeout: 280_000` explicitly.
 - **S3 Vectors filterable metadata is bounded.** Per-vector metadata is
-  capped; keep the attribute set to the four fields the agent actually
-  filters or returns (`asset_id`, `knowledge_store_id`, `start_time`,
-  `end_time`). Anything richer belongs in a separate metadata store.
+  capped; keep the attribute set to the five fields the agent actually
+  filters, returns, or hands to Pegasus (`asset_id`,
+  `knowledge_store_id`, `start_sec`, `end_sec`, `s3_uri`). Anything
+  richer belongs in a separate metadata store.
+- **Bedrock TwelveLabs models require s3Location, not URL.** Neither
+  Marengo nor Pegasus on Bedrock accepts a plain URL for media. The
+  reference stack mirrors each ingested asset to `clips/<asset_id>.mp4`
+  on the clips bucket; the runtime IAM role carries `s3:GetObject`
+  there. Sub-clip time ranges are not supported on the Pegasus 1.2
+  Bedrock API, so the whole S3 object is analyzed; deployments with
+  long source videos should consider segmenting at ingest time.
+- **Marengo on Bedrock is async-only for video.** Sync `InvokeModel`
+  rejects `inputType=video`; use `StartAsyncInvoke` against the
+  foundation-model ARN (not the inference profile). Output writes to
+  `s3://<clips bucket>/embeddings/<invocation_id>/output.json`.

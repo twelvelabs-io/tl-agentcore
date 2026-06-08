@@ -1,0 +1,15 @@
+flowchart TB
+    T0["<b>Tier 0 · Search</b><br/>vector_search · find_entity_by_image<br/><i>250–400 ms</i>"]
+    T1["<b>Tier 1 · Cache</b><br/>10 lookup tools over DynamoDB<br/><i>10–40 ms</i>"]
+    T2["<b>Tier 2 · Analyze</b><br/>pegasus_analyze · Bedrock Pegasus 1.2<br/><i>3–15 s</i>"]
+
+    T0 -. "needs richer context?" .-> T1
+    T1 -. "needs to see the clip?" .-> T2
+
+    classDef hot   fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef warm  fill:#fef9c3,stroke:#ca8a04,stroke-width:1px,color:#713f12
+    classDef cool  fill:#fce7f3,stroke:#db2777,stroke-width:1px,color:#831843
+
+    class T0 hot
+    class T1 warm
+    class T2 cool

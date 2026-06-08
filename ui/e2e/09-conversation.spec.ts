@@ -15,8 +15,8 @@ test.describe("RoughCut: conversational follow-up", () => {
       timeout: 3 * 60_000,
     });
 
-    // The conversation label should now be visible (chat replaces script).
-    await expect(signedInPage.locator('text=§ I · Conversation').first()).toBeVisible();
+    // The chat panel should now be visible (replaces brief textarea in left rail).
+    await expect(signedInPage.locator('text=§ Chat').first()).toBeVisible();
 
     // The initial brief is visible as the first user message in the thread.
     await expect(
@@ -52,18 +52,26 @@ test.describe("RoughCut: conversational follow-up", () => {
     await expect(signedInPage.locator('button:has-text("send →")')).toBeVisible({ timeout: 3 * 60_000 });
   });
 
-  test("the 'new cut' button resets the conversation and brings the script textarea back", async ({ signedInPage }) => {
+  test("the 'new cut' button resets the conversation and brings the brief back", async ({ signedInPage }) => {
     // Reuse the cached signed-in session from the previous test. The
-    // history strip should still hold the plan from above; restore it so
-    // the chat thread is loaded.
-    await signedInPage.locator('button:has-text("Rough Cut")').first().click();
+    // history drawer should hold the plan from above; restore it so the
+    // chat thread is loaded.
+    await signedInPage.locator('button.tab:has-text("Rough Cut")').first().click();
 
-    // Click the most recent history card (newest first) to restore.
-    const historyCard = signedInPage.locator('div[style*="rgba(255, 122, 26"]').first();
-    if (await historyCard.isVisible({ timeout: 5_000 }).catch(() => false)) {
-      await historyCard.click();
+    // Open the history drawer and click the most recent saved cut to restore.
+    await signedInPage.locator('button:has-text("history")').first().click();
+    const drawer = signedInPage.locator('aside.fixed');
+    await expect(drawer).toBeVisible({ timeout: 5_000 });
+    // The first card in the drawer is the most recent saved cut. The
+    // cards are click-targets; restore by clicking it. If the drawer is
+    // empty (clean state), close it via ESC and generate a small plan.
+    const firstCard = drawer.locator('div.cursor-pointer').first();
+    if (await firstCard.isVisible({ timeout: 3_000 }).catch(() => false)) {
+      await firstCard.click();
+      // Drawer auto-closes on restore.
     } else {
-      // No history; generate a small plan to set up.
+      await signedInPage.keyboard.press("Escape");
+      await expect(drawer).toBeHidden({ timeout: 3_000 });
       await signedInPage.locator("textarea").first().fill("Short reel: opener, action, close.");
       await signedInPage.locator('button:has-text("assemble rough cut")').click();
       await expect(signedInPage.getByText(/^scene \d/i).first()).toBeVisible({
@@ -76,8 +84,8 @@ test.describe("RoughCut: conversational follow-up", () => {
     await expect(newCutBtn).toBeVisible();
     await newCutBtn.click();
 
-    // Now the script textarea should be back.
-    await expect(signedInPage.locator('text=§ I · Script')).toBeVisible();
+    // Now the brief input should be back (visible "§ Brief" header).
+    await expect(signedInPage.locator('text=§ Brief').first()).toBeVisible();
     await expect(signedInPage.locator('button:has-text("assemble rough cut")')).toBeVisible();
   });
 });

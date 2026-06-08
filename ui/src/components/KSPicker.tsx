@@ -17,7 +17,7 @@ export function KSPicker() {
   return (
     <div className="relative">
       <button className="text-right" onClick={() => setOpen((v) => !v)}>
-        <div className="label">Active knowledge base</div>
+        <div className="label">Knowledge base</div>
         <div className="font-display text-xl mt-0.5 flex items-baseline gap-2">
           <span style={{ color: "var(--color-ink)" }}>{ks?.name || "—"}</span>
           <span className="font-mono text-xs" style={{ color: "var(--color-ink-faint)" }}>

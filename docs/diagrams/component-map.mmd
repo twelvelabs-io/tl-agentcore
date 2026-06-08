@@ -1,0 +1,35 @@
+flowchart TD
+    Browser["<b>Browser</b><br/>React + Vite"]
+    CF["CloudFront"]
+    WS["API Gateway<br/>WebSocket"]
+    Chat["<b>Chat λ</b><br/>async self-invoke"]
+    Runtime["<b>AgentCore Runtime</b><br/>Strands · Sonnet 4.6<br/>Graviton container (arm64)"]
+    Vectors[("<b>S3 Vectors</b><br/>multi-modal clip embeddings<br/>visual · audio · transcription")]
+    Clips[("<b>S3 · clips bucket</b><br/>mirrored asset bytes<br/>clips/&lt;asset_id&gt;.mp4")]
+    Marengo["<b>Bedrock · Marengo 3.0</b><br/>StartAsyncInvoke<br/>visual + audio + transcription embeddings"]
+    Pegasus["<b>Bedrock · Pegasus 1.2</b><br/>InvokeModel<br/>clip analysis"]
+
+    Browser -- "wss + Cognito JWT" --> CF
+    CF --> WS
+    WS --> Chat
+    Chat -- "SigV4<br/>InvokeAgentRuntime" --> Runtime
+    Runtime -. "SSE · tool_call · tool_result · text_delta · result" .-> Chat
+    Chat -. "WS frames · forwarded verbatim" .-> Browser
+    Runtime -- "1 · embed beat phrase (text · sync) · ~200 ms" --> Marengo
+    Marengo -. "query vector + 3 anchor vectors (cached)" .-> Runtime
+    Runtime -- "2 · 3 parallel ANN queries · ~50 ms" --> Vectors
+    Vectors -. "fused ranking" .-> Runtime
+    Runtime -- "3 · clip take-note · only on follow-up" --> Pegasus
+    Pegasus -. "reads s3Location" .-> Clips
+
+    classDef edge    fill:#fef3e2,stroke:#f59e0b,stroke-width:1px,color:#7c2d12
+    classDef compute fill:#fef9c3,stroke:#ca8a04,stroke-width:1px,color:#713f12
+    classDef hero    fill:#e0e7ff,stroke:#4f46e5,stroke-width:2px,color:#312e81
+    classDef store   fill:#dcfce7,stroke:#16a34a,stroke-width:1px,color:#14532d
+    classDef bedrock fill:#fce7f3,stroke:#db2777,stroke-width:1px,color:#831843
+
+    class Browser,CF,WS edge
+    class Chat compute
+    class Runtime hero
+    class Vectors,Clips store
+    class Marengo,Pegasus bedrock

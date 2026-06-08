@@ -30,9 +30,61 @@ output "vector_index_name" {
   description = "S3 Vectors index name (single index per bucket; KS scoping is done via metadata filter)."
 }
 
-output "tl_api_key_secret" {
-  value       = aws_secretsmanager_secret.tl_api_key.name
-  description = "Secrets Manager id of the TL API key the runtime reads at startup."
+output "vector_index_entity_thumbs" {
+  value       = aws_s3vectors_index.entity_thumbs.index_name
+  description = "S3 Vectors index for per-clip Titan-embedded thumbnails. Populate via scripts/ingest_entity_thumbs.py."
+}
+
+output "vector_index_entity_patches" {
+  value       = aws_s3vectors_index.entity_patches.index_name
+  description = "S3 Vectors index for Titan-embedded detected entity crops (gdino+DeepSORT output). Populated by the entity-Re-ID Step Functions pipeline."
+}
+
+# ─── Phase 3-proper: gdino + SageMaker Processing infrastructure ─────────
+output "gdino_ecr_url" {
+  value       = aws_ecr_repository.gdino.repository_url
+  description = "ECR repo for the GDINO Triton expert-model container. Build via the CodeBuild project (operator uploads source zip to s3://<clips>/codebuild-src/gdino.zip and starts the project)."
+}
+
+output "sagemaker_endpoint_role_arn" {
+  value       = aws_iam_role.sagemaker_endpoint.arn
+  description = "Execution role the gdino async endpoint assumes."
+}
+
+output "gdino_endpoint_name" {
+  value       = aws_sagemaker_endpoint.gdino.name
+  description = "Long-lived SageMaker Async endpoint serving gdino. Autoscales 0..2 ml.g5.xlarge instances."
+}
+
+output "codebuild_gdino_project_name" {
+  value       = aws_codebuild_project.gdino.name
+  description = "CodeBuild project that builds the gdino image. Start via `aws codebuild start-build --project-name <this>`."
+}
+
+output "entity_reid_state_machine_arn" {
+  value       = aws_sfn_state_machine.entity_reid.arn
+  description = "Step Functions state machine that runs the entity-Re-ID ingest pipeline for one knowledge_store. Start via scripts/run_entity_reid_pipeline.py."
+}
+
+output "clips_bucket_name" {
+  value       = aws_s3_bucket.clips.bucket
+  description = "S3 bucket where mirrored asset bytes live at clips/<asset_id>.mp4. Read by Bedrock Pegasus (runtime) and written by ingest_vectors.py (operator)."
+}
+
+# ─── DDB tables (knowledge graph + KS/asset registry) ────────────────────
+output "kb_cache_table" {
+  value       = aws_dynamodb_table.kb_cache.name
+  description = "Single-table cache mirroring Jockey's mini-ontology / content-profile layer. Populate via scripts/ingest-kb-cache.py."
+}
+
+output "rights_table" {
+  value       = aws_dynamodb_table.rights.name
+  description = "Licensing + clearance per asset_id. Populate via scripts/seed-rights.py (demo) or wire to an existing rights system."
+}
+
+output "audiences_table" {
+  value       = aws_dynamodb_table.audiences.name
+  description = "Audience-intelligence segments. Populate via scripts/seed-audiences.py."
 }
 
 # ─── Cognito ─────────────────────────────────────────────────────────────
@@ -73,10 +125,12 @@ output "cloudfront_distribution_id" {
 # ─── UI build env (the four lines the UI's .env.production needs) ─────────
 output "ui_env" {
   value       = <<-EOT
-    VITE_AGENT_WS_URL=wss://${aws_cloudfront_distribution.frontend.domain_name}/live
+    VITE_AGENT_RUNTIME_ARN=${aws_bedrockagentcore_agent_runtime.this.agent_runtime_arn}
+    VITE_AGENT_RUNTIME_REGION=${var.region}
+    VITE_AGENT_RUNTIME_QUALIFIER=${aws_bedrockagentcore_agent_runtime_endpoint.live.name}
     VITE_COGNITO_HOSTED_UI_DOMAIN=https://${aws_cognito_user_pool_domain.this.domain}.auth.${var.region}.amazoncognito.com
     VITE_COGNITO_CLIENT_ID=${aws_cognito_user_pool_client.spa.id}
     VITE_FRONTEND_URL=https://${aws_cloudfront_distribution.frontend.domain_name}
   EOT
-  description = "Paste into ui/.env.production before `npm run build`."
+  description = "Paste into ui/.env.production before `npm run build`. The browser now connects directly to AgentCore Runtime over WebSocket using a Cognito JWT — no more chat-lambda hop."
 }

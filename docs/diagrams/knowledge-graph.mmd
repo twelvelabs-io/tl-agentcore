@@ -1,0 +1,31 @@
+flowchart TD
+    A1[("<b>Asset · 01</b><br/>vineyard wide shot<br/>mood: contemplative")]
+    A2[("<b>Asset · 02</b><br/>car chase<br/>mood: kinetic")]
+    A3[("<b>Asset · 03</b><br/>crowd celebration<br/>mood: triumphant")]
+
+    E1["<b>Entity · protagonist</b><br/>kind: person<br/>appears: 3"]
+    E2["<b>Entity · vineyard estate</b><br/>kind: place<br/>appears: 2"]
+    E3["<b>Entity · brand logo</b><br/>kind: brand<br/>appears: 1"]
+
+    Ev1{{"<b>Event · car chase</b><br/>cluster: 2"}}
+    Ev2{{"<b>Event · celebration after tension</b><br/>cluster: 2"}}
+
+    E1 -- "appears in" --> A1
+    E1 -- "appears in" --> A2
+    E1 -- "appears in" --> A3
+    E2 -- "appears in" --> A1
+    E2 -- "appears in" --> A3
+    E3 -- "appears in" --> A2
+
+    Ev1 -- "happens in" --> A2
+    Ev1 -- "happens in" --> A3
+    Ev2 -- "happens in" --> A1
+    Ev2 -- "happens in" --> A3
+
+    classDef asset  fill:#fef9c3,stroke:#ca8a04,stroke-width:1.5px,color:#713f12
+    classDef entity fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px,color:#14532d
+    classDef event  fill:#fce7f3,stroke:#db2777,stroke-width:1.5px,color:#831843
+
+    class A1,A2,A3 asset
+    class E1,E2,E3 entity
+    class Ev1,Ev2 event
