@@ -79,11 +79,11 @@ function SettingsModalContent({ onClose }: { onClose: () => void }) {
             <h2 className="font-display text-2xl mt-1">
               {tab === "prompts" ? "System prompts" : "Users"}
             </h2>
-            <p className="font-mono text-[11px] mt-1" style={{ color: "var(--color-ink-faint)" }}>
-              {tab === "prompts"
-                ? "edits apply globally · agent picks up on next turn · ingest picks up within ~5 min"
-                : "admin-only · Cognito user CRUD · self-registration is off"}
-            </p>
+            {tab === "prompts" && (
+              <p className="font-mono text-[11px] mt-1" style={{ color: "var(--color-ink-faint)" }}>
+                edits apply globally · agent picks up on next turn · ingest picks up within ~5 min
+              </p>
+            )}
           </div>
           <button className="label hover:text-[var(--color-cue)]" onClick={onClose}>close ✕</button>
         </header>
@@ -307,7 +307,11 @@ function UsersTab() {
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviting, setInviting] = useState(false);
   const [inviteErr, setInviteErr] = useState<string | null>(null);
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  // Hold the full User row, not just the username — Cognito's username
+  // is the immutable sub UUID, but the operator-facing label is the
+  // email attribute. The confirm modal needs both: email for the prompt
+  // text, username for the actual API call.
+  const [confirmDelete, setConfirmDelete] = useState<User | null>(null);
 
   const reload = async () => {
     try {
@@ -451,7 +455,7 @@ function UsersTab() {
                 <RowBtn
                   destructive
                   busy={busyAction === `delete:${u.username}`}
-                  onClick={() => setConfirmDelete(u.username)}
+                  onClick={() => setConfirmDelete(u)}
                 >
                   delete
                 </RowBtn>
@@ -470,7 +474,7 @@ function UsersTab() {
         <div className="fixed inset-0 z-[60] flex items-center justify-center" style={{ background: "rgba(0,0,0,0.6)" }} onClick={() => setConfirmDelete(null)}>
           <div className="grain max-w-md w-full p-5" style={{ background: "var(--color-paper)", border: "1px solid var(--color-rule)" }} onClick={(e) => e.stopPropagation()}>
             <div className="label" style={{ color: "var(--color-status-failed)" }}>delete user</div>
-            <p className="font-display text-lg mt-2">Delete {confirmDelete}?</p>
+            <p className="font-display text-lg mt-2">Delete <span className="font-mono">{confirmDelete.email}</span>?</p>
             <p className="text-xs mt-2" style={{ color: "var(--color-ink-soft)" }}>
               This removes the user from Cognito. Their sessions die immediately. Cannot be undone.
             </p>
@@ -480,7 +484,7 @@ function UsersTab() {
                 className="btn btn-sm"
                 style={{ background: "var(--color-status-failed)", color: "var(--color-paper)", borderColor: "var(--color-status-failed)" }}
                 onClick={() => {
-                  const username = confirmDelete;
+                  const username = confirmDelete.username;
                   setConfirmDelete(null);
                   void action("delete", username, () => apiDeleteUser(username));
                 }}

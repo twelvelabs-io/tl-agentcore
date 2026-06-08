@@ -19,9 +19,63 @@ resource "aws_cognito_user_pool" "this" {
     allow_admin_create_user_only = true
 
     invite_message_template {
-      email_subject = "Your tl-agentcore lab access"
-      email_message = "Hi {username}, you have been granted access to the tl-agentcore lab. Your temporary password is: {####}. Sign in at the URL the inviter shared with you; you'll be asked to set a new password on first sign-in."
-      sms_message   = "Username: {username}, temp password: {####}"
+      email_subject = "Welcome to Rough Cut Lab"
+      # HTML body. Cognito auto-detects HTML by content and sends it
+      # with the appropriate Content-Type. Inline styles only (most email
+      # clients strip <style> blocks). Web-safe fallback fonts in every
+      # declaration — Cognito doesn't ship @font-face. Layout uses tables
+      # because Outlook still doesn't reliably honor div layouts.
+      #
+      # Cognito placeholders: {username} → the invitee's email,
+      # {####} → the one-time temporary password.
+      email_message = <<-HTML
+        <!DOCTYPE html>
+        <html lang="en">
+          <head>
+            <meta charset="UTF-8" />
+            <meta name="viewport" content="width=device-width,initial-scale=1" />
+            <title>Welcome to Rough Cut Lab</title>
+          </head>
+          <body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;background:#f6f4ef;color:#161514;">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#f6f4ef;">
+              <tr><td align="center" style="padding:40px 16px;">
+                <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="560" style="max-width:560px;background:#ffffff;border:1px solid #e2dccf;border-radius:12px;overflow:hidden;">
+                  <tr><td style="padding:36px 36px 8px 36px;">
+                    <div style="font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:#ff7a1a;font-weight:700;">Welcome</div>
+                    <h1 style="margin:10px 0 0 0;font-family:Georgia,'Times New Roman',serif;font-size:32px;color:#161514;line-height:1.1;font-weight:600;letter-spacing:-0.01em;">Rough Cut <span style="color:#ff7a1a;">·</span> Lab</h1>
+                  </td></tr>
+                  <tr><td style="padding:24px 36px 8px 36px;">
+                    <p style="margin:0 0 18px 0;font-size:15px;line-height:1.6;color:#3c3a36;">
+                      Hi <strong style="color:#161514;">{username}</strong>, you've been invited to <strong>Rough Cut Lab</strong> — the producer's studio for agentic highlight reels and rough cuts over your knowledge stores.
+                    </p>
+                    <p style="margin:0 0 12px 0;font-size:13px;color:#7a7975;text-transform:uppercase;letter-spacing:0.08em;font-weight:600;">
+                      Your one-time password
+                    </p>
+                    <div style="margin:0 0 28px 0;padding:18px 22px;background:#f6f4ef;border:1px solid #e2dccf;border-radius:8px;font-family:'SFMono-Regular',Menlo,Consolas,monospace;font-size:20px;letter-spacing:0.06em;color:#161514;text-align:center;font-weight:600;">{####}</div>
+                    <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
+                      <td bgcolor="#ff7a1a" style="border-radius:999px;">
+                        <a href="https://d18q1864w6gq7b.cloudfront.net" style="display:inline-block;padding:13px 30px;font-size:14px;font-weight:600;color:#ffffff;text-decoration:none;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;letter-spacing:0.01em;">Sign in &rarr;</a>
+                      </td>
+                    </tr></table>
+                    <p style="margin:28px 0 0 0;font-size:13px;line-height:1.6;color:#7a7975;">
+                      You'll be asked to choose a permanent password on first sign-in. The temporary password above expires in <strong>7 days</strong>.
+                    </p>
+                  </td></tr>
+                  <tr><td style="padding:24px 36px;border-top:1px solid #e2dccf;background:#fafaf7;">
+                    <p style="margin:0;font-size:11px;line-height:1.6;color:#9a9890;font-family:'SFMono-Regular',Menlo,Consolas,monospace;">
+                      If you weren't expecting this invitation, you can safely ignore this email.
+                    </p>
+                  </td></tr>
+                </table>
+                <p style="margin:18px 0 0 0;font-size:10px;color:#9a9890;font-family:'SFMono-Regular',Menlo,Consolas,monospace;letter-spacing:0.04em;">
+                  Bedrock AgentCore &middot; Marengo &middot; Pegasus
+                </p>
+              </td></tr>
+            </table>
+          </body>
+        </html>
+      HTML
+      sms_message = "Rough Cut Lab — temp password for {username}: {####}"
     }
   }
 

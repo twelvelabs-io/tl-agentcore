@@ -219,16 +219,6 @@ export function SignInScreen({ onSignedIn }: { onSignedIn: () => void }) {
           )}
         </div>
 
-        {/* Footer */}
-        <motion.p
-          className="mt-6 text-center font-mono text-[10px]"
-          style={{ color: "var(--color-ink-faint)" }}
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ duration: 0.5, delay: 0.2 }}
-        >
-          Cognito SRP — your password stays in this browser
-        </motion.p>
       </motion.div>
     </div>
   );
