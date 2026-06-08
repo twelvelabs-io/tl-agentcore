@@ -55,30 +55,30 @@ terraform apply -var="tl_api_key=tlk_..." -var="seed_admin_email=you@example.com
 
 ## First admin user
 
-`seed_admin_email` is the **only** way to get a working session on a
-brand-new pool — `allow_admin_create_user_only = true` blocks
+`seed_admin_email` is the only way to get a working session on a
+brand-new pool. `allow_admin_create_user_only = true` blocks
 self-registration, and the Users tab in the SPA is gated on membership
-in the `admins` Cognito group, so until at least one admin exists
-nobody can invite anyone else.
+in the `admins` Cognito group. Until at least one admin exists, nobody
+can invite anyone else.
 
 On first `terraform apply` with the variable set:
 
 1. `aws_cognito_user.seed_admin` creates the user with
    `email_verified = true` and `desired_delivery_mediums = ["EMAIL"]`.
-2. Cognito generates a temporary password (Terraform never sees it; not
-   in state) and emails the address the standard invite —- a branded
-   HTML message with the temp password, a 7-day expiry note, and a
-   `Sign in →` button pointing at the CloudFront URL.
+2. Cognito generates a temporary password (Terraform never sees it; it
+   is not written to state) and sends the standard invite email to that
+   address: an HTML message with the temp password, a 7-day expiry
+   note, and a `Sign in` button pointing at the CloudFront URL.
 3. `aws_cognito_user_in_group.seed_admin` adds the user to the `admins`
-   group, so the access token they get back at sign-in carries
-   `cognito:groups: ["admins"]` and unlocks Settings → Users.
-4. The admin clicks the CTA, lands on the SPA's local sign-in screen,
-   gets routed through the `FORCE_CHANGE_PASSWORD` challenge to set a
-   permanent password, and is in. They onboard every other user from
-   that point with the in-app invite flow — no further Terraform
-   needed.
+   group. The access token they receive at sign-in then carries
+   `cognito:groups: ["admins"]`, which unlocks Settings → Users.
+4. The admin clicks the link in the email, lands on the SPA's local
+   sign-in screen, sets a permanent password via the
+   `FORCE_CHANGE_PASSWORD` challenge, and signs in. From there they
+   invite everyone else through the in-app Users tab. No further
+   Terraform is required.
 
-If the invite email gets lost or spam-filtered, re-fire it:
+If the invite email is lost or spam-filtered, re-fire it:
 
 ```bash
 terraform taint  aws_cognito_user.seed_admin
@@ -86,13 +86,13 @@ terraform apply  -var "tl_api_key=tlk_..." -var "seed_admin_email=you@example.co
 ```
 
 Tainting recreates the resource on the next apply, which makes Cognito
-mint a fresh temporary password and re-send the invite. Same outcome
-as the Users tab's per-row **resend invite** button, just usable
+issue a fresh temporary password and send the invite again. Same
+outcome as the Users tab's per-row "resend invite" button, but usable
 before any admin exists in the pool.
 
 If `seed_admin_email` is left blank, the deployment finishes with a
 working pool that has zero users. To recover, an operator with AWS
-console / CLI access can bootstrap manually:
+CLI access can bootstrap manually:
 
 ```bash
 POOL_ID=$(terraform -chdir=infra output -raw cognito_user_pool_id)
