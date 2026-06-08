@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@xyflow/react": "^12.10.2",
+    "amazon-cognito-identity-js": "^6.3.16",
     "d3-force": "^3.0.0",
     "hls.js": "^1.6.16",
     "motion": "^11.15.0",

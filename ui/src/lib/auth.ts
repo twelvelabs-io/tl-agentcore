@@ -1,19 +1,53 @@
-// Cognito OAuth code flow with PKCE.
-// Pure browser implementation — no SDK needed (saves ~120KB).
+// Cognito authentication — two paths supported, both write the same
+// `Tokens` object to localStorage so every downstream consumer
+// (getAccessToken, decodeIdToken, isAdmin, agent-api) stays identical:
 //
-// Lifecycle:
-//   1. App boots → load tokens from localStorage; if missing/expired, kick off PKCE flow.
-//   2. Hosted UI redirects back with ?code=… → exchange for {access,id,refresh} tokens.
-//   3. Every API call: getAccessToken() refreshes if within 60s of expiry.
-//   4. signOut() clears localStorage + redirects through /logout to clear the IdP cookie.
+//   · LOCAL SRP (default) — amazon-cognito-identity-js drives a USER_SRP_AUTH
+//     flow against the user pool. The password never leaves the browser
+//     (SRP nonce-exchange). Rendered by the SignInScreen component.
+//
+//   · HOSTED UI PKCE (fallback) — preserved for the legacy ?code=…
+//     callback URL so any in-flight OAuth-flow links still resolve.
+//     We don't actively redirect to Hosted UI anymore.
+
+import {
+  AuthenticationDetails,
+  CognitoUser,
+  CognitoUserPool,
+  CognitoUserSession,
+  type CognitoUserAttribute,
+} from "amazon-cognito-identity-js";
 
 const ENV = (import.meta.env || {}) as Record<string, string | undefined>;
 const HOSTED_UI = (ENV.VITE_COGNITO_HOSTED_UI_DOMAIN || "").replace(/\/$/, "");
 const CLIENT_ID = ENV.VITE_COGNITO_CLIENT_ID || "";
+const USER_POOL_ID = ENV.VITE_COGNITO_USER_POOL_ID || "";
 const SCOPES = "openid email profile";
 
 const LS_TOKENS = "tl-agentcore.tokens";
 const LS_PKCE = "tl-agentcore.pkce-verifier";
+
+let _pool: CognitoUserPool | null = null;
+function getPool(): CognitoUserPool {
+  if (_pool) return _pool;
+  if (!USER_POOL_ID || !CLIENT_ID) {
+    throw new Error("VITE_COGNITO_USER_POOL_ID and VITE_COGNITO_CLIENT_ID must be set");
+  }
+  _pool = new CognitoUserPool({ UserPoolId: USER_POOL_ID, ClientId: CLIENT_ID });
+  return _pool;
+}
+
+function sessionToTokens(session: CognitoUserSession): Tokens {
+  const access = session.getAccessToken();
+  const id     = session.getIdToken();
+  const refresh = session.getRefreshToken();
+  return {
+    access_token: access.getJwtToken(),
+    id_token:     id.getJwtToken(),
+    refresh_token: refresh.getToken(),
+    expires_at:    access.getExpiration() * 1000,
+  };
+}
 
 export type Tokens = {
   access_token: string;
@@ -22,7 +56,7 @@ export type Tokens = {
   expires_at: number; // ms epoch
 };
 
-export const cognitoEnabled = () => Boolean(HOSTED_UI && CLIENT_ID);
+export const cognitoEnabled = () => Boolean(CLIENT_ID && (USER_POOL_ID || HOSTED_UI));
 
 const REDIRECT_URI = () => window.location.origin + "/";
 
@@ -109,23 +143,32 @@ async function refreshTokens(refresh_token: string): Promise<Tokens> {
   };
 }
 
+/** Try to recover tokens silently. Returns null without redirecting if
+ *  the user isn't signed in — the caller (App.tsx) renders <SignInScreen>
+ *  in that case. Still handles the legacy ?code=… callback so any
+ *  bookmarked Hosted UI flow keeps working. */
 export async function ensureSignedIn(): Promise<Tokens | null> {
   if (!cognitoEnabled()) return null;
 
-  // Step 1 — handle the OAuth callback if we landed here with ?code=…
+  // Step 1 — legacy: handle a Hosted UI ?code=… callback if present.
   const url = new URL(window.location.href);
   const code = url.searchParams.get("code");
   if (code) {
-    const tokens = await exchangeCode(code);
-    saveTokens(tokens);
-    // Strip the code from the URL.
-    url.searchParams.delete("code");
-    url.searchParams.delete("state");
-    window.history.replaceState({}, "", url.pathname + url.search + url.hash);
-    return tokens;
+    try {
+      const tokens = await exchangeCode(code);
+      saveTokens(tokens);
+      url.searchParams.delete("code");
+      url.searchParams.delete("state");
+      window.history.replaceState({}, "", url.pathname + url.search + url.hash);
+      return tokens;
+    } catch (e) {
+      console.warn("Hosted UI callback exchange failed", e);
+    }
   }
 
-  // Step 2 — load existing tokens; refresh if near expiry; sign in if missing.
+  // Step 2 — load existing tokens; refresh if near expiry. Both code
+  // paths (Hosted UI PKCE and local SRP) write the same Tokens shape so
+  // this step is identical regardless of how the user signed in.
   const tokens = loadTokens();
   if (tokens && tokens.expires_at - Date.now() > 60_000) return tokens;
   if (tokens?.refresh_token) {
@@ -133,11 +176,99 @@ export async function ensureSignedIn(): Promise<Tokens | null> {
       const fresh = await refreshTokens(tokens.refresh_token);
       saveTokens(fresh);
       return fresh;
-    } catch { /* fall through to sign-in */ }
+    } catch { /* fall through to "needs sign-in" */ }
   }
-  await startSignIn();
-  // startSignIn navigates away; this Promise resolves on next page load.
-  return null;
+  return null; // App.tsx renders SignInScreen when this returns null.
+}
+
+
+// ─── Local SRP sign-in ──────────────────────────────────────────────────────
+//
+// All flows resolve to either:
+//   { kind: "tokens", tokens } — full success; saved to localStorage.
+//   { kind: "new_password_required", user, requiredAttributes } — first-
+//     sign-in on an invited user; caller must collect a new password and
+//     call completeNewPassword().
+//   { kind: "mfa_required", user, deliveryDetails } — MFA enrolled
+//     on this user; UI not built for this yet but the type is here so
+//     callers can branch.
+//
+// Errors surface as thrown Error objects with helpful `.code` strings
+// from Cognito (NotAuthorizedException, UserNotFoundException, etc).
+
+export type SignInResult =
+  | { kind: "tokens"; tokens: Tokens }
+  | { kind: "new_password_required"; user: CognitoUser; requiredAttributes: string[] }
+  | { kind: "mfa_required"; user: CognitoUser; mfaType: string };
+
+export async function signInWithPassword(email: string, password: string): Promise<SignInResult> {
+  const pool = getPool();
+  const user = new CognitoUser({ Username: email.trim(), Pool: pool });
+  const authDetails = new AuthenticationDetails({ Username: email.trim(), Password: password });
+  return new Promise((resolve, reject) => {
+    user.authenticateUser(authDetails, {
+      onSuccess: (session) => {
+        const tokens = sessionToTokens(session);
+        saveTokens(tokens);
+        resolve({ kind: "tokens", tokens });
+      },
+      onFailure: (err) => {
+        const e = err as Error & { code?: string };
+        const out = new Error(e.message || String(err)) as Error & { code?: string };
+        out.code = e.code;
+        reject(out);
+      },
+      newPasswordRequired: (userAttributes, requiredAttributes) => {
+        // Cognito sends back the user's current attributes here; strip
+        // the ones we can't write back (email_verified is system-managed
+        // and the SDK rejects it).
+        delete userAttributes.email_verified;
+        delete userAttributes.sub;
+        resolve({ kind: "new_password_required", user, requiredAttributes: requiredAttributes || [] });
+      },
+      mfaRequired: (mfaType) => {
+        resolve({ kind: "mfa_required", user, mfaType });
+      },
+    });
+  });
+}
+
+/** Finish the first-sign-in challenge by submitting a new password. */
+export async function completeNewPassword(user: CognitoUser, newPassword: string, attributes: Record<string, string> = {}): Promise<Tokens> {
+  return new Promise((resolve, reject) => {
+    user.completeNewPasswordChallenge(newPassword, attributes, {
+      onSuccess: (session: CognitoUserSession) => {
+        const tokens = sessionToTokens(session);
+        saveTokens(tokens);
+        resolve(tokens);
+      },
+      onFailure: (err: Error) => reject(err),
+    });
+  });
+}
+
+/** Trigger the "forgot password" email. Cognito emails a 6-digit code. */
+export async function forgotPassword(email: string): Promise<void> {
+  const pool = getPool();
+  const user = new CognitoUser({ Username: email.trim(), Pool: pool });
+  return new Promise((resolve, reject) => {
+    user.forgotPassword({
+      onSuccess: () => resolve(),
+      onFailure: (err) => reject(err),
+    });
+  });
+}
+
+/** Confirm the forgot-password flow with the emailed code + new password. */
+export async function confirmForgotPassword(email: string, code: string, newPassword: string): Promise<void> {
+  const pool = getPool();
+  const user = new CognitoUser({ Username: email.trim(), Pool: pool });
+  return new Promise((resolve, reject) => {
+    user.confirmPassword(code.trim(), newPassword, {
+      onSuccess: () => resolve(),
+      onFailure: (err) => reject(err),
+    });
+  });
 }
 
 export async function getAccessToken(): Promise<string | null> {
@@ -185,10 +316,21 @@ export function isAdmin(): boolean {
 }
 
 export function signOut() {
+  // Best-effort global sign-out on the Cognito side so the refresh token
+  // can't be reused. The actual gate is that we clear the tokens out of
+  // localStorage immediately; the network call is fire-and-forget.
+  try {
+    const pool = getPool();
+    pool.getCurrentUser()?.signOut();
+  } catch { /* pool not configured locally — fine */ }
   clearTokens();
-  if (!cognitoEnabled()) { window.location.assign("/"); return; }
-  const url = new URL(`${HOSTED_UI}/logout`);
-  url.searchParams.set("client_id", CLIENT_ID);
-  url.searchParams.set("logout_uri", REDIRECT_URI());
-  window.location.assign(url.toString());
+  // Reload so App.tsx re-runs ensureSignedIn → renders the sign-in screen.
+  window.location.assign("/");
 }
+
+// Reference to keep the legacy Hosted UI helpers in scope (silences
+// unused-import warnings if startSignIn is ever removed). The Hosted UI
+// path is only exercised by the ?code=… callback above.
+export const _legacyHostedUi = { startSignIn };
+const _suppress_unused_legacy = SCOPES;
+void _suppress_unused_legacy;

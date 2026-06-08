@@ -528,3 +528,32 @@ body {
   background: var(--color-surface);
   border-color: var(--color-rule);
 }
+
+/* Sign-in screen inputs — the wrapper carries the border + padding,
+   the input itself is just bare text styled to match the body font.
+   Focus state nudges the wrapper border to the warm-amber accent so
+   the user can see which field is live. */
+.signin-input-wrap {
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+.signin-input-wrap:focus-within {
+  border-color: var(--color-cue, #ff7a1a);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--color-cue, #ff7a1a) 18%, transparent);
+}
+.signin-input-wrap input {
+  width: 100%;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--color-ink);
+  font-family: var(--font-body, ui-sans-serif);
+  font-size: 14px;
+  letter-spacing: 0;
+}
+.signin-input-wrap input::placeholder {
+  color: var(--color-ink-faint);
+}
+.signin-input-wrap input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}

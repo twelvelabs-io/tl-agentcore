@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from "motion/react";
 import { listKnowledgeStores } from "./lib/api";
 import { setState, useStore } from "./lib/store";
 import { cognitoEnabled, decodeIdToken, ensureSignedIn, signOut } from "./lib/auth";
+import { SignInScreen } from "./components/SignInScreen";
 import { RoughCut } from "./components/RoughCut";
 import { AgentCore } from "./components/AgentCore";
 import { Library } from "./components/Library";
@@ -43,6 +44,11 @@ export function App() {
   };
   const [bootError, setBootError] = useState<string | null>(null);
   const [authReady, setAuthReady] = useState(!cognitoEnabled());
+  // Distinct from authReady: authChecked means "we attempted to silently
+  // restore tokens once; if there weren't any, we now know to render the
+  // SignInScreen." Without this, the page would briefly flash empty
+  // chrome before the sign-in form mounts.
+  const [authChecked, setAuthChecked] = useState(!cognitoEnabled());
   const ready = useStore((s) => s.ready);
   const ks = useStore((s) => s.ks);
   const historyOpen = useStore((s) => s.historyOpen);
@@ -51,7 +57,8 @@ export function App() {
     if (!cognitoEnabled()) return;
     ensureSignedIn()
       .then((tokens) => { if (tokens) setAuthReady(true); })
-      .catch((e) => setBootError(`Sign-in failed: ${String(e?.message || e)}`));
+      .catch((e) => setBootError(`Sign-in failed: ${String(e?.message || e)}`))
+      .finally(() => setAuthChecked(true));
   }, []);
 
   useEffect(() => {
@@ -92,6 +99,20 @@ export function App() {
   // the Rough Cut studio and the Agent tab. The trigger button is
   // in-page (left rail header of each child component); the drawer
   // handles its own visibility from the global historyOpen flag.
+
+  // Not signed in yet (silent token restore finished, no tokens) → render
+  // the local sign-in screen. On success it flips authReady, which lets
+  // the next effect listKnowledgeStores() and the studio shell takes over.
+  if (cognitoEnabled() && authChecked && !authReady && !bootError) {
+    return (
+      <SignInScreen
+        onSignedIn={() => {
+          setAuthReady(true);
+          setBootError(null);
+        }}
+      />
+    );
+  }
 
   return (
     <div className="h-screen w-screen flex flex-col" style={{ background: "var(--color-paper)" }}>

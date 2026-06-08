@@ -128,9 +128,11 @@ output "ui_env" {
     VITE_AGENT_RUNTIME_ARN=${aws_bedrockagentcore_agent_runtime.this.agent_runtime_arn}
     VITE_AGENT_RUNTIME_REGION=${var.region}
     VITE_AGENT_RUNTIME_QUALIFIER=${aws_bedrockagentcore_agent_runtime_endpoint.live.name}
+    VITE_COGNITO_USER_POOL_ID=${aws_cognito_user_pool.this.id}
     VITE_COGNITO_HOSTED_UI_DOMAIN=https://${aws_cognito_user_pool_domain.this.domain}.auth.${var.region}.amazoncognito.com
     VITE_COGNITO_CLIENT_ID=${aws_cognito_user_pool_client.spa.id}
+    VITE_AWS_REGION=${var.region}
     VITE_FRONTEND_URL=https://${aws_cloudfront_distribution.frontend.domain_name}
   EOT
-  description = "Paste into ui/.env.production before `npm run build`. The browser now connects directly to AgentCore Runtime over WebSocket using a Cognito JWT — no more chat-lambda hop."
+  description = "Paste into ui/.env.production before `npm run build`. The browser uses the user-pool id for the local SRP sign-in flow and the agent runtime ARN for the direct WebSocket."
 }
