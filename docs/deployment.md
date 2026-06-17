@@ -1,8 +1,7 @@
 # Deployment
 
-Operator-facing notes for standing up the reference architecture
-described in [`whitepaper.md`](whitepaper.md). The paper covers the
-*why*; this doc covers the *how*.
+Operator-facing notes for standing up the AgentCore + S3 Vectors +
+TwelveLabs reference architecture.
 
 ## What the stack provisions
 
@@ -115,22 +114,24 @@ Graviton):
 ./build-agent.sh   # docker buildx build --platform linux/arm64 ...
 ```
 
-Build the vector index for an existing knowledge store. The operator
-stages asset bytes into the clips bucket first (the demo flow does this
-inline in `scripts/setup_test_fixtures.sh`), then runs:
+## Ingesting video
 
-```bash
-export CLIPS_BUCKET_NAME=$(cd infra && terraform output -raw clips_bucket_name)
-export VECTOR_BUCKET_NAME=$(cd infra && terraform output -raw vector_bucket_name)
-export TL_API_KEY=tlk_...     # only used to enumerate KS items
+Use the SPA's Library tab to upload. The auto-pipeline takes it from
+there, no manual scripts required:
 
-python scripts/ingest_vectors.py ks_<id>
-```
+1. `presign_upload` hands the browser a PUT URL into the clips bucket.
+2. S3 PutObject fires `embed_clip_start`, which kicks off MediaConvert
+   HLS transcode and Bedrock Marengo `StartAsyncInvoke` in parallel.
+3. `embed_clip_finalize` upserts segment vectors into S3 Vectors;
+   `hls_finalize` finalizes the playback manifest.
+4. `asset_profile` runs Pegasus and writes the per-asset summary into
+   `kb_cache`; `ks_rollup` (EventBridge, every 4 h) aggregates the
+   per-KS `OVERVIEW`, `ENTITY#` and `EVENT#` rows.
 
-The script talks only to AWS (S3, Bedrock, S3 Vectors) once the asset
-bytes are staged. Bedrock Marengo 3.0 runs via StartAsyncInvoke,
-returning the standard `data[].embedding` shape; clip-scope segments are
-upserted into the S3 Vectors index.
+Bedrock Marengo 3.0 runs via `StartAsyncInvoke`, returning the standard
+`data[].embedding` shape; clip-scope segments land in S3 Vectors with
+`asset_id`, `knowledge_store_id`, `start_sec`, `end_sec`, and `s3_uri`
+as filterable metadata.
 
 ## Implementation notes
 

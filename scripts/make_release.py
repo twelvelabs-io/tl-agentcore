@@ -71,43 +71,19 @@ EXCLUDE_PATHS: list[str] = [
     # Only the whitepaper / internal docs reference these, and those are
     # already stripped by the markdown allowlist.
     "docs/diagrams",
-    # Whitepaper-to-docx converter — useless without the whitepaper.
-    "scripts/build-whitepaper-docx.js",
-    # One-shot legacy migration from the SaaS-backed kb_cache layout to
-    # the AWS-native knowledge_stores / assets tables. A fresh deployer
-    # starts on the new schema; this script has no kb_cache to lift.
-    "scripts/migrate_to_aws_native.py",
     # TypeScript incremental build cache.
     "ui/tsconfig.tsbuildinfo",
-    # Operator-specific / one-shot / maintainer scripts. None of these
-    # help a fresh deployer: backfills act on existing data, wipe
-    # targets specific operator KS ids, seed_demo_kbs hard-codes
-    # operator S3 prefixes, transcode_existing_clips is a recovery tool
-    # for the auto-pipeline, sync_default_prompts + make_release are
-    # maintainer tooling (this very script is the latter).
-    "scripts/backfill_asset_metadata.py",
-    "scripts/backfill_asset_profiles.py",
-    "scripts/transcode_existing_clips.py",
-    "scripts/wipe_old_kbs.py",
-    "scripts/seed_demo_kbs.py",
-    "scripts/sync_default_prompts.py",
-    "scripts/make_release.py",
-    # Optional-feature seeders. Removing these keeps the agent's core
-    # rough-cut path working (vector_search + EDL build); the demo data
-    # for lookup_rights / lookup_audience / entity_reid / event_groups
-    # is just empty until an operator decides to enable each feature.
-    "scripts/seed_audiences.py",
-    "scripts/seed_rights.py",
-    "scripts/bulk_ingest.py",
-    "scripts/ingest_entity_thumbs.py",
-    "scripts/ingest_kb_cache.py",
-    "scripts/run_entity_reid_pipeline.py",
-    "scripts/build_event_groups.py",
-    # Local-only / dev-only.
+    # The entire scripts/ directory. Every script in it is either a
+    # CLI ingestion fallback (made redundant by the in-app upload's
+    # auto-pipeline: presign_upload → embed_clip_start →
+    # embed_clip_finalize → hls_finalize → asset_profile → ks_rollup),
+    # a one-shot backfill, an operator-specific seeder, or maintainer
+    # tooling (this very script).
+    "scripts",
+    # Local-only smoke driver + gdino tuning tools.
     "agent/local_run.py",
     "agent/expert-models/gdino/scripts",
-    # All-e2e Makefile — the e2e suite is already stripped, so every
-    # target in here points at deleted files.
+    # All-e2e Makefile — every target points at the stripped e2e suite.
     "Makefile",
     # Claude Code project instructions.
     "CLAUDE.md",
