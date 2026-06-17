@@ -56,21 +56,32 @@ RELEASE_DIR = ROOT / "release"
 EXCLUDE_PATHS: list[str] = [
     # Operator-specific stamped env. We replace this with a template.
     "ui/.env.production",
-    # Internal review notes — not customer-facing.
+    # Internal review notes.
     "docs/comment-replies.md",
-    # Cached E2E sign-in tokens (defensive — should be gitignored, but
-    # double-belt here in case someone commits the wrong file).
-    "ui/e2e/storage-state.json",
-    # Cached test outputs / reports.
+    # E2E suite. The whole folder + Playwright config + CI workflows + the
+    # bootstrap script all go. Shipping these requires a Cognito test user
+    # and a paid AWS+TL pass, neither of which a fresh deployer has.
+    "ui/e2e",
+    "ui/playwright.config.ts",
     "ui/playwright-report",
     "ui/test-results",
-    # Claude Code project instructions — not deployable.
+    ".github",
+    "scripts/setup_test_fixtures.sh",
+    # Claude Code project instructions.
     "CLAUDE.md",
     ".claude",
     # Editor / OS metadata.
     ".vscode",
     ".idea",
 ]
+
+# Markdown allowlist: every other `*.md` in the tree is removed. The
+# deployment guide is the only doc shipped; the whitepaper, scope,
+# cost-estimate, and per-folder READMEs are stripped. RELEASE_NOTES.md
+# is generated AFTER pruning and is preserved by construction.
+MARKDOWN_KEEP: set[str] = {
+    "docs/deployment.md",
+}
 
 # Glob patterns that are recursively removed from the staging tree
 # regardless of whether they were tracked.
@@ -261,6 +272,20 @@ def remove_excludes(stage: Path) -> list[str]:
                 removed.append(str(p.relative_to(stage)))
             except FileNotFoundError:
                 pass
+    return removed
+
+
+def prune_markdown(stage: Path) -> list[str]:
+    """Remove every `*.md` file except those in MARKDOWN_KEEP."""
+    removed: list[str] = []
+    for p in stage.rglob("*.md"):
+        if not p.is_file():
+            continue
+        rel = str(p.relative_to(stage))
+        if rel in MARKDOWN_KEEP:
+            continue
+        p.unlink()
+        removed.append(rel)
     return removed
 
 
@@ -472,6 +497,10 @@ def main(argv: list[str]) -> int:
 
     print("\n[2/6] removing release-excluded files")
     removed = remove_excludes(stage)
+    pruned_md = prune_markdown(stage)
+    if pruned_md:
+        keep = ", ".join(sorted(MARKDOWN_KEEP))
+        print(f"      − {len(pruned_md)} markdown file(s) (kept: {keep})")
     for r in removed[:20]:
         print(f"      − {r}")
     if len(removed) > 20:
