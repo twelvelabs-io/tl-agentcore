@@ -71,6 +71,14 @@ EXCLUDE_PATHS: list[str] = [
     # Only the whitepaper / internal docs reference these, and those are
     # already stripped by the markdown allowlist.
     "docs/diagrams",
+    # Whitepaper-to-docx converter — useless without the whitepaper.
+    "scripts/build-whitepaper-docx.js",
+    # One-shot legacy migration from the SaaS-backed kb_cache layout to
+    # the AWS-native knowledge_stores / assets tables. A fresh deployer
+    # starts on the new schema; this script has no kb_cache to lift.
+    "scripts/migrate_to_aws_native.py",
+    # TypeScript incremental build cache.
+    "ui/tsconfig.tsbuildinfo",
     # Claude Code project instructions.
     "CLAUDE.md",
     ".claude",
