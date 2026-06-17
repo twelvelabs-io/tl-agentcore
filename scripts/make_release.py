@@ -79,6 +79,19 @@ EXCLUDE_PATHS: list[str] = [
     "scripts/migrate_to_aws_native.py",
     # TypeScript incremental build cache.
     "ui/tsconfig.tsbuildinfo",
+    # Operator-specific / one-shot scripts. None of these help a fresh
+    # deployer: backfills act on assets that already exist, wipe targets
+    # specific operator KS ids, seed_demo_kbs hard-codes operator S3
+    # prefixes, transcode_existing_clips is a recovery tool for the
+    # auto-pipeline. sync_default_prompts + make_release are maintainer
+    # tools (this very script is the latter).
+    "scripts/backfill_asset_metadata.py",
+    "scripts/backfill_asset_profiles.py",
+    "scripts/transcode_existing_clips.py",
+    "scripts/wipe_old_kbs.py",
+    "scripts/seed_demo_kbs.py",
+    "scripts/sync_default_prompts.py",
+    "scripts/make_release.py",
     # Claude Code project instructions.
     "CLAUDE.md",
     ".claude",
