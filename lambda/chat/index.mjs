@@ -157,14 +157,11 @@ async function handleAgentCoreAsync(event) {
     // sees per-tool events (tool_call, tool_result) live, instead of
     // waiting for the full agent run to finish.
     let buffer = "";
-    let answerText = "";
-    let eventsEmitted = 0;
     const flush = async () => {
       let idx;
       while ((idx = buffer.indexOf("\n\n")) >= 0) {
         const frame = buffer.slice(0, idx);
         buffer = buffer.slice(idx + 2);
-        // Each SSE frame may contain multiple `data:` lines; concat them.
         const dataLines = frame
           .split("\n")
           .map((l) => l.trim())
@@ -174,14 +171,6 @@ async function handleAgentCoreAsync(event) {
         const json = dataLines.join("");
         let evt;
         try { evt = JSON.parse(json); } catch { continue; }
-        // Track the assembled answer text in case the agent's final
-        // `result` event is missed — we still want a coherent fallback.
-        if (evt?.type === "text_delta" && typeof evt.delta === "string") {
-          answerText += evt.delta;
-        } else if (evt?.type === "result" && typeof evt.text === "string") {
-          answerText = evt.text;
-        }
-        eventsEmitted += 1;
         await post(evt);
       }
     };
@@ -210,19 +199,6 @@ async function handleAgentCoreAsync(event) {
       return { statusCode: 200 };
     }
 
-    // Legacy fallback: if the upstream agent is still the old
-    // non-streaming shape (returns one JSON `{"text": "..."}` blob),
-    // no `data:` frames will have parsed and `eventsEmitted` stays 0.
-    // Treat the remaining buffer as that legacy payload.
-    if (eventsEmitted === 0 && buffer.trim()) {
-      try {
-        const j = JSON.parse(buffer.trim());
-        const t = typeof j?.text === "string" ? j.text : buffer.trim();
-        await post({ type: "text_delta", delta: t });
-      } catch {
-        await post({ type: "text_delta", delta: buffer.trim() });
-      }
-    }
     await post({ type: "done" });
     return { statusCode: 200 };
   } finally {

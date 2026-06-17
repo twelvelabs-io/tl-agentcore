@@ -294,11 +294,13 @@ function BootError({ msg }: { msg: string }) {
   return (
     <div className="border p-8 rounded-[var(--radius-card)]" style={{ borderColor: "var(--color-status-failed)" }}>
       <div className="label" style={{ color: "var(--color-status-failed)" }}>Connection failed</div>
-      <p className="font-display text-2xl mt-2">The lab can't reach api.twelvelabs.io.</p>
+      <p className="font-display text-2xl mt-2">Couldn't reach the deployed backend.</p>
       <p className="mt-4 text-sm" style={{ color: "var(--color-ink-soft)" }}>
-        Check that the proxy is running (<span className="font-mono">npm run proxy</span>) and that{" "}
-        <span className="font-mono">TL_API_KEY</span> is set in the parent project's{" "}
-        <span className="font-mono">.env</span>.
+        The SPA talks to API Gateway (WS + HTTP) through CloudFront, and
+        signs in through Cognito. If you just deployed, double-check
+        that <span className="font-mono">ui/.env.production</span> is
+        filled in from <span className="font-mono">terraform output ui_env</span>{" "}
+        and that the build was synced to the frontend S3 bucket.
       </p>
       <pre className="font-mono text-xs mt-6 p-4 rounded-[var(--radius-card)]" style={{ background: "var(--color-surface)", color: "var(--color-ink-soft)", whiteSpace: "pre-wrap" }}>{msg}</pre>
     </div>
@@ -389,11 +391,10 @@ export function ArchHandle() {
   );
 }
 
-// TwelveLabs logo mark — same pixel-grid silhouette used in the favicon
-// and across the TL platform UIs. Inlined as JSX (rather than imported
-// SVG) so it inherits `currentColor` and we can scale + color it without
-// fetching an extra asset. Original geometry lives in
-// packages/strand/assets/logos/logo-mark.svg in the Lasso repo.
+// TwelveLabs logo mark — pixel-grid silhouette used in the favicon and
+// across the TL platform UIs. Inlined as JSX (rather than imported SVG)
+// so it inherits `currentColor` and we can scale + color it without
+// fetching an extra asset.
 function TLLogoMark({ height = 22, color = "var(--color-ink)" }: { height?: number; color?: string }) {
   // 50.27 × 36 native viewBox; scale to the requested height.
   const w = (50.27 / 36) * height;

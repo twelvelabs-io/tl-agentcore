@@ -425,8 +425,7 @@ def write_release_notes(stage: Path, version: str, head_sha: str, mtime: int) ->
 - `infra/` — Terraform stack (AgentCore Runtime, S3 Vectors, Cognito,
   CloudFront, API Gateways)
 - `ui/` — React + Vite SPA
-- `scripts/` — ingest + seed utilities (vector index, kb_cache, demo KBs)
-- `docs/whitepaper.md`, `docs/deployment.md`, `docs/scope.md`
+- `docs/deployment.md` — operator-facing deployment notes
 
 ## Quick start
 
