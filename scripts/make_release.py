@@ -67,6 +67,10 @@ EXCLUDE_PATHS: list[str] = [
     "ui/test-results",
     ".github",
     "scripts/setup_test_fixtures.sh",
+    # Whitepaper diagrams (mermaid sources + rendered PNGs + viewer HTML).
+    # Only the whitepaper / internal docs reference these, and those are
+    # already stripped by the markdown allowlist.
+    "docs/diagrams",
     # Claude Code project instructions.
     "CLAUDE.md",
     ".claude",
