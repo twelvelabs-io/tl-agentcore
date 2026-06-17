@@ -1,10 +1,10 @@
-# DynamoDB tables for the Jockey-shaped tool surface.
+# DynamoDB tables backing the agent's tool surface.
 #
 # Three tables back the cache + domain-lookup tools in agent/tl_agentcore/agent.py:
 #
 #   kb_cache   — Pre-computed per-knowledge-store profile + per-asset summaries.
-#                Mirrors Jockey's internal Postgres mini-ontology / content-profile
-#                layer. Populated by scripts/ingest-kb-cache.py.
+#                Holds the mini-ontology / content-profile layer.
+#                Populated by scripts/ingest-kb-cache.py.
 #
 #                pk = "ks#<knowledge_store_id>"  sk = "OVERVIEW"
 #                  → asset_count, top_moods[], top_styles[], top_roles[],

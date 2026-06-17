@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Build the kb_cache for a TwelveLabs knowledge store.
 
-Mirrors what Jockey caches in its internal Postgres (mini_ontology +
-content_profile + index_overview). Runs once per KS, writes to the
-DynamoDB table provisioned by infra/dynamodb.tf.
+Populates the per-KS cache (mini_ontology + content_profile +
+index_overview). Runs once per KS, writes to the DynamoDB table
+provisioned by infra/dynamodb.tf.
 
 For each asset:
   1. List all items in the knowledge store.
@@ -53,7 +53,7 @@ ddb = boto3.client("dynamodb", region_name=REGION)
 
 
 # ─── Pegasus prompt ──────────────────────────────────────────────────────────
-# JSON-only output keeps the parser trivial and matches Jockey's
+# JSON-only output keeps the parser trivial and matches the
 # get_content_profile shape (per-asset summary digest). The `key_entities`
 # field is the foundation of Phase 2's entity-graph layer — Pegasus names
 # the recognizable subjects per clip, and aggregate_entities() reduces them

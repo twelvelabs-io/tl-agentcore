@@ -89,7 +89,7 @@ data "aws_iam_policy_document" "runtime_perms" {
     actions   = ["s3:GetObject"]
     resources = ["${aws_s3_bucket.clips.arn}/*"]
   }
-  # Read the Jockey-shaped DDB tables. kb_cache is Query-driven (single-
+  # Read the cache DDB tables. kb_cache is Query-driven (single-
   # table pk/sk); rights and audiences are GetItem + Scan. Write access
   # belongs to the operator (ingest-kb-cache.py + seed-*.py), not the
   # runtime — the runtime only reads.

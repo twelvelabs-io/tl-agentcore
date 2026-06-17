@@ -74,7 +74,7 @@ output "clips_bucket_name" {
 # ─── DDB tables (knowledge graph + KS/asset registry) ────────────────────
 output "kb_cache_table" {
   value       = aws_dynamodb_table.kb_cache.name
-  description = "Single-table cache mirroring Jockey's mini-ontology / content-profile layer. Populate via scripts/ingest-kb-cache.py."
+  description = "Single-table cache for the mini-ontology / content-profile layer. Populate via scripts/ingest-kb-cache.py."
 }
 
 output "rights_table" {

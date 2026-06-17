@@ -80,7 +80,7 @@ PEGASUS_BEDROCK_MODEL_ID = os.environ.get(
 CLIPS_BUCKET_NAME = os.environ.get("CLIPS_BUCKET_NAME")
 CLIPS_BUCKET_OWNER = os.environ.get("CLIPS_BUCKET_OWNER")  # account id
 
-# DDB tables (Jockey-shaped cache + domain lookups).
+# DDB tables (cache + domain lookups).
 KB_CACHE_TABLE = os.environ.get("KB_CACHE_TABLE")
 RIGHTS_TABLE = os.environ.get("RIGHTS_TABLE")
 AUDIENCES_TABLE = os.environ.get("AUDIENCES_TABLE")
@@ -451,7 +451,7 @@ def vector_search(
 
 
 # ═══ Tier 1: Cache (DDB · sub-10ms) ═══════════════════════════════════════════
-# Mirrors Jockey's internal Postgres mini-ontology / content-profile layer.
+# Caches the mini-ontology / content-profile layer used by the agent.
 # Populated by scripts/ingest-kb-cache.py — one Pegasus call per asset at
 # ingestion time, then sub-10ms reads here at every query turn.
 
@@ -545,8 +545,8 @@ def list_kb_assets(
 def list_kb_events(knowledge_store_id: str, limit: int = 20) -> list:
     """List multi-clip events clustered from the KB at ingest time. An event
     is a set of ≥2 clips that are both visually similar AND share at least
-    one mood tag or primary subject — the AWS-native analog of Jockey's
-    `event_grouping` Postgres layer. **Use this when the user asks "what
+    one mood tag or primary subject. Cross-asset events live in a single
+    DDB Query. **Use this when the user asks "what
     happens across multiple clips" or "find the sequence about X"** — it's
     sub-10ms (DDB Query) and surfaces cross-asset structure the per-asset
     list_kb_assets tool can't.
@@ -777,11 +777,11 @@ def _pegasus_bedrock(asset_id: str, prompt: str, temperature: float) -> str:
 
 
 # ═══ Phase 3: Image-grounded entity recognition via Titan + S3 Vectors ════════
-# AWS-native analog of Jockey's entity_reid path. Real Jockey:
+# Image-grounded entity_reid path. Reference (Postgres-backed) flow:
 #   gdino → DeepSORT → Re-ID features → Postgres entity registry (index time)
 #   entity_id lookup → asset_ids (query time, O(1))
 #
-# Our equivalent on AWS-managed services:
+# This implementation, on AWS-managed services:
 #   Bedrock Titan Multimodal Embeddings (amazon.titan-embed-image-v1)
 #     → S3 Vectors index (entity_thumbs) (index time)
 #   Reference image → Titan embed → S3 Vectors ANN → asset_ids (query time, O(log N))

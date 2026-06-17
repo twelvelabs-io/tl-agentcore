@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Cluster a knowledge store's assets into multi-clip events.
 
-Phase 4 (offline event-grouping pipeline). Mirrors Jockey's event_grouping
-Postgres layer — given the per-asset Pegasus profiles and Marengo
+Phase 4 (offline event-grouping pipeline). Given the per-asset Pegasus
+profiles and Marengo
 visual embeddings, single-link-cluster assets that:
 
   * are visually similar (Marengo cosine ≥ threshold), and
