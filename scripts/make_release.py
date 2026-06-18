@@ -85,6 +85,11 @@ EXCLUDE_PATHS: list[str] = [
     "agent/expert-models/gdino/scripts",
     # All-e2e Makefile — every target points at the stripped e2e suite.
     "Makefile",
+    # Maintainer-side quality eval harness. Compares entity-reID pipelines
+    # against ground-truth labels. Has its own README, dependencies, and
+    # AWS-side data (Rekognition collection, shadow S3 Vectors index)
+    # that a deployer doesn't need.
+    "eval",
     # Claude Code project instructions.
     "CLAUDE.md",
     ".claude",

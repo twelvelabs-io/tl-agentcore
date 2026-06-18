@@ -1,0 +1,26 @@
+# Example ground-truth file for the entity-reID quality eval.
+# Copy to `ground_truth.yaml`, edit, label by hand or with `bin/label.py`.
+
+ks_id: ks_069f98e3-74f8-70a6-8000-a22091ec13b2
+
+# Each query: a short human label, the path to the query thumbnail, and
+# the asset_ids in the KS that contain the target. Aim for 15-25 queries
+# with a deliberate mix of difficulty modes.
+queries:
+  - id: q01
+    label: "Jane Doe — clear frontal headshot, indoor lighting"
+    query_image: queries/01_jane_doe.jpg
+    contains:
+      - 04ee98e3deadbeef12345678
+      - 1a2b3c4d5e6f7890abcdef01
+
+  - id: q02
+    label: "John Smith — profile, outdoor stadium"
+    query_image: queries/02_john_smith.jpg
+    contains:
+      - 99aabbccddeeff1122334455
+
+  - id: q03
+    label: "Crowd scene — target is partially occluded"
+    query_image: queries/03_occluded.jpg
+    contains: []  # negative-control: no expected matches
