@@ -45,6 +45,12 @@ data "aws_iam_policy_document" "kb_admin_perms" {
       "${aws_s3_bucket.clips.arn}/*",
     ]
   }
+  statement {
+    sid     = "DeleteRekognitionCollectionOnKsDelete"
+    actions = ["rekognition:DeleteCollection"]
+    # Per-KS collection_id pattern: <fqname>-ks-<ks_id>
+    resources = ["arn:aws:rekognition:${var.region}:${data.aws_caller_identity.current.account_id}:collection/${local.fqname}-ks-*"]
+  }
 }
 
 resource "aws_iam_role_policy" "kb_admin" {
@@ -74,6 +80,7 @@ resource "aws_lambda_function" "kb_admin" {
       PLAYBACK_BASE_URL    = "https://${aws_cloudfront_distribution.frontend.domain_name}"
       COGNITO_USER_POOL_ID = aws_cognito_user_pool.this.id
       COGNITO_CLIENT_ID    = aws_cognito_user_pool_client.spa.id
+      STACK_FQNAME         = local.fqname
     }
   }
 }

@@ -23,11 +23,14 @@
 
 import { DynamoDBClient, QueryCommand, ScanCommand, GetItemCommand, PutItemCommand, DeleteItemCommand, UpdateItemCommand } from "@aws-sdk/client-dynamodb";
 import { S3Client, DeleteObjectCommand, ListObjectsV2Command, DeleteObjectsCommand } from "@aws-sdk/client-s3";
+import { RekognitionClient, DeleteCollectionCommand as DeleteRekognitionCollectionCommand } from "@aws-sdk/client-rekognition";
 import { randomUUID } from "node:crypto";
 import { authorize } from "./auth.mjs";
 
 const ddb = new DynamoDBClient({});
 const s3  = new S3Client({});
+const rek = new RekognitionClient({});
+const STACK_FQNAME = process.env.STACK_FQNAME;
 
 const KS_TABLE     = process.env.KS_TABLE;
 const ASSETS_TABLE = process.env.ASSETS_TABLE;
@@ -136,6 +139,21 @@ async function deleteKnowledgeStore(ksIdParam) {
     TableName: KS_TABLE,
     Key: { ks_id: { S: ksIdParam } },
   }));
+  // Best-effort Rekognition collection cleanup. The per-KS collection
+  // (`<fqname>-ks-<ks_id>`) is lazy-created by the index_faces lambda,
+  // so a KS that never had any faces indexed will hit
+  // ResourceNotFoundException — that's fine.
+  if (STACK_FQNAME) {
+    try {
+      await rek.send(new DeleteRekognitionCollectionCommand({
+        CollectionId: `${STACK_FQNAME}-ks-${ksIdParam}`,
+      }));
+    } catch (e) {
+      if (e?.name !== "ResourceNotFoundException") {
+        console.warn(`rekognition DeleteCollection failed for ${ksIdParam}:`, e?.message || e);
+      }
+    }
+  }
   return json(200, { deleted: ksIdParam });
 }
 
