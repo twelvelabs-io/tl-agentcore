@@ -83,6 +83,11 @@ resource "aws_bedrockagentcore_agent_runtime" "this" {
     KB_CACHE_TABLE  = aws_dynamodb_table.kb_cache.name
     RIGHTS_TABLE    = aws_dynamodb_table.rights.name
     AUDIENCES_TABLE = aws_dynamodb_table.audiences.name
+    # v0.4 hybrid entity-reID: per-KS Rekognition collection id is
+    # derived as `<STACK_FQNAME>-ks-<ks_id>`. Marengo image-embed
+    # async-invoke needs the bucket owner for s3Location.bucketOwner.
+    STACK_FQNAME   = local.fqname
+    AWS_ACCOUNT_ID = data.aws_caller_identity.current.account_id
   }
 }
 

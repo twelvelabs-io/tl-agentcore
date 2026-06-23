@@ -53,6 +53,8 @@ MODEL_ID = os.environ.get(
     "us.anthropic.claude-sonnet-4-6",
 )
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+STACK_FQNAME = os.environ.get("STACK_FQNAME")
+AWS_ACCOUNT_ID = os.environ.get("AWS_ACCOUNT_ID")
 
 # S3 Vectors (AWS-native retrieval). Three modality indexes + optional
 # legacy single-index layout. See vector_search docstring for layout rules.
@@ -88,6 +90,8 @@ AUDIENCES_TABLE = os.environ.get("AUDIENCES_TABLE")
 _s3v = boto3.client("s3vectors", region_name=AWS_REGION)
 _bedrock_rt = boto3.client("bedrock-runtime", region_name=AWS_REGION)
 _ddb = boto3.client("dynamodb", region_name=AWS_REGION)
+_rek = boto3.client("rekognition", region_name=AWS_REGION)
+_s3 = boto3.client("s3", region_name=AWS_REGION)
 
 
 def _secs_to_hhmmss(s) -> str:
@@ -928,6 +932,255 @@ def find_entity_by_image(
     }
 
 
+# ═══ Phase 3 v0.4: Rekognition + Marengo hybrid image search ═════════════════
+# Replaces the bespoke gdino+TAO+Titan pipeline. Per the 4-way eval in
+# docs/v0.4-plan.md:
+#
+#   - Rekognition Faces is best-in-class on face/identity precision
+#     (MRR 0.77 on trailers vs 0.50 for Titan).
+#   - Marengo image-query against the already-populated `clips` index is
+#     a free fallback for non-face content (helmets, profile shots,
+#     non-celebrities) where Rekognition returns nothing.
+#
+# The reference image is passed in as s3:// or https://; the agent
+# resolves it via _fetch_image_bytes() then routes through both
+# backends as needed.
+
+import hashlib as _hashlib  # noqa: E402
+import time as _time  # noqa: E402
+import uuid as _uuid  # noqa: E402
+
+MARENGO_FOUNDATION_ARN = (
+    f"arn:aws:bedrock:{AWS_REGION}::foundation-model/twelvelabs.marengo-embed-3-0-v1:0"
+)
+MARENGO_ASYNC_TIMEOUT_S = 60
+MARENGO_MIN_DIM = 128  # Marengo rejects images smaller than 128x128
+MARENGO_EMBED_CACHE_PREFIX = "embed-cache/marengo/"
+
+
+def _ensure_min_dim(image_bytes: bytes) -> bytes:
+    """Upscale (preserving aspect) if either dimension is below
+    MARENGO_MIN_DIM. Marengo rejects sub-128 inputs outright."""
+    try:
+        from PIL import Image  # type: ignore
+    except ImportError:
+        return image_bytes  # caller will get a Marengo error if it's too small
+    import io
+    im = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    w, h = im.size
+    if w >= MARENGO_MIN_DIM and h >= MARENGO_MIN_DIM:
+        return image_bytes
+    scale = max(MARENGO_MIN_DIM / w, MARENGO_MIN_DIM / h)
+    new_size = (max(MARENGO_MIN_DIM, int(w * scale)), max(MARENGO_MIN_DIM, int(h * scale)))
+    resized = im.resize(new_size, Image.LANCZOS)
+    buf = io.BytesIO()
+    resized.save(buf, format="JPEG", quality=90)
+    return buf.getvalue()
+
+
+def _marengo_embed_image_cached(image_bytes: bytes) -> list[float]:
+    """sha256-cached Marengo image embed via StartAsyncInvoke. Cache key
+    is `embed-cache/marengo/<sha256>.json` in the clips bucket. Cache
+    miss path: upload image → StartAsyncInvoke → poll → parse → put
+    cache. Repeat queries on the same reference image return in <50ms."""
+    if not (CLIPS_BUCKET_NAME and AWS_ACCOUNT_ID):
+        raise RuntimeError("CLIPS_BUCKET_NAME + AWS_ACCOUNT_ID required for Marengo embed")
+
+    sha = _hashlib.sha256(image_bytes).hexdigest()
+    cache_key = f"{MARENGO_EMBED_CACHE_PREFIX}{sha}.json"
+    try:
+        cached = _s3.get_object(Bucket=CLIPS_BUCKET_NAME, Key=cache_key)
+        payload = json.loads(cached["Body"].read())
+        v = payload.get("embedding") or []
+        if v:
+            return v
+    except _s3.exceptions.NoSuchKey:
+        pass
+    except Exception:
+        pass  # treat any cache-read error as a miss
+
+    upscaled = _ensure_min_dim(image_bytes)
+    in_key = f"async-in-eval/{_uuid.uuid4().hex}.jpg"
+    _s3.put_object(
+        Bucket=CLIPS_BUCKET_NAME, Key=in_key,
+        Body=upscaled, ContentType="image/jpeg",
+    )
+
+    body = {
+        "inputType": "image",
+        "image": {
+            "mediaSource": {
+                "s3Location": {
+                    "uri": f"s3://{CLIPS_BUCKET_NAME}/{in_key}",
+                    "bucketOwner": AWS_ACCOUNT_ID,
+                }
+            }
+        },
+    }
+    resp = _bedrock_rt.start_async_invoke(
+        modelId=MARENGO_FOUNDATION_ARN,
+        modelInput=body,
+        outputDataConfig={"s3OutputDataConfig": {"s3Uri": f"s3://{CLIPS_BUCKET_NAME}/async-out-eval/"}},
+    )
+    arn = resp["invocationArn"]
+    t0 = _time.time()
+    while _time.time() - t0 < MARENGO_ASYNC_TIMEOUT_S:
+        s = _bedrock_rt.get_async_invoke(invocationArn=arn)
+        status = s["status"]
+        if status == "Completed":
+            out_uri = s["outputDataConfig"]["s3OutputDataConfig"]["s3Uri"]
+            bucket = out_uri.split("/")[2]
+            prefix = "/".join(out_uri.split("/")[3:])
+            listing = _s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
+            for obj in listing.get("Contents", []):
+                if obj["Key"].endswith("output.json"):
+                    data = json.loads(_s3.get_object(Bucket=bucket, Key=obj["Key"])["Body"].read())
+                    seg = (data.get("data") or [{}])[0]
+                    v = seg.get("embedding") or []
+                    if not v:
+                        raise RuntimeError(f"Marengo returned no embedding: {json.dumps(data)[:200]}")
+                    # Persist to cache for future invocations.
+                    try:
+                        _s3.put_object(
+                            Bucket=CLIPS_BUCKET_NAME, Key=cache_key,
+                            Body=json.dumps({"embedding": v, "model": "marengo-3-0", "dim": len(v)}).encode(),
+                            ContentType="application/json",
+                        )
+                    except Exception:
+                        pass  # cache write failure shouldn't break the query
+                    return v
+            raise RuntimeError(f"Marengo output.json missing under {out_uri}")
+        if status == "Failed":
+            raise RuntimeError(f"Marengo async failed: {s.get('failureMessage')}")
+        _time.sleep(2)
+    raise TimeoutError(f"Marengo async invocation exceeded {MARENGO_ASYNC_TIMEOUT_S}s")
+
+
+@tool
+def find_by_image(
+    knowledge_store_id: str,
+    reference_url: str,
+    k: int = 10,
+) -> dict:
+    """**Find clips containing a person or scene from a reference image.**
+    The v0.4 hybrid: Rekognition Faces first (fast, identity-precise),
+    then Marengo visual-similarity fallback for queries Rekognition
+    can't answer (profile shots, helmets, non-celebrities, non-face
+    entities). Both backends are filtered to `knowledge_store_id`.
+
+    Use this when the producer pastes a thumbnail and asks "find more
+    clips with this person" or "find clips that look like this."
+
+    Args:
+        knowledge_store_id: ks_xxxxxxxx — selects the per-KS
+            Rekognition collection (`<STACK_FQNAME>-ks-<ks_id>`) and
+            filters the Marengo fallback's S3 Vectors query.
+        reference_url: s3://bucket/key OR https://... pointing at the
+            reference image (jpeg/png).
+        k: how many distinct asset matches to return (default 10).
+
+    Returns:
+        {matches: [{asset_id, score, source}], rekognition_hits,
+        marengo_hits, fallback_used}. `source` is "rekognition" or
+        "marengo" so the caller can show which backend produced each
+        match. Rekognition hits rank first (score = Similarity/100),
+        Marengo hits follow (score = 1 - cosine_distance).
+    """
+    if not knowledge_store_id or not reference_url:
+        return {"error": "knowledge_store_id and reference_url required"}
+    if not STACK_FQNAME:
+        return {"error": "STACK_FQNAME not configured"}
+
+    try:
+        img = _fetch_image_bytes(reference_url)
+    except Exception as e:
+        return {"error": f"image fetch failed: {e}"}
+
+    # --- 1. Rekognition Faces (primary) ---
+    collection_id = f"{STACK_FQNAME}-ks-{knowledge_store_id}"
+    rek_matches: list[dict] = []
+    rek_error: Optional[str] = None
+    try:
+        resp = _rek.search_faces_by_image(
+            CollectionId=collection_id,
+            Image={"Bytes": img},
+            FaceMatchThreshold=80.0,
+            MaxFaces=max(k * 4, 20),
+            QualityFilter="AUTO",
+        )
+        seen: set[str] = set()
+        for m in resp.get("FaceMatches") or []:
+            aid = (m.get("Face") or {}).get("ExternalImageId")
+            if not aid or aid in seen:
+                continue
+            seen.add(aid)
+            rek_matches.append({
+                "asset_id": aid,
+                "score":    round(float(m["Similarity"]) / 100.0, 4),
+                "source":   "rekognition",
+            })
+    except _rek.exceptions.InvalidParameterException:
+        # No face detected in the reference image — defer to Marengo.
+        rek_error = "no_face_in_reference"
+    except _rek.exceptions.ResourceNotFoundException:
+        # Per-KS collection doesn't exist yet (KS never had any frames
+        # IndexFaces'd, e.g. brand-new deploy). Fall through to Marengo.
+        rek_error = "collection_missing"
+    except Exception as e:
+        rek_error = f"rekognition: {e}"
+
+    # --- 2. Marengo fallback if we don't have enough good matches ---
+    marengo_matches: list[dict] = []
+    fallback_used = False
+    if len(rek_matches) < k:
+        fallback_used = True
+        seen = {m["asset_id"] for m in rek_matches}
+        try:
+            qvec = _marengo_embed_image_cached(img)
+            over_k = max(k * 8, 40)
+            mresp = _s3v.query_vectors(
+                vectorBucketName=VECTOR_BUCKET_NAME,
+                indexName=VECTOR_INDEX_NAME,
+                topK=over_k,
+                queryVector={"float32": qvec},
+                filter={"$and": [
+                    {"knowledge_store_id": knowledge_store_id},
+                    {"embedding_option":   "visual"},
+                ]},
+                returnMetadata=True,
+                returnDistance=True,
+            )
+            # Dedupe by asset_id, keep best score per asset.
+            best: dict[str, float] = {}
+            for v in mresp.get("vectors") or []:
+                aid = (v.get("metadata") or {}).get("asset_id")
+                if not aid or aid in seen:
+                    continue
+                sim = 1.0 - float(v.get("distance") or 0.0)
+                if sim > best.get(aid, -1):
+                    best[aid] = sim
+            for aid, s in sorted(best.items(), key=lambda kv: kv[1], reverse=True):
+                marengo_matches.append({"asset_id": aid, "score": round(s, 4), "source": "marengo"})
+        except Exception as e:
+            return {
+                "matches":          rek_matches[:k],
+                "rekognition_hits": len(rek_matches),
+                "marengo_hits":     0,
+                "fallback_used":    True,
+                "fallback_error":   f"marengo: {e}",
+                **({"rekognition_error": rek_error} if rek_error else {}),
+            }
+
+    combined = (rek_matches + marengo_matches)[:k]
+    return {
+        "matches":          combined,
+        "rekognition_hits": len(rek_matches),
+        "marengo_hits":     len(marengo_matches),
+        "fallback_used":    fallback_used,
+        **({"rekognition_error": rek_error} if rek_error else {}),
+    }
+
+
 # ═══ Ancillary: Domain DDB lookups ════════════════════════════════════════════
 
 @tool
@@ -1029,7 +1282,7 @@ The active `knowledge_store_id` is provided in the user message metadata as `[ks
 ## Tier 0 — AWS-native retrieval (S3 Vectors · 200–400 ms)
 
 1. **vector_search(query_text, knowledge_store_id?, k=5)** — multi-modal retrieval over S3 Vectors. Embeds the query via Bedrock-hosted Marengo and runs three parallel ANN queries (visual / audio / transcription), softmax-fused. Returns asset_id + HH:MM:SS timecodes + per-modality score breakdown.
-2. **find_entity_by_image(knowledge_store_id, reference_url, k?)** — image-grounded recognition. Given a reference image URL (s3:// or https://), runs Bedrock Titan Multimodal Embeddings on it and does an S3 Vectors ANN against a per-KS entity-thumbnail (or entity-patches) index populated at ingest. Returns ranked asset_ids. Use when the user provides or names an image they want to match.
+2. **find_by_image(knowledge_store_id, reference_url, k?)** — image-grounded recognition. Hybrid: Rekognition Faces against a per-KS face collection first (best on identity / faces — MRR 0.77 on our eval), then Marengo image-similarity against the clips index as a fallback for queries Rekognition can't answer (profile shots, helmets, non-face entities). Returns ranked asset_ids tagged by source ("rekognition" vs "marengo"). Use when the user provides or names an image they want to match.
 
 ## Tier 1 — Cache (DynamoDB · sub-10 ms). **Always start here on a known knowledge_store_id.**
 
