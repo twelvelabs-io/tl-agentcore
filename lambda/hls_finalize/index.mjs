@@ -6,11 +6,14 @@
 
 import { DynamoDBClient, UpdateItemCommand } from "@aws-sdk/client-dynamodb";
 import { S3Client, HeadObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
 
 const ddb = new DynamoDBClient({});
 const s3  = new S3Client({});
+const lam = new LambdaClient({});
 const ASSETS_TABLE = process.env.ASSETS_TABLE;
 const CLIPS_BUCKET = process.env.CLIPS_BUCKET;
+const INDEX_FACES_LAMBDA = process.env.INDEX_FACES_LAMBDA;
 
 // Read the HLS master manifest and sum its #EXTINF segment durations.
 // Works for both single-rendition (our case — one .m3u8 is itself the
@@ -106,8 +109,9 @@ export const handler = async (event) => {
       exprValues[":tu"] = { S: thumbUrl };
     }
 
+    let ksId = null;
     try {
-      await ddb.send(new UpdateItemCommand({
+      const resp = await ddb.send(new UpdateItemCommand({
         TableName: ASSETS_TABLE,
         Key: { asset_id: { S: assetId } },
         UpdateExpression: "SET " + setParts.join(", "),
@@ -117,10 +121,32 @@ export const handler = async (event) => {
           "#du": "duration",
         },
         ExpressionAttributeValues: exprValues,
+        ReturnValues: "ALL_NEW",
       }));
+      ksId = resp?.Attributes?.knowledge_store_id?.S || null;
       console.log(`hls_finalize: ${assetId} → ready (size=${size}, duration=${duration}, thumb=${thumbIdx})`);
     } catch (e) {
       console.warn(`hls_finalize: update failed for ${assetId}`, e);
+    }
+
+    // Fire IndexFaces async — the index_faces lambda samples N frames
+    // from hls/<asset>/, IndexFaces them into the per-KS Rekognition
+    // collection. InvocationType=Event so we don't block hls_finalize
+    // on the ~5-30 s Rekognition pass. Best-effort; an Invoke failure
+    // here doesn't reverse the status flip.
+    if (INDEX_FACES_LAMBDA && ksId) {
+      try {
+        await lam.send(new InvokeCommand({
+          FunctionName:   INDEX_FACES_LAMBDA,
+          InvocationType: "Event",
+          Payload:        Buffer.from(JSON.stringify({ ks_id: ksId, asset_id: assetId })),
+        }));
+        console.log(`hls_finalize: queued index_faces for ${assetId} (ks=${ksId})`);
+      } catch (e) {
+        console.warn(`hls_finalize: index_faces invoke failed for ${assetId}`, e);
+      }
+    } else if (!ksId) {
+      console.warn(`hls_finalize: ks_id missing for ${assetId}; skipping index_faces`);
     }
   }
   return { ok: true };

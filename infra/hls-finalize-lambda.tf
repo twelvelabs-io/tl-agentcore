@@ -34,6 +34,12 @@ data "aws_iam_policy_document" "hls_finalize_perms" {
     actions   = ["s3:GetObject"]
     resources = ["${aws_s3_bucket.clips.arn}/*"]
   }
+  # Fire-and-forget invoke of index_faces (v0.4 hybrid auto-trigger).
+  statement {
+    sid       = "InvokeIndexFaces"
+    actions   = ["lambda:InvokeFunction"]
+    resources = [aws_lambda_function.index_faces.arn]
+  }
 }
 
 resource "aws_iam_role_policy" "hls_finalize" {
@@ -53,9 +59,10 @@ resource "aws_lambda_function" "hls_finalize" {
 
   environment {
     variables = {
-      ASSETS_TABLE      = aws_dynamodb_table.assets.name
-      CLIPS_BUCKET      = aws_s3_bucket.clips.bucket
-      PLAYBACK_BASE_URL = "https://${aws_cloudfront_distribution.frontend.domain_name}"
+      ASSETS_TABLE        = aws_dynamodb_table.assets.name
+      CLIPS_BUCKET        = aws_s3_bucket.clips.bucket
+      PLAYBACK_BASE_URL   = "https://${aws_cloudfront_distribution.frontend.domain_name}"
+      INDEX_FACES_LAMBDA  = aws_lambda_function.index_faces.function_name
     }
   }
 }
