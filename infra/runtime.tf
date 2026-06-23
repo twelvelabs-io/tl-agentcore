@@ -69,11 +69,10 @@ resource "aws_bedrockagentcore_agent_runtime" "this" {
   }
 
   environment_variables = {
-    AGENT_MODEL_ID             = var.agent_model_id
-    VECTOR_BUCKET_NAME         = aws_s3vectors_vector_bucket.clips.vector_bucket_name
-    VECTOR_INDEX_NAME          = aws_s3vectors_index.clips.index_name
-    VECTOR_INDEX_ENTITY_THUMBS = aws_s3vectors_index.entity_thumbs.index_name
-    AWS_REGION                 = var.region
+    AGENT_MODEL_ID     = var.agent_model_id
+    VECTOR_BUCKET_NAME = aws_s3vectors_vector_bucket.clips.vector_bucket_name
+    VECTOR_INDEX_NAME  = aws_s3vectors_index.clips.index_name
+    AWS_REGION         = var.region
     # Pegasus runs on Bedrock against mirrored S3 bytes. No TwelveLabs
     # SaaS involvement on the live path.
     PEGASUS_BEDROCK_MODEL_ID = var.pegasus_bedrock_model_id

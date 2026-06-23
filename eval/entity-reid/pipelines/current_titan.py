@@ -32,12 +32,14 @@ class CurrentTitanPipeline(Pipeline):
     ):
         self.region = region or os.environ.get("AWS_REGION", "us-east-1")
         self.bucket = bucket or os.environ["VECTOR_BUCKET_NAME"]
-        self.index = index or os.environ.get("VECTOR_INDEX_NAME", "entity-thumbs")
+        # Default to entity-patches (the index populated by the production
+        # gdino+TAO+Titan Step Function). Override with TITAN_INDEX_NAME.
+        self.index = index or os.environ.get("TITAN_INDEX_NAME", "entity-patches")
         self.ks_id = ks_id or os.environ.get("KS_ID")
         self._br = boto3.client("bedrock-runtime", region_name=self.region)
         self._s3v = boto3.client("s3vectors", region_name=self.region)
 
-    def ingest(self, ks_id: str, max_assets: int | None = None) -> None:
+    def ingest(self, ks_id: str, max_assets: int | None = None, asset_ids: list[str] | None = None) -> None:
         # No-op — the production entity_reid Step Function populates this
         # index outside the eval tooling.
         return

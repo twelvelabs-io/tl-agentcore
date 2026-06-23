@@ -61,24 +61,27 @@ class RekognitionFacesPipeline(Pipeline):
                 yield item["asset_id"]["S"]
 
     def _frame_keys(self, asset_id: str) -> list[str]:
-        """List the MediaConvert frame captures for an asset, sample
-        evenly across the timeline up to frames_per_asset."""
-        prefix = f"frames/{asset_id}/"
+        """List MediaConvert thumb captures and sample evenly across the
+        timeline. Layout: hls/<asset_id>/<asset_id>_thumb.NNNNNNN.jpg."""
+        prefix = f"hls/{asset_id}/"
         resp = self._s3.list_objects_v2(Bucket=self.clips_bucket, Prefix=prefix)
-        keys = sorted(o["Key"] for o in resp.get("Contents", []) if o["Key"].lower().endswith((".jpg", ".jpeg", ".png")))
+        keys = sorted(
+            o["Key"] for o in resp.get("Contents", [])
+            if "_thumb." in o["Key"] and o["Key"].lower().endswith((".jpg", ".jpeg", ".png"))
+        )
         if len(keys) <= self.frames_per_asset:
             return keys
-        # Even spacing across the timeline.
         step = len(keys) / self.frames_per_asset
         return [keys[int(i * step)] for i in range(self.frames_per_asset)]
 
-    def ingest(self, ks_id: str, max_assets: int | None = None) -> None:
+    def ingest(self, ks_id: str, max_assets: int | None = None, asset_ids: list[str] | None = None) -> None:
         if not (self.clips_bucket and self.assets_table):
             raise RuntimeError("CLIPS_BUCKET_NAME + ASSETS_TABLE env vars are required")
         self._ensure_collection()
         n_assets = 0
-        for asset_id in self._iter_assets(ks_id):
-            if max_assets is not None and n_assets >= max_assets:
+        source = iter(asset_ids) if asset_ids is not None else self._iter_assets(ks_id)
+        for asset_id in source:
+            if asset_ids is None and max_assets is not None and n_assets >= max_assets:
                 break
             keys = self._frame_keys(asset_id)
             for key in keys:

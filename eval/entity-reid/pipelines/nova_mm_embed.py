@@ -59,9 +59,9 @@ class NovaMMEmbedPipeline(Pipeline):
                 dimension=self.dim,
                 dataType="float32",
                 distanceMetric="cosine",
-                # Filterable metadata fields — kept tight to stay within
-                # the S3 Vectors per-vector cap.
-                metadataConfiguration={"nonFilterableMetadataKeys": []},
+                # frame_key isn't useful as a filter — mark non-filterable
+                # so it doesn't count against the per-vector filterable cap.
+                metadataConfiguration={"nonFilterableMetadataKeys": ["frame_key"]},
             )
         except ClientError as e:
             if e.response["Error"]["Code"] != "ConflictException":
@@ -79,9 +79,13 @@ class NovaMMEmbedPipeline(Pipeline):
                 yield item["asset_id"]["S"]
 
     def _frame_keys(self, asset_id: str) -> list[str]:
-        prefix = f"frames/{asset_id}/"
+        """Layout: hls/<asset_id>/<asset_id>_thumb.NNNNNNN.jpg."""
+        prefix = f"hls/{asset_id}/"
         resp = self._s3.list_objects_v2(Bucket=self.clips_bucket, Prefix=prefix)
-        keys = sorted(o["Key"] for o in resp.get("Contents", []) if o["Key"].lower().endswith((".jpg", ".jpeg", ".png")))
+        keys = sorted(
+            o["Key"] for o in resp.get("Contents", [])
+            if "_thumb." in o["Key"] and o["Key"].lower().endswith((".jpg", ".jpeg", ".png"))
+        )
         if len(keys) <= self.frames_per_asset:
             return keys
         step = len(keys) / self.frames_per_asset
@@ -112,13 +116,14 @@ class NovaMMEmbedPipeline(Pipeline):
         payload = json.loads(resp["body"].read())
         return payload["embeddings"][0]["embedding"]
 
-    def ingest(self, ks_id: str, max_assets: int | None = None) -> None:
+    def ingest(self, ks_id: str, max_assets: int | None = None, asset_ids: list[str] | None = None) -> None:
         if not (self.clips_bucket and self.assets_table):
             raise RuntimeError("CLIPS_BUCKET_NAME + ASSETS_TABLE env vars are required")
         self._ensure_index()
         n_assets = 0
-        for asset_id in self._iter_assets(ks_id):
-            if max_assets is not None and n_assets >= max_assets:
+        source = iter(asset_ids) if asset_ids is not None else self._iter_assets(ks_id)
+        for asset_id in source:
+            if asset_ids is None and max_assets is not None and n_assets >= max_assets:
                 break
             vectors = []
             for i, key in enumerate(self._frame_keys(asset_id)):

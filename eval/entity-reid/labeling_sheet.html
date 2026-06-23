@@ -1,0 +1,226 @@
+<!doctype html><meta charset="utf-8">
+<title>entity-reID labeling sheet</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 1100px; margin: 24px auto; }
+  .row { display: flex; gap: 20px; padding: 12px; border-bottom: 1px solid #eee; }
+  .row img { width: 140px; height: 140px; object-fit: cover; border-radius: 6px; background: #f7f7f7; }
+  .meta h3 { margin: 0 0 4px 0; }
+  .qid { color: #888; font-size: 12px; margin-bottom: 8px; }
+  details ul { font-family: ui-monospace, monospace; font-size: 12px; color: #555; }
+  summary { cursor: pointer; user-select: none; }
+  h1 { font-size: 20px; }
+  p.caveat { background: #fff8c5; padding: 10px 14px; border-left: 4px solid #c0a800; font-size: 13px; }
+</style>
+<h1>entity-reID labeling sheet</h1>
+<p class="caveat">Suggested by Rekognition Celebrity Detection. Spot-check the face thumb + the asset list
+for each row, then edit <code>ground_truth.suggested.yaml</code> directly: remove rows where the suggested
+identity is wrong, prune/extend the <code>contains:</code> list where the auto-label missed or over-fired.
+Save as <code>ground_truth.yaml</code> when done.</p>
+
+        <div class="row">
+          <img src="queries/jim_carrey.jpg" alt="q_jim_carrey" />
+          <div class="meta">
+            <h3>Jim Carrey — Rekognition Celebrity Detection (conf 99.9, source asset 346d916e)</h3>
+            <div class="qid">id: <code>q_jim_carrey</code></div>
+            <details>
+              <summary>3 suggested asset matches</summary>
+              <ul>  <li>02dc34402f014247bfbea9fa</li>
+  <li>02f52225133a45e08ba489f3</li>
+  <li>346d916e36b742a396accf26</li></ul>
+            </details>
+          </div>
+        </div>
+        <div class="row">
+          <img src="queries/chris_evans.jpg" alt="q_chris_evans" />
+          <div class="meta">
+            <h3>Chris Evans — Rekognition Celebrity Detection (conf 98.3, source asset 22c714d0)</h3>
+            <div class="qid">id: <code>q_chris_evans</code></div>
+            <details>
+              <summary>3 suggested asset matches</summary>
+              <ul>  <li>1c8e0ea61819431cbc11d45a</li>
+  <li>22c714d04bd64f66897d02c7</li>
+  <li>319a208f6b4a4f98bb2264fb</li></ul>
+            </details>
+          </div>
+        </div>
+        <div class="row">
+          <img src="queries/mark_wahlberg.jpg" alt="q_mark_wahlberg" />
+          <div class="meta">
+            <h3>Mark Wahlberg — Rekognition Celebrity Detection (conf 100.0, source asset 1f213302)</h3>
+            <div class="qid">id: <code>q_mark_wahlberg</code></div>
+            <details>
+              <summary>3 suggested asset matches</summary>
+              <ul>  <li>1f213302fe7a4259b220b441</li>
+  <li>344b945abff544c4a74349e9</li>
+  <li>3697f7731ab14792881b3729</li></ul>
+            </details>
+          </div>
+        </div>
+        <div class="row">
+          <img src="queries/pedro_pascal.jpg" alt="q_pedro_pascal" />
+          <div class="meta">
+            <h3>Pedro Pascal — Rekognition Celebrity Detection (conf 100.0, source asset 00b6091b)</h3>
+            <div class="qid">id: <code>q_pedro_pascal</code></div>
+            <details>
+              <summary>2 suggested asset matches</summary>
+              <ul>  <li>00b6091b3db74e809ae56d27</li>
+  <li>17c648e964a44b78ae3fbdc3</li></ul>
+            </details>
+          </div>
+        </div>
+        <div class="row">
+          <img src="queries/russell_crowe.jpg" alt="q_russell_crowe" />
+          <div class="meta">
+            <h3>Russell Crowe — Rekognition Celebrity Detection (conf 100.0, source asset 04c54e5a)</h3>
+            <div class="qid">id: <code>q_russell_crowe</code></div>
+            <details>
+              <summary>2 suggested asset matches</summary>
+              <ul>  <li>04c54e5a8e1c406f839861fa</li>
+  <li>319a208f6b4a4f98bb2264fb</li></ul>
+            </details>
+          </div>
+        </div>
+        <div class="row">
+          <img src="queries/amanda_seyfried.jpg" alt="q_amanda_seyfried" />
+          <div class="meta">
+            <h3>Amanda Seyfried — Rekognition Celebrity Detection (conf 100.0, source asset 04c54e5a)</h3>
+            <div class="qid">id: <code>q_amanda_seyfried</code></div>
+            <details>
+              <summary>2 suggested asset matches</summary>
+              <ul>  <li>04c54e5a8e1c406f839861fa</li>
+  <li>2c668af8c63f497cbebaf50c</li></ul>
+            </details>
+          </div>
+        </div>
+        <div class="row">
+          <img src="queries/jesse_eisenberg.jpg" alt="q_jesse_eisenberg" />
+          <div class="meta">
+            <h3>Jesse Eisenberg — Rekognition Celebrity Detection (conf 100.0, source asset 323a11db)</h3>
+            <div class="qid">id: <code>q_jesse_eisenberg</code></div>
+            <details>
+              <summary>2 suggested asset matches</summary>
+              <ul>  <li>05d22cbdfadf47e6a9711950</li>
+  <li>323a11db5d3b404294c962f6</li></ul>
+            </details>
+          </div>
+        </div>
+        <div class="row">
+          <img src="queries/cameron_diaz.jpg" alt="q_cameron_diaz" />
+          <div class="meta">
+            <h3>Cameron Diaz — Rekognition Celebrity Detection (conf 100.0, source asset 156a846c)</h3>
+            <div class="qid">id: <code>q_cameron_diaz</code></div>
+            <details>
+              <summary>2 suggested asset matches</summary>
+              <ul>  <li>122c04aa09a843febe581b61</li>
+  <li>156a846c6db74ca18c0f41cd</li></ul>
+            </details>
+          </div>
+        </div>
+        <div class="row">
+          <img src="queries/guy_pearce.jpg" alt="q_guy_pearce" />
+          <div class="meta">
+            <h3>Guy Pearce — Rekognition Celebrity Detection (conf 100.0, source asset 13ae664e)</h3>
+            <div class="qid">id: <code>q_guy_pearce</code></div>
+            <details>
+              <summary>2 suggested asset matches</summary>
+              <ul>  <li>13ae664ebc984ff4b463633b</li>
+  <li>319a208f6b4a4f98bb2264fb</li></ul>
+            </details>
+          </div>
+        </div>
+        <div class="row">
+          <img src="queries/dave_franco.jpg" alt="q_dave_franco" />
+          <div class="meta">
+            <h3>Dave Franco — Rekognition Celebrity Detection (conf 100.0, source asset 323a11db)</h3>
+            <div class="qid">id: <code>q_dave_franco</code></div>
+            <details>
+              <summary>2 suggested asset matches</summary>
+              <ul>  <li>1ac9c4078e1c434abddf25b8</li>
+  <li>323a11db5d3b404294c962f6</li></ul>
+            </details>
+          </div>
+        </div>
+        <div class="row">
+          <img src="queries/lucy_liu.jpg" alt="q_lucy_liu" />
+          <div class="meta">
+            <h3>Lucy Liu — Rekognition Celebrity Detection (conf 100.0, source asset 1ea2e0d3)</h3>
+            <div class="qid">id: <code>q_lucy_liu</code></div>
+            <details>
+              <summary>2 suggested asset matches</summary>
+              <ul>  <li>1ea2e0d3b1664ac8b8a0ac31</li>
+  <li>1eabd142443944c4aaab9b33</li></ul>
+            </details>
+          </div>
+        </div>
+        <div class="row">
+          <img src="queries/ana_de_armas.jpg" alt="q_ana_de_armas" />
+          <div class="meta">
+            <h3>Ana de Armas — Rekognition Celebrity Detection (conf 99.9, source asset 3612cb49)</h3>
+            <div class="qid">id: <code>q_ana_de_armas</code></div>
+            <details>
+              <summary>2 suggested asset matches</summary>
+              <ul>  <li>22c714d04bd64f66897d02c7</li>
+  <li>3612cb49f074403f946540b4</li></ul>
+            </details>
+          </div>
+        </div>
+        <div class="row">
+          <img src="queries/will_smith.jpg" alt="q_will_smith" />
+          <div class="meta">
+            <h3>Will Smith — Rekognition Celebrity Detection (conf 100.0, source asset 23fa4da7)</h3>
+            <div class="qid">id: <code>q_will_smith</code></div>
+            <details>
+              <summary>2 suggested asset matches</summary>
+              <ul>  <li>23fa4da700744139a20b7fd4</li>
+  <li>252a175559ba460eaa6efefb</li></ul>
+            </details>
+          </div>
+        </div>
+        <div class="row">
+          <img src="queries/hugh_jackman.jpg" alt="q_hugh_jackman" />
+          <div class="meta">
+            <h3>Hugh Jackman — Rekognition Celebrity Detection (conf 99.9, source asset 2789def7)</h3>
+            <div class="qid">id: <code>q_hugh_jackman</code></div>
+            <details>
+              <summary>2 suggested asset matches</summary>
+              <ul>  <li>2789def792814c53a8a39818</li>
+  <li>34907b784b84433aae41464b</li></ul>
+            </details>
+          </div>
+        </div>
+        <div class="row">
+          <img src="queries/emma_stone.jpg" alt="q_emma_stone" />
+          <div class="meta">
+            <h3>Emma Stone — Rekognition Celebrity Detection (conf 100.0, source asset 29ce1b4f)</h3>
+            <div class="qid">id: <code>q_emma_stone</code></div>
+            <details>
+              <summary>2 suggested asset matches</summary>
+              <ul>  <li>29ce1b4fde0147c8a4af346c</li>
+  <li>3ae84b4068d648c5a635aad9</li></ul>
+            </details>
+          </div>
+        </div>
+        <div class="row">
+          <img src="queries/boyd_holbrook.jpg" alt="q_boyd_holbrook" />
+          <div class="meta">
+            <h3>Boyd Holbrook — Rekognition Celebrity Detection (conf 100.0, source asset 3b755a7f)</h3>
+            <div class="qid">id: <code>q_boyd_holbrook</code></div>
+            <details>
+              <summary>2 suggested asset matches</summary>
+              <ul>  <li>29d549dd07a44dfc8b32a35c</li>
+  <li>3b755a7f6e004771897dae3d</li></ul>
+            </details>
+          </div>
+        </div>
+        <div class="row">
+          <img src="queries/lewis_tan.jpg" alt="q_lewis_tan" />
+          <div class="meta">
+            <h3>Lewis Tan — Rekognition Celebrity Detection (conf 100.0, source asset 30763497)</h3>
+            <div class="qid">id: <code>q_lewis_tan</code></div>
+            <details>
+              <summary>2 suggested asset matches</summary>
+              <ul>  <li>3076349747af41e4991e2c3f</li>
+  <li>3b985f7e44ce4022944af98b</li></ul>
+            </details>
+          </div>
+        </div>

@@ -27,13 +27,22 @@ def main() -> int:
     ap.add_argument("--ks", required=True, help="knowledge_store_id")
     ap.add_argument("--max-assets", type=int, default=None,
                     help="cap for smoke-testing on a subset before a full run")
+    ap.add_argument("--assets-file", type=Path, default=None,
+                    help="text file with one asset_id per line — index exactly these "
+                         "(overrides --max-assets). Used to keep the 3 pipelines on "
+                         "the same corpus subset.")
     args = ap.parse_args()
+
+    asset_ids = None
+    if args.assets_file:
+        asset_ids = [ln.strip() for ln in args.assets_file.read_text().splitlines() if ln.strip()]
+        print(f"▌ using explicit asset list: {len(asset_ids)} ids from {args.assets_file}")
 
     p = get(args.pipeline)
     print(f"▌ ingesting {args.ks} via {p.name}")
-    if args.max_assets:
+    if args.max_assets and asset_ids is None:
         print(f"  (capped at {args.max_assets} assets)")
-    p.ingest(args.ks, max_assets=args.max_assets)
+    p.ingest(args.ks, max_assets=args.max_assets, asset_ids=asset_ids)
     return 0
 
 

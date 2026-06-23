@@ -9,7 +9,7 @@ through Bedrock Marketplace under the customer's IAM.
   Tier 0 — Native AWS retrieval (S3 Vectors)
     vector_search                  — Bedrock Marengo embed → S3 Vectors ANN,
                                      three modality indexes, softmax fusion.
-    find_entity_by_image           — Bedrock Titan multimodal embed →
+    find_by_image                  — Rekognition Faces (primary) + Marengo
                                      S3 Vectors entity-thumbs / entity-patches.
 
   Tier 1 — Cache (DynamoDB · sub-10ms)
@@ -780,52 +780,6 @@ def _pegasus_bedrock(asset_id: str, prompt: str, temperature: float) -> str:
     return payload.get("message") or "(no text returned)"
 
 
-# ═══ Phase 3: Image-grounded entity recognition via Titan + S3 Vectors ════════
-# Image-grounded entity_reid path. Reference (Postgres-backed) flow:
-#   gdino → DeepSORT → Re-ID features → Postgres entity registry (index time)
-#   entity_id lookup → asset_ids (query time, O(1))
-#
-# This implementation, on AWS-managed services:
-#   Bedrock Titan Multimodal Embeddings (amazon.titan-embed-image-v1)
-#     → S3 Vectors index (entity_thumbs) (index time)
-#   Reference image → Titan embed → S3 Vectors ANN → asset_ids (query time, O(log N))
-#
-# Trade-off vs. proper Re-ID: no detection step. We embed whole frames,
-# not detected face/object patches. Strong for "find clips that look like
-# this scene"; weaker for "find this specific person" where a face crop
-# would dominate the embedding. The detection layer is what proper Phase
-# 3 (SageMaker gdino + DeepSORT) would add later.
-
-TITAN_IMAGE_EMBED_MODEL_ID = os.environ.get(
-    "TITAN_IMAGE_EMBED_MODEL_ID",
-    "amazon.titan-embed-image-v1",
-)
-VECTOR_INDEX_ENTITY_THUMBS = os.environ.get("VECTOR_INDEX_ENTITY_THUMBS", "entity-thumbs")
-
-
-def _titan_embed_image(image_bytes: bytes) -> list[float]:
-    """Embed a single image via Bedrock Titan Multimodal Embeddings.
-    Returns a 1024-dim float vector in the same space as the indexed
-    entity-thumbnail embeddings."""
-    import base64
-    b64 = base64.b64encode(image_bytes).decode("ascii")
-    body = {
-        "inputImage": b64,
-        "embeddingConfig": {"outputEmbeddingLength": 1024},
-    }
-    resp = _bedrock_rt.invoke_model(
-        modelId=TITAN_IMAGE_EMBED_MODEL_ID,
-        contentType="application/json",
-        accept="application/json",
-        body=json.dumps(body),
-    )
-    payload = json.loads(resp["body"].read())
-    v = payload.get("embedding") or []
-    if not v:
-        raise RuntimeError(f"Titan returned no embedding: {json.dumps(payload)[:300]}")
-    return v
-
-
 def _fetch_image_bytes(url: str) -> bytes:
     """Resolve a reference image URL to bytes. Accepts:
       - s3://bucket/key
@@ -845,91 +799,6 @@ def _fetch_image_bytes(url: str) -> bytes:
         r.raise_for_status()
         return r.content
     raise ValueError(f"unsupported reference_url scheme: {url[:40]}")
-
-
-@tool
-def find_entity_by_image(
-    knowledge_store_id: str,
-    reference_url: str,
-    k: int = 10,
-) -> dict:
-    """**AWS-native Re-ID-style search**. Given a reference image (s3:// or
-    https://), find clips in the knowledge store whose representative
-    frames are most visually similar. Uses Bedrock Titan Multimodal
-    Embeddings + S3 Vectors — single image embed call plus an O(log N)
-    ANN lookup against the per-KS entity-thumbnail / entity-patches index.
-
-    Requires the index to have been populated at ingest time by
-    `scripts/ingest_entity_thumbs.py` or the entity Re-ID Step Functions
-    pipeline (see `infra/step-functions.tf`).
-
-    Args:
-        knowledge_store_id: ks_xxxxxxxx — used as a metadata filter on
-            the S3 Vectors query.
-        reference_url: s3://bucket/key OR https://... pointing at the
-            reference image (jpeg/png). A frame crop of the entity to find.
-        k: how many distinct asset matches to return (default 10).
-
-    Returns:
-        {matches: [{asset_id, score, best_frame_pct, frame_url?}], scanned,
-        index_name}. Sorted by score descending. score is 1 - distance
-        (cosine), higher = more visually similar.
-    """
-    if not knowledge_store_id or not reference_url:
-        return {"error": "knowledge_store_id and reference_url required"}
-    if not VECTOR_BUCKET_NAME:
-        return {"error": "VECTOR_BUCKET_NAME not configured"}
-
-    try:
-        img = _fetch_image_bytes(reference_url)
-    except Exception as e:
-        return {"error": f"image fetch failed: {e}"}
-    try:
-        qvec = _titan_embed_image(img)
-    except Exception as e:
-        return {"error": f"Titan embed failed: {e}"}
-
-    # Over-fetch so that grouping-by-asset still yields k distinct assets
-    # even when multiple frames of the same clip score highly.
-    over_k = max(k * 4, 20)
-    try:
-        resp = _s3v.query_vectors(
-            vectorBucketName=VECTOR_BUCKET_NAME,
-            indexName=VECTOR_INDEX_ENTITY_THUMBS,
-            topK=over_k,
-            queryVector={"float32": qvec},
-            filter={"knowledge_store_id": knowledge_store_id},
-            returnDistance=True,
-            returnMetadata=True,
-        )
-    except Exception as e:
-        return {"error": f"S3 Vectors query failed: {e}"}
-
-    # Group hits by asset_id, keep the best-scoring frame per asset.
-    best_by_asset: dict[str, dict] = {}
-    for v in resp.get("vectors") or []:
-        md = v.get("metadata") or {}
-        aid = md.get("asset_id")
-        if not aid:
-            continue
-        sim = 1.0 - float(v.get("distance") or 0.0)
-        entry = best_by_asset.get(aid)
-        if entry is None or sim > entry["score"]:
-            best_by_asset[aid] = {
-                "asset_id":       aid,
-                "score":          sim,
-                "best_frame_pct": md.get("frame_pct"),
-                "frame_s3_uri":   md.get("frame_s3_uri"),
-            }
-
-    matches = sorted(best_by_asset.values(), key=lambda r: r["score"], reverse=True)[:k]
-    for m in matches:
-        m["score"] = round(m["score"], 4)
-    return {
-        "matches":    matches,
-        "scanned":    len(resp.get("vectors") or []),
-        "index_name": VECTOR_INDEX_ENTITY_THUMBS,
-    }
 
 
 # ═══ Phase 3 v0.4: Rekognition + Marengo hybrid image search ═════════════════
@@ -1497,7 +1366,7 @@ def build_agent(access_token: Optional[str] = None) -> tuple[Agent, str]:
         tools=[
             # Tier 0 — AWS-native retrieval
             vector_search,
-            find_entity_by_image,
+            find_by_image,
             # Tier 1 — Cache (kb_cache: per-asset profiles + cross-asset entity graph + event clusters)
             get_kb_overview, list_kb_assets, lookup_asset_profile,
             find_cached_entity_appearances, list_cached_entities,

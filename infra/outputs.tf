@@ -30,40 +30,9 @@ output "vector_index_name" {
   description = "S3 Vectors index name (single index per bucket; KS scoping is done via metadata filter)."
 }
 
-output "vector_index_entity_thumbs" {
-  value       = aws_s3vectors_index.entity_thumbs.index_name
-  description = "S3 Vectors index for per-clip Titan-embedded thumbnails. Populate via scripts/ingest_entity_thumbs.py."
-}
-
-output "vector_index_entity_patches" {
-  value       = aws_s3vectors_index.entity_patches.index_name
-  description = "S3 Vectors index for Titan-embedded detected entity crops (gdino+DeepSORT output). Populated by the entity-Re-ID Step Functions pipeline."
-}
-
-# ─── Phase 3-proper: gdino + SageMaker Processing infrastructure ─────────
-output "gdino_ecr_url" {
-  value       = aws_ecr_repository.gdino.repository_url
-  description = "ECR repo for the GDINO Triton expert-model container. Build via the CodeBuild project (operator uploads source zip to s3://<clips>/codebuild-src/gdino.zip and starts the project)."
-}
-
-output "sagemaker_endpoint_role_arn" {
-  value       = aws_iam_role.sagemaker_endpoint.arn
-  description = "Execution role the gdino async endpoint assumes."
-}
-
-output "gdino_endpoint_name" {
-  value       = aws_sagemaker_endpoint.gdino.name
-  description = "Long-lived SageMaker Async endpoint serving gdino. Autoscales 0..2 ml.g5.xlarge instances."
-}
-
-output "codebuild_gdino_project_name" {
-  value       = aws_codebuild_project.gdino.name
-  description = "CodeBuild project that builds the gdino image. Start via `aws codebuild start-build --project-name <this>`."
-}
-
-output "entity_reid_state_machine_arn" {
-  value       = aws_sfn_state_machine.entity_reid.arn
-  description = "Step Functions state machine that runs the entity-Re-ID ingest pipeline for one knowledge_store. Start via scripts/run_entity_reid_pipeline.py."
+output "rekognition_collection_prefix" {
+  value       = "${local.fqname}-ks-"
+  description = "Per-KS Rekognition Faces collection id is <this>+<ks_id>. Lazy-created on first IndexFaces call by the index_faces lambda."
 }
 
 output "clips_bucket_name" {

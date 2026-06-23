@@ -1,0 +1,124 @@
+ks_id: ks_demo01-trailers-hollywood
+queries:
+- id: q_jim_carrey
+  label: "Jim Carrey \u2014 Rekognition Celebrity Detection (conf 99.9, source asset\
+    \ 346d916e)"
+  query_image: queries/jim_carrey.jpg
+  contains:
+  - 02dc34402f014247bfbea9fa
+  - 02f52225133a45e08ba489f3
+  - 346d916e36b742a396accf26
+- id: q_chris_evans
+  label: "Chris Evans \u2014 Rekognition Celebrity Detection (conf 98.3, source asset\
+    \ 22c714d0)"
+  query_image: queries/chris_evans.jpg
+  contains:
+  - 1c8e0ea61819431cbc11d45a
+  - 22c714d04bd64f66897d02c7
+  - 319a208f6b4a4f98bb2264fb
+- id: q_mark_wahlberg
+  label: "Mark Wahlberg \u2014 Rekognition Celebrity Detection (conf 100.0, source\
+    \ asset 1f213302)"
+  query_image: queries/mark_wahlberg.jpg
+  contains:
+  - 1f213302fe7a4259b220b441
+  - 344b945abff544c4a74349e9
+  - 3697f7731ab14792881b3729
+- id: q_pedro_pascal
+  label: "Pedro Pascal \u2014 Rekognition Celebrity Detection (conf 100.0, source\
+    \ asset 00b6091b)"
+  query_image: queries/pedro_pascal.jpg
+  contains:
+  - 00b6091b3db74e809ae56d27
+  - 17c648e964a44b78ae3fbdc3
+- id: q_russell_crowe
+  label: "Russell Crowe \u2014 Rekognition Celebrity Detection (conf 100.0, source\
+    \ asset 04c54e5a)"
+  query_image: queries/russell_crowe.jpg
+  contains:
+  - 04c54e5a8e1c406f839861fa
+  - 319a208f6b4a4f98bb2264fb
+- id: q_amanda_seyfried
+  label: "Amanda Seyfried \u2014 Rekognition Celebrity Detection (conf 100.0, source\
+    \ asset 04c54e5a)"
+  query_image: queries/amanda_seyfried.jpg
+  contains:
+  - 04c54e5a8e1c406f839861fa
+  - 2c668af8c63f497cbebaf50c
+- id: q_jesse_eisenberg
+  label: "Jesse Eisenberg \u2014 Rekognition Celebrity Detection (conf 100.0, source\
+    \ asset 323a11db)"
+  query_image: queries/jesse_eisenberg.jpg
+  contains:
+  - 05d22cbdfadf47e6a9711950
+  - 323a11db5d3b404294c962f6
+- id: q_cameron_diaz
+  label: "Cameron Diaz \u2014 Rekognition Celebrity Detection (conf 100.0, source\
+    \ asset 156a846c)"
+  query_image: queries/cameron_diaz.jpg
+  contains:
+  - 122c04aa09a843febe581b61
+  - 156a846c6db74ca18c0f41cd
+- id: q_guy_pearce
+  label: "Guy Pearce \u2014 Rekognition Celebrity Detection (conf 100.0, source asset\
+    \ 13ae664e)"
+  query_image: queries/guy_pearce.jpg
+  contains:
+  - 13ae664ebc984ff4b463633b
+  - 319a208f6b4a4f98bb2264fb
+- id: q_dave_franco
+  label: "Dave Franco \u2014 Rekognition Celebrity Detection (conf 100.0, source asset\
+    \ 323a11db)"
+  query_image: queries/dave_franco.jpg
+  contains:
+  - 1ac9c4078e1c434abddf25b8
+  - 323a11db5d3b404294c962f6
+- id: q_lucy_liu
+  label: "Lucy Liu \u2014 Rekognition Celebrity Detection (conf 100.0, source asset\
+    \ 1ea2e0d3)"
+  query_image: queries/lucy_liu.jpg
+  contains:
+  - 1ea2e0d3b1664ac8b8a0ac31
+  - 1eabd142443944c4aaab9b33
+- id: q_ana_de_armas
+  label: "Ana de Armas \u2014 Rekognition Celebrity Detection (conf 99.9, source asset\
+    \ 3612cb49)"
+  query_image: queries/ana_de_armas.jpg
+  contains:
+  - 22c714d04bd64f66897d02c7
+  - 3612cb49f074403f946540b4
+- id: q_will_smith
+  label: "Will Smith \u2014 Rekognition Celebrity Detection (conf 100.0, source asset\
+    \ 23fa4da7)"
+  query_image: queries/will_smith.jpg
+  contains:
+  - 23fa4da700744139a20b7fd4
+  - 252a175559ba460eaa6efefb
+- id: q_hugh_jackman
+  label: "Hugh Jackman \u2014 Rekognition Celebrity Detection (conf 99.9, source asset\
+    \ 2789def7)"
+  query_image: queries/hugh_jackman.jpg
+  contains:
+  - 2789def792814c53a8a39818
+  - 34907b784b84433aae41464b
+- id: q_emma_stone
+  label: "Emma Stone \u2014 Rekognition Celebrity Detection (conf 100.0, source asset\
+    \ 29ce1b4f)"
+  query_image: queries/emma_stone.jpg
+  contains:
+  - 29ce1b4fde0147c8a4af346c
+  - 3ae84b4068d648c5a635aad9
+- id: q_boyd_holbrook
+  label: "Boyd Holbrook \u2014 Rekognition Celebrity Detection (conf 100.0, source\
+    \ asset 3b755a7f)"
+  query_image: queries/boyd_holbrook.jpg
+  contains:
+  - 29d549dd07a44dfc8b32a35c
+  - 3b755a7f6e004771897dae3d
+- id: q_lewis_tan
+  label: "Lewis Tan \u2014 Rekognition Celebrity Detection (conf 100.0, source asset\
+    \ 30763497)"
+  query_image: queries/lewis_tan.jpg
+  contains:
+  - 3076349747af41e4991e2c3f
+  - 3b985f7e44ce4022944af98b

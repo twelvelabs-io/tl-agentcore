@@ -362,7 +362,7 @@ function Suggestions({ onPick }: { onPick: (s: string) => void }) {
         cache (<span className="font-mono">get_kb_overview</span>,{" "}
         <span className="font-mono">list_kb_assets</span>) through S3 Vectors{" "}
         (<span className="font-mono">vector_search</span>,{" "}
-        <span className="font-mono">find_entity_by_image</span>) to Bedrock
+        <span className="font-mono">find_by_image</span>) to Bedrock
         Pegasus (<span className="font-mono">pegasus_analyze</span>) for
         on-demand take-notes. Every model is invoked via Bedrock; no
         TwelveLabs SaaS dependency. Open the right rail (▣) to watch each

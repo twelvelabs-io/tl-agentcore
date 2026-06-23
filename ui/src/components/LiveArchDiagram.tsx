@@ -5,14 +5,14 @@
 //     Browser → CloudFront → HTTP API → { kb_admin · kb_graph · upload+embed λs }
 //     AgentCore Runtime → 3 tool lanes:
 //       Tier 1 — kb_cache tools → DynamoDB (kb_cache + knowledge_stores + assets + rights + audiences)
-//       Tier 0 — vector_search / find_entity_by_image → S3 Vectors
+//       Tier 0 — vector_search / find_by_image → S3 Vectors + Rekognition Faces (hybrid)
 //       Tier 2 — pegasus_analyze → Bedrock Pegasus → S3 clips bucket
 //
 //   ── OFFLINE / INGEST FLOW (always visible, never highlights) ──
 //     Browser upload → MediaConvert HLS → S3 hls/ bundle
-//     Operator CLI scripts → Bedrock (Marengo · Pegasus · Titan · Claude) → DDB + S3 Vectors
-//     entity-Re-ID Step Functions → SageMaker Async (gdino) → S3 Vectors entity-patches
-//     CodeBuild → ECR (gdino + agent images)
+//     Auto-pipeline (S3-triggered) → Bedrock (Marengo · Pegasus · Claude) → DDB + S3 Vectors
+//     hls_finalize → index_faces λ → Rekognition Faces collection (per-KS)
+//     CodeBuild → ECR (agent image)
 //
 // No TwelveLabs SaaS calls anywhere — every model runs through Bedrock
 // Marketplace under the customer's IAM.
@@ -127,27 +127,27 @@ export function LiveArchDiagram({
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-w-5xl mx-auto">
           <div className="flex flex-col items-center gap-2">
-            <ArchCardInner compact muted state="idle" tag="operator" title="Operator CLI" sub="scripts/*.py" />
+            <ArchCardInner compact muted state="idle" tag="S3-triggered" title="Auto-pipeline" sub="every upload fires the lambda chain" />
             <DownTick muted />
             <div className="w-full grid grid-cols-1 gap-2">
-              <ArchCardInner compact muted state="idle" title="upload + MediaConvert"  sub="Browser PUT → S3 → HLS bundle in s3://clips/hls/" />
-              <ArchCardInner compact muted state="idle" title="ingest_kb_cache"        sub="→ Pegasus → DDB profiles + entities" />
-              <ArchCardInner compact muted state="idle" title="ingest_vectors"         sub="→ Marengo (Bedrock async) → S3 Vectors" />
-              <ArchCardInner compact muted state="idle" title="ingest_entity_thumbs"   sub="→ ffmpeg + Titan → S3 Vectors entity-thumbs" />
-              <ArchCardInner compact muted state="idle" title="build_event_groups"     sub="→ Bedrock Claude → DDB EVENT#" />
-              <ArchCardInner compact muted state="idle" title="seed_rights · seed_audiences" sub="→ DDB" />
+              <ArchCardInner compact muted state="idle" title="upload + MediaConvert"   sub="Browser PUT → S3 → HLS bundle in s3://clips/hls/" />
+              <ArchCardInner compact muted state="idle" title="embed_clip_start λ"      sub="Marengo StartAsyncInvoke + MediaConvert CreateJob" />
+              <ArchCardInner compact muted state="idle" title="embed_clip_finalize λ"   sub="Marengo output.json → S3 Vectors clips index" />
+              <ArchCardInner compact muted state="idle" title="hls_finalize λ"          sub="flip asset→ready, fire-and-forget index_faces" />
+              <ArchCardInner compact muted state="idle" title="asset_profile λ"         sub="Pegasus → DDB ASSET# profile + entities" />
+              <ArchCardInner compact muted state="idle" tag="4h cron" title="ks_rollup λ" sub="aggregate ASSET# → OVERVIEW/ENTITY#/EVENT#" />
             </div>
           </div>
 
           <div className="flex flex-col items-center gap-2">
-            <ArchCardInner compact muted state="idle" tag="orchestrator" title="Step Functions · entity-Re-ID" sub="ListAssets → Map(InvokeAsync · EmbedPatches)" />
+            <ArchCardInner compact muted state="idle" tag="managed CV" title="Rekognition + Marengo hybrid" sub="primary face match · visual fallback" />
             <DownTick muted />
             <div className="w-full grid grid-cols-1 gap-2">
-              <ArchCardInner compact muted state="idle" tag="autoscale 0..2" title="SageMaker Async Endpoint" sub="gdino (HF) · DeepSORT · Re-ID Triton · ml.g5.xlarge" />
-              <ArchCardInner compact muted state="idle" title="entity_reid_invoke_async λ" sub="presign · InvokeEndpointAsync · poll S3" />
-              <ArchCardInner compact muted state="idle" title="entity_reid_embed_patches λ" sub="patch_b64 → Titan → S3 Vectors entity-patches" />
-              <ArchCardInner compact muted state="idle" tag="image build" title="CodeBuild · ECR" sub="builds + pushes gdino + agent images" />
-              <ArchCardInner compact muted state="idle" tag="Bedrock" title="Foundation models" sub="Marengo · Pegasus · Titan · Claude (haiku · sonnet)" />
+              <ArchCardInner compact muted state="idle" tag="auto" title="index_faces λ" sub="4 frames/asset → Rekognition IndexFaces" />
+              <ArchCardInner compact muted state="idle" title="Rekognition Faces" sub="per-KS collection · SearchFacesByImage at query" />
+              <ArchCardInner compact muted state="idle" title="Marengo image-embed" sub="Bedrock StartAsyncInvoke (image) · sha256-cached" />
+              <ArchCardInner compact muted state="idle" tag="image build" title="CodeBuild · ECR" sub="builds + pushes agent image" />
+              <ArchCardInner compact muted state="idle" tag="Bedrock" title="Foundation models" sub="Marengo · Pegasus · Claude (haiku · sonnet)" />
             </div>
           </div>
         </div>
@@ -336,7 +336,7 @@ export function nodeForEvent(ev: { type: string; tool?: string }): NodeId | null
   if (ev.type === "session") return "runtime";
   if (ev.type === "tool_call") {
     const t = ev.tool || "";
-    if (t === "vector_search" || t === "find_entity_by_image") return "vector_search_tool";
+    if (t === "vector_search" || t === "find_by_image") return "vector_search_tool";
     if (t === "pegasus_analyze") return "pegasus_tool";
     if (CACHE_TOOLS.has(t)) return "cache_tool";
     return "runtime";
@@ -350,7 +350,7 @@ export function nodeForEvent(ev: { type: string; tool?: string }): NodeId | null
 
 export function downstreamFor(toolName: string | undefined): NodeId | null {
   if (!toolName) return null;
-  if (toolName === "vector_search" || toolName === "find_entity_by_image") return "s3vectors_index";
+  if (toolName === "vector_search" || toolName === "find_by_image") return "s3vectors_index";
   if (toolName === "pegasus_analyze") return "clips_bucket";
   if (CACHE_TOOLS.has(toolName))      return "ddb_cache";
   return null;

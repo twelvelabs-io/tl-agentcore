@@ -56,12 +56,12 @@ const TOOL_BRANCHES: {
   },
   {
     group: "vector",
-    label: "vector_search · find_entity_by_image",
+    label: "vector_search · find_by_image",
     tool: "vector_search_tool",
     store: "s3vectors_index",
-    storeLabel: "S3 Vectors",
-    storeSub: "clips · entity-thumbs · entity-patches",
-    hint: "Bedrock Marengo / Titan → ANN over per-clip + per-patch embeddings",
+    storeLabel: "S3 Vectors + Rekognition",
+    storeSub: "clips index · per-KS face collections",
+    hint: "Bedrock Marengo (ANN) + Rekognition Faces (hybrid for image-grounded queries)",
     tier: "tier 0 · retrieval",
   },
   {
@@ -76,23 +76,21 @@ const TOOL_BRANCHES: {
   },
 ];
 
-// ── Offline section: scripts + Step Functions + SageMaker Async (muted) ──
+// ── Offline section: auto-pipeline lambdas + ingest helpers (muted) ──
 const OFFLINE_INGEST: { title: string; sub: string }[] = [
   { title: "upload + MediaConvert",  sub: "Browser PUT → S3 → HLS bundle in s3://clips/hls/" },
-  { title: "ingest_kb_cache",        sub: "→ Pegasus → DDB profiles + entities" },
-  { title: "ingest_vectors",         sub: "→ Marengo (Bedrock async) → S3 Vectors" },
-  { title: "ingest_entity_thumbs",   sub: "→ ffmpeg + Titan → S3 Vectors entity-thumbs" },
-  { title: "build_event_groups",     sub: "→ Bedrock Claude → DDB EVENT#" },
-  { title: "seed_rights · seed_audiences", sub: "→ DDB rights / audiences" },
+  { title: "embed_clip_start λ",     sub: "Marengo StartAsyncInvoke + MediaConvert CreateJob" },
+  { title: "embed_clip_finalize λ",  sub: "Marengo output.json → S3 Vectors clips index" },
+  { title: "hls_finalize λ",         sub: "flip asset→ready, fire-and-forget index_faces" },
+  { title: "asset_profile λ",        sub: "Pegasus → DDB ASSET# profile + entities" },
+  { title: "ks_rollup λ (4h cron)",  sub: "aggregate ASSET# → OVERVIEW/ENTITY#/EVENT#" },
 ];
 
 const OFFLINE_REID: { title: string; sub: string; tag?: string }[] = [
-  { title: "Step Functions",            sub: "ListAssets → Map(InvokeAsync · EmbedPatches)", tag: "orchestrator" },
-  { title: "SageMaker Async Endpoint",  sub: "gdino (HF) · DeepSORT · Re-ID Triton · ml.g5.xlarge", tag: "autoscale 0..2" },
-  { title: "entity_reid_invoke_async λ", sub: "presign · InvokeEndpointAsync · poll S3" },
-  { title: "entity_reid_embed_patches λ", sub: "patch_b64 → Titan → S3 Vectors entity-patches" },
-  { title: "CodeBuild · ECR",            sub: "builds + pushes gdino + agent images", tag: "image build" },
-  { title: "Bedrock foundation models",  sub: "Marengo · Pegasus · Titan · Claude (haiku · sonnet)", tag: "inference" },
+  { title: "index_faces λ",          sub: "auto-trigger after HLS ready: 4 frames/asset → Rekognition IndexFaces", tag: "auto" },
+  { title: "Rekognition Faces",      sub: "per-KS collection · SearchFacesByImage at query time", tag: "managed CV" },
+  { title: "Marengo image-embed",    sub: "Bedrock StartAsyncInvoke (image) · sha256-cached", tag: "fallback" },
+  { title: "Bedrock foundation models",  sub: "Marengo · Pegasus · Claude (haiku · sonnet)", tag: "inference" },
 ];
 
 // ─── Component ──────────────────────────────────────────────────────────────

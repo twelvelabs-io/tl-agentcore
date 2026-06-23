@@ -16,4 +16,5 @@ REGISTRY = {
     "current_titan": "current_titan",
     "rekognition_faces": "rekognition_faces",
     "nova_mm_embed": "nova_mm_embed",
+    "marengo_clips": "marengo_clips",
 }

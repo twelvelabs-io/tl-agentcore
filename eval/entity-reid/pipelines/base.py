@@ -10,10 +10,16 @@ class Pipeline(abc.ABC):
     name: str
 
     @abc.abstractmethod
-    def ingest(self, ks_id: str, max_assets: int | None = None) -> None:
-        """One-shot indexing for the corpus. No-op for pipelines that
-        share an already-populated index with production (e.g. the
-        current Titan pipeline reads the live entity-patches index)."""
+    def ingest(
+        self,
+        ks_id: str,
+        max_assets: int | None = None,
+        asset_ids: list[str] | None = None,
+    ) -> None:
+        """One-shot indexing. If `asset_ids` is given, index exactly that
+        list (ignores `max_assets`). Otherwise iterate the whole KS up to
+        `max_assets`. No-op for pipelines that share an already-populated
+        index with production (e.g. current_titan)."""
 
     @abc.abstractmethod
     def query(self, query_image_bytes: bytes, k: int = 50) -> list[tuple[str, float]]:

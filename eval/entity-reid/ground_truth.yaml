@@ -1,0 +1,32 @@
+ks_id: ks_demo01-trailers-hollywood
+queries:
+- id: q_bc9525a3
+  label: "self-retrieval: 12_Years_a_Slave__76203.mp4 \u2014 frame #20 query, indexed\
+    \ frames 0/5/10/15"
+  query_image: queries/bc9525a3_frame20.jpg
+  contains:
+  - bc9525a361ff4be494a74b92
+- id: q_d53732f3
+  label: "self-retrieval: 101_Dalmatians__11674.mp4 \u2014 frame #20 query, indexed\
+    \ frames 0/5/10/15"
+  query_image: queries/d53732f3_frame20.jpg
+  contains:
+  - d53732f3bd3842d3881508af
+- id: q_c2d61d34
+  label: "self-retrieval: 17_Again__16996.mp4 \u2014 frame #20 query, indexed frames\
+    \ 0/5/10/15"
+  query_image: queries/c2d61d34_frame20.jpg
+  contains:
+  - c2d61d34bcaf4221a5594174
+- id: q_2087596e
+  label: "self-retrieval: 10_Cloverfield_Lane__333371.mp4 \u2014 frame #20 query,\
+    \ indexed frames 0/5/10/15"
+  query_image: queries/2087596e_frame20.jpg
+  contains:
+  - 2087596e09f14504b14f505a
+- id: q_e699cdc0
+  label: "self-retrieval: 13_Going_on_30__10096.mp4 \u2014 frame #20 query, indexed\
+    \ frames 0/5/10/15"
+  query_image: queries/e699cdc0_frame20.jpg
+  contains:
+  - e699cdc0b38c42f781b07019
