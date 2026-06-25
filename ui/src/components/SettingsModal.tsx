@@ -420,7 +420,7 @@ function UsersTab() {
                 <div className="min-w-0">
                   <div className="font-display text-base">{u.email}</div>
                   <div className="font-mono text-[10px] mt-0.5" style={{ color: "var(--color-ink-faint)" }}>
-                    {u.username}
+                    {u.sub}
                     {u.created_at ? ` · created ${fmtRelative(unixOf(u.created_at))}` : ""}
                   </div>
                 </div>
@@ -440,7 +440,14 @@ function UsersTab() {
                 <RowBtn busy={busyAction === `resend:${u.username}`} disabled={u.status !== "FORCE_CHANGE_PASSWORD"} onClick={() => action("resend", u.username, () => resendInv(u.username))}>
                   resend invite
                 </RowBtn>
-                <RowBtn busy={busyAction === `reset:${u.username}`} onClick={() => action("reset", u.username, () => resetPwd(u.username))}>
+                <RowBtn
+                  busy={busyAction === `reset:${u.username}`}
+                  // Cognito rejects AdminResetUserPassword in any non-CONFIRMED
+                  // state — for FORCE_CHANGE_PASSWORD users the "resend invite"
+                  // button is the right action instead.
+                  disabled={u.status !== "CONFIRMED"}
+                  onClick={() => action("reset", u.username, () => resetPwd(u.username))}
+                >
                   reset password
                 </RowBtn>
                 {u.enabled ? (

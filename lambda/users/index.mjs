@@ -82,16 +82,27 @@ async function listAllUsers() {
       return [];
     }
   }));
-  return out.map((u, i) => ({
-    username:   u.Username,
-    email:      attr(u, "email") || u.Username,
-    status:     u.UserStatus,
-    enabled:    u.Enabled !== false,
-    created_at: u.UserCreateDate?.toISOString?.() || null,
-    updated_at: u.UserLastModifiedDate?.toISOString?.() || null,
-    groups:     groups[i],
-    is_admin:   groups[i].includes(ADMIN_GROUP),
-  }));
+  return out.map((u, i) => {
+    // This pool is configured with UsernameAttributes:["email"], so
+    // Cognito returns the sub UUID as `Username` but every admin API
+    // (AdminResetUserPassword, AdminCreateUser-RESEND, AdminDeleteUser,
+    // ...) actually expects the EMAIL as its `Username` parameter.
+    // Surface the email under `username` so the SPA can pass it
+    // straight back into the admin endpoints; expose the underlying
+    // sub separately for display / dedup.
+    const email = attr(u, "email") || u.Username;
+    return {
+      username:   email,
+      sub:        u.Username,
+      email,
+      status:     u.UserStatus,
+      enabled:    u.Enabled !== false,
+      created_at: u.UserCreateDate?.toISOString?.() || null,
+      updated_at: u.UserLastModifiedDate?.toISOString?.() || null,
+      groups:     groups[i],
+      is_admin:   groups[i].includes(ADMIN_GROUP),
+    };
+  });
 }
 
 async function createUser(email) {

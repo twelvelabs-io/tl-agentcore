@@ -6,7 +6,13 @@ import { getAccessToken } from "./auth";
 const BASE = "/users";
 
 export type User = {
+  // `username` here is the user's email — that's the actual Cognito
+  // identifier our pool uses (UsernameAttributes: ["email"]) and is
+  // what every admin endpoint expects in the path.
   username: string;
+  // The immutable sub UUID. For display / debugging only — admin APIs
+  // reject it as `Username`.
+  sub: string;
   email: string;
   status: string;          // CONFIRMED | FORCE_CHANGE_PASSWORD | RESET_REQUIRED | …
   enabled: boolean;
