@@ -86,21 +86,31 @@ export const test = base.extend<Fixtures>({
 
     await page.goto(testConfig.baseUrl);
 
-    // If the SPA bounces us out to Cognito, drive the sign-in form. If we
-    // landed straight on the SPA (cached tokens still valid), skip.
+    // v0.3+ replaced the Cognito Hosted UI redirect with an in-SPA
+    // SignInScreen. Three possible landing states:
+    //   1. masthead already rendered (cached tokens still valid)
+    //   2. inline SignInScreen rendered (need to drive the form)
+    //   3. legacy redirect to amazoncognito.com (kept for back-compat)
     try {
-      // Race: either the masthead renders (tokens still valid), or Cognito
-      // takes over (need to sign in).
       await Promise.race([
-        page.waitForURL(/amazoncognito\.com/, { timeout: 8_000 }),
         page.locator('text=Rough Cut').first().waitFor({ timeout: 8_000 }),
+        page.locator('input[type="email"]').first().waitFor({ timeout: 8_000 }),
+        page.waitForURL(/amazoncognito\.com/, { timeout: 8_000 }),
       ]);
     } catch {
-      // Timed out both — try to interpret current state below.
+      // Timed out — fall through to the interpret-state branches below.
     }
 
     if (page.url().includes("amazoncognito.com")) {
       await signInToHostedUi(page, testConfig.userEmail, testConfig.userPassword);
+      await context.storageState({ path: STORAGE_STATE });
+    } else if (await page.locator('input[type="email"]').first().isVisible().catch(() => false)) {
+      // In-SPA SignInScreen path. Fill email + password and submit.
+      await page.locator('input[type="email"]').first().fill(testConfig.userEmail);
+      await page.locator('input[type="password"]').first().fill(testConfig.userPassword);
+      await page.locator('button[type="submit"]').first().click();
+      // Wait for the masthead to settle after sign-in.
+      await page.locator('text=Rough Cut').first().waitFor({ timeout: 30_000 });
       await context.storageState({ path: STORAGE_STATE });
     }
 

@@ -43,9 +43,20 @@ data "aws_iam_policy_document" "index_faces_perms" {
     resources = ["arn:aws:rekognition:${var.region}:${data.aws_caller_identity.current.account_id}:collection/${local.fqname}-ks-*"]
   }
   statement {
+    # RecognizeCelebrities isn't tied to a collection — needs * resource.
+    sid       = "RekognitionCelebrities"
+    actions   = ["rekognition:RecognizeCelebrities"]
+    resources = ["*"]
+  }
+  statement {
     sid       = "ReadThumbFrames"
     actions   = ["s3:GetObject", "s3:ListBucket"]
     resources = [aws_s3_bucket.clips.arn, "${aws_s3_bucket.clips.arn}/hls/*"]
+  }
+  statement {
+    sid       = "PersistFaceCountAndCelebrities"
+    actions   = ["dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.assets.arn]
   }
 }
 
@@ -69,9 +80,11 @@ resource "aws_lambda_function" "index_faces" {
 
   environment {
     variables = {
-      STACK_FQNAME      = local.fqname
-      CLIPS_BUCKET_NAME = aws_s3_bucket.clips.bucket
-      FRAMES_PER_ASSET  = "4"
+      STACK_FQNAME       = local.fqname
+      CLIPS_BUCKET_NAME  = aws_s3_bucket.clips.bucket
+      ASSETS_TABLE       = aws_dynamodb_table.assets.name
+      FRAMES_PER_ASSET   = "4"
+      MIN_CELEB_CONFIDENCE = "85.0"
     }
   }
 }

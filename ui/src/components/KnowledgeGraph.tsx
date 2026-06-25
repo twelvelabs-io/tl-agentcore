@@ -120,10 +120,18 @@ function eventSphere(clusterSize: number): THREE.Object3D {
   return sphere(0xff7a1a, r, 0xff5500);
 }
 
+function celebritySphere(appearanceCount: number): THREE.Object3D {
+  // Magenta sphere, log-scaled like entitySphere. Distinct color so the
+  // graph reads at a glance — Rekognition-detected celebs are clearly
+  // separate from the Pegasus-extracted entity graph.
+  const r = Math.min(8, 3 + Math.log2(1 + appearanceCount) * 1.6);
+  return sphere(0xc14fdb, r, 0x6e1aa0);
+}
+
 // ─── Component ──────────────────────────────────────────────────────────────
 type Node3D = {
   id: string;
-  kind: "asset" | "entity" | "event";
+  kind: "asset" | "entity" | "event" | "celebrity";
   label: string;
   data: any;
   thumbUrl?: string | null;
@@ -286,6 +294,14 @@ function GraphInner({ payload }: { payload: GraphPayload }) {
         return {
           id:    n.id,
           kind:  "entity",
+          label: `${n.data.name} (×${n.data.appearance_count})`,
+          data:  n.data,
+        };
+      }
+      if (n.kind === "celebrity") {
+        return {
+          id:    n.id,
+          kind:  "celebrity",
           label: `${n.data.name} (×${n.data.appearance_count})`,
           data:  n.data,
         };
@@ -465,6 +481,7 @@ function GraphInner({ payload }: { payload: GraphPayload }) {
               return sprite;
             }
             if (n.kind === "entity") return entitySphere(n.data.kind_label, n.data.appearance_count);
+            if (n.kind === "celebrity") return celebritySphere(n.data.appearance_count);
             return eventSphere(n.data.cluster_size);
           }}
           nodeLabel={(n: any) => `<div style="font-family: 'Geist', system-ui; font-size:11px; padding:4px 8px; background:#171819; color:#ebe6da; border:1px solid #2a2b2e">${escapeHtml(n.label)}</div>`}
@@ -529,11 +546,31 @@ function GraphInner({ payload }: { payload: GraphPayload }) {
         >
           <div className="label">knowledge graph · 3D · live</div>
           <div className="font-mono text-[11px] mt-1" style={{ color: "#a3a195" }}>
-            {payload.counts.assets} assets · {payload.counts.entities} entities · {payload.counts.events} events · {payload.counts.edges} edges
+            {payload.counts.assets} assets · {payload.counts.entities} entities · {payload.counts.celebrities ?? 0} celebrities · {payload.counts.events} events · {payload.counts.edges} edges
           </div>
           <div className="font-mono text-[9px] mt-1.5" style={{ color: "#7a7975" }}>
             drag = rotate · scroll = zoom · click = focus · click again = play (assets)
           </div>
+          {payload.overview?.top_celebrities && payload.overview.top_celebrities.length > 0 && (
+            <div className="mt-3 pt-3 border-t" style={{ borderColor: "rgba(235, 230, 218, 0.12)" }}>
+              <div className="label" data-testid="kb-overview-celebrities-label">top celebrities</div>
+              <div
+                className="flex flex-wrap gap-1.5 mt-1.5"
+                data-testid="kb-overview-celebrities"
+              >
+                {payload.overview.top_celebrities.slice(0, 8).map((c) => (
+                  <span
+                    key={c.name}
+                    data-testid="kb-celebrity-chip"
+                    className="font-mono text-[10px] px-2 py-0.5 rounded-full"
+                    style={{ background: "rgba(193, 79, 219, 0.18)", color: "#e6cdf2", border: "1px solid rgba(193, 79, 219, 0.4)" }}
+                  >
+                    {c.name} <span style={{ opacity: 0.7 }}>· {c.asset_count}</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Search + nav controls always float on the canvas. The earlier

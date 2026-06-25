@@ -26,6 +26,7 @@ const br = new BedrockRuntimeClient({});
 
 const KS_TABLE = process.env.KS_TABLE;
 const KB_CACHE_TABLE = process.env.KB_CACHE_TABLE;
+const ASSETS_TABLE = process.env.ASSETS_TABLE;
 const CLAUDE_MODEL_ID = process.env.CLAUDE_MODEL_ID || "us.anthropic.claude-haiku-4-5-20251001-v1:0";
 
 // ── DDB helpers ──────────────────────────────────────────────────────────
@@ -62,6 +63,73 @@ async function listKsIds() {
     last = r.LastEvaluatedKey;
   } while (last);
   return out;
+}
+
+// Query the assets table (by-ks GSI) for celebrity metadata that
+// index_faces writes per asset. We aggregate across the KS into
+// OVERVIEW.top_celebrities + per-name CELEBRITY# rows, parallel to the
+// entity-graph rollup already done from kb_cache ASSET# profiles.
+async function listAssetCelebrities(ksId) {
+  if (!ASSETS_TABLE) return [];
+  const rows = [];
+  let last;
+  do {
+    const r = await ddb.send(new QueryCommand({
+      TableName: ASSETS_TABLE, IndexName: "by-ks",
+      KeyConditionExpression: "knowledge_store_id = :k",
+      ExpressionAttributeValues: { ":k": { S: ksId } },
+      ProjectionExpression: "asset_id, face_count, celebrities",
+      ExclusiveStartKey: last,
+    }));
+    for (const it of r.Items || []) rows.push(itemToObj(it));
+    last = r.LastEvaluatedKey;
+  } while (last);
+  return rows;
+}
+
+function aggregateCelebrities(assetRows) {
+  const byName = new Map();
+  for (const row of assetRows) {
+    const aid = row.asset_id;
+    if (!aid) continue;
+    for (const c of (row.celebrities || [])) {
+      const name = c?.name;
+      if (typeof name !== "string" || !name.trim()) continue;
+      if (!byName.has(name)) {
+        byName.set(name, { name, asset_ids: [], appearance_count: 0, max_confidence: 0 });
+      }
+      const cur = byName.get(name);
+      if (!cur.asset_ids.includes(aid)) cur.asset_ids.push(aid);
+      cur.appearance_count += 1;
+      const conf = Number(c?.confidence) || 0;
+      if (conf > cur.max_confidence) cur.max_confidence = conf;
+    }
+  }
+  return [...byName.values()].sort((a, b) => b.asset_ids.length - a.asset_ids.length);
+}
+
+async function writeCelebrities(ksId, celebs) {
+  // Mirror writeEntities — BatchWriteItem in chunks of 25, sk =
+  // CELEBRITY#<name>.  Name is used as the sort key directly since
+  // Rekognition's RecognizeCelebrities returns a canonical name and the
+  // collisions we care about (Tom Hanks ≠ Tom Hardy) are already disjoint.
+  const ts = Math.floor(Date.now() / 1000);
+  for (let i = 0; i < celebs.length; i += 25) {
+    const batch = celebs.slice(i, i + 25).map((c) => ({
+      PutRequest: { Item: {
+        pk: { S: `ks#${ksId}` },
+        sk: { S: `CELEBRITY#${c.name}` },
+        name: { S: c.name },
+        asset_ids: { L: c.asset_ids.map((a) => ({ S: a })) },
+        appearance_count: { N: String(c.appearance_count) },
+        max_confidence: { N: String(c.max_confidence) },
+        ingested_at: { N: String(ts) },
+      }},
+    }));
+    if (batch.length) {
+      await ddb.send(new BatchWriteItemCommand({ RequestItems: { [KB_CACHE_TABLE]: batch } }));
+    }
+  }
 }
 
 async function listAssetProfiles(ksId) {
@@ -275,8 +343,23 @@ export const handler = async (event) => {
 
       const overview = buildOverview(profiles);
       const entities = aggregateEntities(profiles);
+
+      // Celebrity rollup — read from assets table (where index_faces
+      // writes), aggregate to name → asset_ids, surface top names in
+      // OVERVIEW.top_celebrities so get_kb_overview returns them in one
+      // GetItem. Each unique name also becomes a CELEBRITY# row that
+      // kb_graph picks up as a node kind.
+      const celebRows = await listAssetCelebrities(ksId);
+      const celebrities = aggregateCelebrities(celebRows);
+      overview.top_celebrities = celebrities.slice(0, 25).map((c) => ({
+        name: c.name,
+        asset_count: c.asset_ids.length,
+      }));
+      overview.celebrity_count = celebrities.length;
+
       await writeOverview(ksId, overview);
       await writeEntities(ksId, entities);
+      if (celebrities.length) await writeCelebrities(ksId, celebrities);
 
       const events = await clusterEvents(ksId, profiles);
       if (events.length) await writeEvents(ksId, events);
@@ -285,9 +368,10 @@ export const handler = async (event) => {
         ks_id: ksId, status: "rolled-up",
         profiles: profiles.length,
         entities: entities.length,
+        celebrities: celebrities.length,
         events: events.length,
       });
-      console.log(`ks_rollup ${ksId}: profiles=${profiles.length} entities=${entities.length} events=${events.length}`);
+      console.log(`ks_rollup ${ksId}: profiles=${profiles.length} entities=${entities.length} celebrities=${celebrities.length} events=${events.length}`);
     } catch (e) {
       results.push({ ks_id: ksId, status: "error", error: String(e?.message || e) });
       console.warn(`ks_rollup ${ksId}: error`, e);

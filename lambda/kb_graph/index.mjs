@@ -93,11 +93,15 @@ export const handler = async (event) => {
   const assets = [];
   const entities = [];
   const events = [];
+  const celebrities = [];
+  let overview = null;
   for (const r of rows) {
     const sk = r.sk || "";
     if (sk.startsWith("ASSET#")) assets.push(r);
     else if (sk.startsWith("ENTITY#")) entities.push(r);
     else if (sk.startsWith("EVENT#")) events.push(r);
+    else if (sk.startsWith("CELEBRITY#")) celebrities.push(r);
+    else if (sk === "OVERVIEW") overview = r;
   }
 
   // Build node objects. Keep the payload lean — React Flow's data prop just
@@ -146,6 +150,21 @@ export const handler = async (event) => {
       },
     });
   }
+  // Celebrity nodes — one per CELEBRITY# row, written by ks_rollup from
+  // the assets table's celebrities[] field (in turn written by
+  // index_faces via Rekognition RecognizeCelebrities).
+  for (const c of celebrities) {
+    nodes.push({
+      id:   `celebrity#${c.name}`,
+      kind: "celebrity",
+      data: {
+        name:             c.name,
+        appearance_count: c.appearance_count || (c.asset_ids || []).length,
+        max_confidence:   c.max_confidence || 0,
+        asset_ids:        c.asset_ids || [],
+      },
+    });
+  }
 
   // Build edges. Filter out edges that point at nodes we don't have (e.g. an
   // entity referencing an asset_id that wasn't in the cache).
@@ -173,11 +192,33 @@ export const handler = async (event) => {
       });
     }
   }
+  // Celebrity → asset edges. Mirrors entity → asset.
+  for (const c of celebrities) {
+    for (const aid of (c.asset_ids || [])) {
+      if (!assetIdSet.has(aid)) continue;
+      edges.push({
+        id:     `e-celeb#${c.name}-as#${aid}`,
+        source: `celebrity#${c.name}`,
+        target: `asset#${aid}`,
+        kind:   "appears_in",
+      });
+    }
+  }
 
   return reply(200, {
     ks_id,
     nodes,
     edges,
-    counts: { assets: assets.length, entities: entities.length, events: events.length, edges: edges.length },
+    overview: overview ? {
+      asset_count:      overview.asset_count || 0,
+      entity_count:     overview.entity_count || 0,
+      celebrity_count:  overview.celebrity_count || 0,
+      top_moods:        overview.top_moods || [],
+      top_styles:       overview.top_styles || [],
+      top_roles:        overview.top_roles || [],
+      top_celebrities:  overview.top_celebrities || [],
+      sample_titles:    overview.sample_titles || [],
+    } : null,
+    counts: { assets: assets.length, entities: entities.length, events: events.length, celebrities: celebrities.length, edges: edges.length },
   });
 };

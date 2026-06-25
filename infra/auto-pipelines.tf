@@ -130,6 +130,13 @@ data "aws_iam_policy_document" "ks_rollup_perms" {
     actions   = ["dynamodb:Query", "dynamodb:PutItem", "dynamodb:BatchWriteItem"]
     resources = [aws_dynamodb_table.kb_cache.arn]
   }
+  # Celebrity rollup reads from the assets table (where index_faces writes
+  # celebrities[]) via the by-ks GSI.
+  statement {
+    sid       = "QueryAssetsForCelebrities"
+    actions   = ["dynamodb:Query"]
+    resources = [aws_dynamodb_table.assets.arn, "${aws_dynamodb_table.assets.arn}/index/*"]
+  }
   statement {
     sid       = "ClaudeBedrock"
     actions   = ["bedrock:InvokeModel"]
@@ -156,9 +163,10 @@ resource "aws_lambda_function" "ks_rollup" {
 
   environment {
     variables = {
-      KS_TABLE         = aws_dynamodb_table.knowledge_stores.name
-      KB_CACHE_TABLE   = aws_dynamodb_table.kb_cache.name
-      CLAUDE_MODEL_ID  = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+      KS_TABLE        = aws_dynamodb_table.knowledge_stores.name
+      KB_CACHE_TABLE  = aws_dynamodb_table.kb_cache.name
+      ASSETS_TABLE    = aws_dynamodb_table.assets.name
+      CLAUDE_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
     }
   }
 }

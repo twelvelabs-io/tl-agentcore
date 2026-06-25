@@ -42,7 +42,8 @@ const BASE = "/kb";
 export type GraphNode =
   | { id: string; kind: "asset"; data: { asset_id: string; title: string; one_liner: string; mood_tags: string[]; role_hint: string | null; visual_style: string | null } }
   | { id: string; kind: "entity"; data: { name: string; canonical: string; kind_label: string; appearance_count: number; asset_ids: string[]; aliases: string[] } }
-  | { id: string; kind: "event"; data: { event_id: string; description: string; cluster_size: number; confidence: number; participating_assets: string[]; mood_signature: string[] } };
+  | { id: string; kind: "event"; data: { event_id: string; description: string; cluster_size: number; confidence: number; participating_assets: string[]; mood_signature: string[] } }
+  | { id: string; kind: "celebrity"; data: { name: string; appearance_count: number; max_confidence: number; asset_ids: string[] } };
 
 export type GraphEdge = {
   id: string;
@@ -51,11 +52,23 @@ export type GraphEdge = {
   kind: "appears_in" | "participates_in";
 };
 
+export type KbOverview = {
+  asset_count: number;
+  entity_count: number;
+  celebrity_count: number;
+  top_moods: string[];
+  top_styles: string[];
+  top_roles: string[];
+  top_celebrities: { name: string; asset_count: number }[];
+  sample_titles: string[];
+};
+
 export type GraphPayload = {
   ks_id: string;
   nodes: GraphNode[];
   edges: GraphEdge[];
-  counts: { assets: number; entities: number; events: number; edges: number };
+  overview: KbOverview | null;
+  counts: { assets: number; entities: number; events: number; celebrities?: number; edges: number };
 };
 
 export async function fetchKbGraph(ks_id: string): Promise<GraphPayload> {
