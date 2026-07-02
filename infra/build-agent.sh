@@ -18,6 +18,26 @@ if [ -z "${REPO_URL}" ]; then
 fi
 ACCOUNT=$(echo "${REPO_URL}" | cut -d. -f1)
 
+WHEELS_DIR="../agent/wheels"
+if [ ! -d "${WHEELS_DIR}" ] || [ -z "$(ls -A "${WHEELS_DIR}" 2>/dev/null)" ]; then
+  echo "==> 0/4 pre-downloading arm64 wheels (offline install path)"
+  # The Dockerfile installs from these wheels rather than pip-fetching
+  # inside emulated arm64 (which is slow + hash-prone). This is a
+  # one-time cost per host — subsequent builds reuse the folder.
+  PY=$(command -v python3 || command -v python)
+  if [ -z "${PY}" ]; then
+    echo "ERROR: python3 is required to pre-download wheels."
+    exit 1
+  fi
+  mkdir -p "${WHEELS_DIR}"
+  "${PY}" -m pip download \
+    --platform manylinux2014_aarch64 \
+    --only-binary :all: \
+    --python-version 311 \
+    --dest "${WHEELS_DIR}" \
+    -r ../agent/requirements.txt
+fi
+
 echo "==> 1/4 docker login to ECR"
 aws ecr get-login-password --region "${AWS_REGION}" \
   | docker login --username AWS --password-stdin "${ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"

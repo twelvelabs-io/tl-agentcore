@@ -31,13 +31,11 @@ end:
   admin role to the UI as a claim. The Cognito JWT flows end-to-end
   from browser through CloudFront, through the WebSocket and HTTP APIs,
   and into the lambdas that verify it before invoking the runtime.
-- **Secrets.** The TwelveLabs API key lives in Secrets Manager. The
-  `tl_proxy` lambda reads it for the browser playback proxy. The runtime
-  container reads it only when `PEGASUS_PROVIDER=tl_api` is set on the
-  runtime (the opt-in path that swaps `pegasus_analyze` from Bedrock 1.2
-  to TwelveLabs `/v1.3/analyze`, e.g. to use Pegasus 1.5 before it ships
-  to Bedrock Marketplace). With the default `bedrock` setting, the
-  runtime never touches the secret.
+- **Bedrock model access.** The runtime calls Marengo 3.0, Pegasus 1.2,
+  and Claude Haiku 4.5 through the Bedrock Marketplace / Anthropic
+  Bedrock catalog. Grant model access in the Bedrock console
+  (Model access → Manage model access) before the first invoke.
+  us-east-1 is the region we default to.
 - **Gateway.** `gateway.tf` is documented but not enabled in this
   reference implementation. A future evolution moves the agent tools
   out of the runtime container into MCP-served lambdas behind
@@ -51,18 +49,20 @@ ECR image with a specific tag, and that tag doesn't exist until
 `build-agent.sh` has pushed one — so create the ECR repo first, push
 the image, then apply the rest.
 
+Pass `-var aws_profile=<your-named-profile>` on every apply — the
+provider block pins to `var.aws_profile` (default `"default"`), so
+`AWS_PROFILE=…` alone in the environment is ignored by Terraform.
+
 ```bash
 cd infra
 terraform init
 
-# Phase 1 — everything except the AgentCore runtime. Creates the ECR
-# repo, all lambdas, DDB tables, Cognito, S3 buckets, CloudFront.
+# Phase 1 — the ECR repo the runtime image needs to exist before the
+# runtime resource. -target picks up its transitive dependencies too.
 terraform apply \
-  -var="tl_api_key=tlk_..." \
+  -var="aws_profile=your-profile" \
   -var="seed_admin_email=you@example.com" \
-  -target=aws_ecr_repository.agent \
-  -target=aws_s3_bucket.clips \
-  -target=aws_s3_bucket.frontend
+  -target=aws_ecr_repository.agent
 
 # Push the agent container. Prints a v<timestamp> tag on the last line.
 ./build-agent.sh
@@ -70,7 +70,7 @@ terraform apply \
 # Phase 2 — full apply pointed at the tag you just pushed. Creates the
 # runtime + everything else.
 terraform apply \
-  -var="tl_api_key=tlk_..." \
+  -var="aws_profile=your-profile" \
   -var="seed_admin_email=you@example.com" \
   -var="agent_image_tag=<v-timestamp-from-build-agent.sh>"
 ```
@@ -80,8 +80,9 @@ each time so Terraform doesn't try to downgrade the runtime to the
 `v0` default.
 
 The `hash_key is deprecated. Use key_schema instead` warning on the
-DynamoDB tables is a soft AWS-provider deprecation notice. Non-blocking
-and safe to ignore; the resources apply correctly either way.
+DynamoDB tables is a soft AWS-provider deprecation notice (the
+replacement syntax isn't yet shipped in `hashicorp/aws ~> 6.43`).
+Non-blocking and safe to ignore; the resources apply correctly.
 
 ## First admin user
 
@@ -112,7 +113,7 @@ If the invite email is lost or spam-filtered, re-fire it:
 
 ```bash
 terraform taint  aws_cognito_user.seed_admin
-terraform apply  -var "tl_api_key=tlk_..." -var "seed_admin_email=you@example.com"
+terraform apply  -var "aws_profile=your-profile" -var "seed_admin_email=you@example.com" -var "agent_image_tag=<v-tag>"
 ```
 
 Tainting recreates the resource on the next apply, which makes Cognito
@@ -138,6 +139,13 @@ aws cognito-idp admin-add-user-to-group \
 
 ## Agent container
 
+Extracting the release zip strips executable bits — `chmod +x` the
+build script once:
+
+```bash
+chmod +x infra/build-agent.sh
+```
+
 Subsequent rebuilds (after code changes) are one-liners; the ECR repo
 already exists.
 
@@ -147,7 +155,43 @@ terraform apply -var="agent_image_tag=<v-timestamp>" ...
 ```
 
 The image is arm64-only; AgentCore runs on Graviton and rejects amd64
-images at `CreateAgentRuntime` with `Architecture incompatible`.
+images at `CreateAgentRuntime` with `Architecture incompatible`. On
+first run the script pre-downloads the arm64 pip wheels
+(`agent/wheels/`) — a one-time cost per host, subsequent builds reuse
+the folder. Requires Docker Desktop or a similar buildx-capable
+runtime.
+
+## Frontend
+
+The Terraform apply creates the CloudFront distribution + S3 bucket
+but doesn't build or upload the SPA — that's a separate step so
+operators can rebuild the UI without touching infrastructure.
+
+```bash
+# 1. Pull the stamped-in env vars into ui/.env.production. Every
+#    VITE_* value is what the SPA needs to reach Cognito + AgentCore
+#    + the API Gateway endpoints, plus the CloudFront origin the
+#    invite email links to.
+cd infra
+terraform output -raw ui_env > ../ui/.env.production
+cd ..
+
+# 2. Build the SPA. Vite reads .env.production automatically.
+cd ui
+npm install
+npm run build
+
+# 3. Upload the built assets to the frontend bucket + invalidate
+#    CloudFront so users get the fresh bundle immediately.
+FRONTEND_BUCKET=$(terraform -chdir=../infra output -raw frontend_bucket)
+DIST_ID=$(terraform -chdir=../infra output -raw cloudfront_distribution_id)
+aws s3 sync dist/ s3://$FRONTEND_BUCKET/ --profile <your-profile> --delete
+aws cloudfront create-invalidation \
+  --distribution-id $DIST_ID --paths "/*" --profile <your-profile>
+```
+
+The seed admin's invite email links to `terraform output frontend_url`,
+so make sure the SPA is deployed before the admin clicks through.
 
 ## Ingesting video
 
