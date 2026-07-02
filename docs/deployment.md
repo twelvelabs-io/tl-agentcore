@@ -46,11 +46,42 @@ end:
 
 ## Apply
 
+Two-phase on a fresh account. The AgentCore runtime resource wants an
+ECR image with a specific tag, and that tag doesn't exist until
+`build-agent.sh` has pushed one — so create the ECR repo first, push
+the image, then apply the rest.
+
 ```bash
 cd infra
 terraform init
-terraform apply -var="tl_api_key=tlk_..." -var="seed_admin_email=you@example.com"
+
+# Phase 1 — everything except the AgentCore runtime. Creates the ECR
+# repo, all lambdas, DDB tables, Cognito, S3 buckets, CloudFront.
+terraform apply \
+  -var="tl_api_key=tlk_..." \
+  -var="seed_admin_email=you@example.com" \
+  -target=aws_ecr_repository.agent \
+  -target=aws_s3_bucket.clips \
+  -target=aws_s3_bucket.frontend
+
+# Push the agent container. Prints a v<timestamp> tag on the last line.
+./build-agent.sh
+
+# Phase 2 — full apply pointed at the tag you just pushed. Creates the
+# runtime + everything else.
+terraform apply \
+  -var="tl_api_key=tlk_..." \
+  -var="seed_admin_email=you@example.com" \
+  -var="agent_image_tag=<v-timestamp-from-build-agent.sh>"
 ```
+
+Subsequent applies are single-phase — pass the current `agent_image_tag`
+each time so Terraform doesn't try to downgrade the runtime to the
+`v0` default.
+
+The `hash_key is deprecated. Use key_schema instead` warning on the
+DynamoDB tables is a soft AWS-provider deprecation notice. Non-blocking
+and safe to ignore; the resources apply correctly either way.
 
 ## First admin user
 
@@ -107,12 +138,16 @@ aws cognito-idp admin-add-user-to-group \
 
 ## Agent container
 
-Build and push the agent container (arm64-only; AgentCore runs on
-Graviton):
+Subsequent rebuilds (after code changes) are one-liners; the ECR repo
+already exists.
 
 ```bash
-./build-agent.sh   # docker buildx build --platform linux/arm64 ...
+./build-agent.sh                                # prints v<timestamp>
+terraform apply -var="agent_image_tag=<v-timestamp>" ...
 ```
+
+The image is arm64-only; AgentCore runs on Graviton and rejects amd64
+images at `CreateAgentRuntime` with `Architecture incompatible`.
 
 ## Ingesting video
 
