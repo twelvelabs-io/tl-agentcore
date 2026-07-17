@@ -324,9 +324,10 @@ function NoKS() {
         Pick a knowledge base from the picker above to begin.
       </p>
       <p className="mt-6 text-sm" style={{ color: "var(--color-ink-soft)" }}>
-        First time? Run <span className="font-mono">scripts/ingest_vectors.py &lt;ks_id&gt;</span> to build
-        the Marengo clip-embedding index in S3 Vectors. The agent searches that
-        index per beat.
+        First time? Use "<span className="font-mono">+ create your first knowledge base</span>" in the
+        picker at the top right. Once it exists, switch to the Library tab and drop
+        in a video — the upload auto-pipeline builds the Marengo clip-embedding
+        index in S3 Vectors from there.
       </p>
     </div>
   );
