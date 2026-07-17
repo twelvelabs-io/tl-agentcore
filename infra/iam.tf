@@ -89,6 +89,15 @@ data "aws_iam_policy_document" "runtime_perms" {
     actions   = ["s3:GetObject"]
     resources = ["${aws_s3_bucket.clips.arn}/*"]
   }
+  # find_by_image's Marengo fallback needs to list objects under
+  # async-out-eval/<invocationId>/ to find the output.json — Bedrock
+  # names its async output prefix at invocation time, so the agent
+  # can't compose the key up-front.
+  statement {
+    sid       = "ListClipsBucket"
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.clips.arn]
+  }
   # Marengo async image-embed (find_by_image fallback): the agent
   # uploads the reference image to async-in-eval/ + an embed-cache JSON
   # to embed-cache/marengo/. StartAsyncInvoke writes its output to
@@ -105,7 +114,14 @@ data "aws_iam_policy_document" "runtime_perms" {
   statement {
     sid       = "MarengoAsyncInvoke"
     actions   = ["bedrock:InvokeModel", "bedrock:StartAsyncInvoke", "bedrock:GetAsyncInvoke"]
-    resources = ["arn:aws:bedrock:*::foundation-model/twelvelabs.marengo-embed-3-0-v1:0"]
+    resources = [
+      "arn:aws:bedrock:*::foundation-model/twelvelabs.marengo-embed-3-0-v1:0",
+      # Bedrock returns InvokeModel-denied on the async-invoke resource
+      # (not the foundation-model) during the intermediate output-
+      # composition step. Without this second ARN the Marengo fallback
+      # in find_by_image blows up as soon as the async job completes.
+      "arn:aws:bedrock:*:${data.aws_caller_identity.current.account_id}:async-invoke/*",
+    ]
   }
   # v0.4 hybrid entity-reID: query per-KS Rekognition face collections.
   statement {

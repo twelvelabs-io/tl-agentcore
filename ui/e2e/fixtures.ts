@@ -140,19 +140,35 @@ export async function selectKs(page: Page, ksId: string): Promise<void> {
   // The masthead button shows the first 28 chars of the active id; if that
   // already matches, no UI dance is needed.
   const alreadyActive = await picker.locator(`text=${ksId.slice(0, 28)}`).count();
-  if (alreadyActive === 0) {
-    await picker.click();
-    const option = page.locator(`button:has-text("${ksId}")`).first();
-    await expect(option).toBeVisible({ timeout: 5_000 });
-    await option.click();
+  if (alreadyActive > 0) return;
+
+  // Open the dropdown and click the option. The click can race React's
+  // state transition (button onClick fires, dropdown enters mounting phase,
+  // click lands before the option nodes render). Retry up to 3 times with
+  // a fresh open on each attempt.
+  const option = page.locator(`button:has-text("${ksId}")`).first();
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await picker.click();
+      await expect(option).toBeVisible({ timeout: 5_000 });
+      await option.click();
+      // The dropdown auto-closes on select via setOpen(false); wait for
+      // the ▼ indicator to confirm closed state.
+      await expect(picker.locator("text=▼")).toBeVisible({ timeout: 5_000 });
+      return;
+    } catch (e) {
+      lastErr = e;
+      // If the dropdown got stuck open, click the picker to close it
+      // before retrying — otherwise the next click toggles it shut and
+      // we lose another attempt to the transition race.
+      if ((await picker.locator("text=▲").count()) > 0) {
+        await picker.click().catch(() => {});
+      }
+      await page.waitForTimeout(500);
+    }
   }
-  // Either way, make sure the dropdown ends up CLOSED before returning so
-  // subsequent locator clicks in the spec don't hit the overlay. The closed
-  // state is signalled by `▼` in the masthead button.
-  if ((await picker.locator("text=▲").count()) > 0) {
-    await picker.click();
-  }
-  await expect(picker.locator("text=▼")).toBeVisible({ timeout: 5_000 });
+  throw lastErr instanceof Error ? lastErr : new Error(`selectKs(${ksId}) failed after 3 attempts`);
 }
 
 export { expect };

@@ -12,13 +12,16 @@ import { test, expect, testConfig, selectKs } from "./fixtures";
  *    - localStorage tokens stay healthy after tab-B's API calls. */
 
 test.describe("Concurrent tabs in the same context", () => {
-  test("two tabs run independently and don't cross-broadcast UI state", async ({ browser }) => {
-    const context = await browser.newContext({ storageState: "e2e/storage-state.json" });
-
-    const tabA = await context.newPage();
+  // Reuse the signedInPage fixture to make sure storage-state.json
+  // exists + is fresh (SignInScreen path was retired for standalone
+  // storageState loads in v0.3). Then open a second tab in the same
+  // browser context.
+  test("two tabs run independently and don't cross-broadcast UI state", async ({ signedInPage }) => {
+    const context = signedInPage.context();
+    const tabA = signedInPage;
     const tabB = await context.newPage();
 
-    await Promise.all([tabA.goto(testConfig.baseUrl), tabB.goto(testConfig.baseUrl)]);
+    await tabB.goto(testConfig.baseUrl);
     await Promise.all([
       expect(tabA.locator('h1', { hasText: "Rough Cut" })).toBeVisible({ timeout: 30_000 }),
       expect(tabB.locator('h1', { hasText: "Rough Cut" })).toBeVisible({ timeout: 30_000 }),
@@ -42,10 +45,20 @@ test.describe("Concurrent tabs in the same context", () => {
     });
 
     // Tab B's tokens should be healthy after its API calls.
-    const tokensB = await tabB.evaluate(() => JSON.parse(localStorage.getItem("tl-agentcore.tokens") || "null"));
-    expect(tokensB?.access_token).toBeTruthy();
-    expect(tokensB?.expires_at).toBeGreaterThan(Date.now());
+    // v0.3 switched from Hosted UI to SRP; tokens now live under
+    // amazon-cognito-identity-js keys (namespaced by user pool + client).
+    // Check that at least one Cognito access-token key is present.
+    const hasAccessToken = await tabB.evaluate(() => {
+      for (let i = 0; i < localStorage.length; i += 1) {
+        const key = localStorage.key(i) || "";
+        if (key.includes("CognitoIdentityServiceProvider") && key.endsWith(".accessToken")) {
+          return true;
+        }
+      }
+      return false;
+    });
+    expect(hasAccessToken).toBe(true);
 
-    await context.close();
+    await tabB.close();
   });
 });
