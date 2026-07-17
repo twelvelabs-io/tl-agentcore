@@ -132,11 +132,20 @@ data "aws_iam_policy_document" "embed_clip_start_perms" {
     actions   = ["s3:GetObject"]
     resources = ["${aws_s3_bucket.clips.arn}/clips/*"]
   }
-  # Bedrock async invoke against Marengo on the foundation-model ARN.
+  # Bedrock async invoke against Marengo. StartAsyncInvoke requires
+  # `bedrock:InvokeModel` on BOTH the foundation-model ARN (identifies
+  # the model) AND the account-scoped async-invoke resource ARN
+  # (identifies the queued job). Missing the async-invoke resource is
+  # what caused the embed lambda to return 500 with an
+  # AccessDeniedException from Bedrock — same bug we hit on the
+  # runtime IAM policy in v0.4.5.
   statement {
     sid       = "BedrockAsync"
     actions   = ["bedrock:StartAsyncInvoke", "bedrock:GetAsyncInvoke", "bedrock:InvokeModel"]
-    resources = ["arn:aws:bedrock:*::foundation-model/*"]
+    resources = [
+      "arn:aws:bedrock:*::foundation-model/*",
+      "arn:aws:bedrock:*:${data.aws_caller_identity.current.account_id}:async-invoke/*",
+    ]
   }
   # The async invoke writes output.json into our clips bucket.
   statement {

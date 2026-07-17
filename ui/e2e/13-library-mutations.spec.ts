@@ -75,6 +75,14 @@ test.describe("Library: search + status filters (read-only)", () => {
 });
 
 test.describe("Library: detach + delete (uses throwaway mutations KS)", () => {
+  // Both detach + delete tests seed assets via the legacy TL SaaS API
+  // (`api.twelvelabs.io/v1.3/assets`, `.../items`). v0.4 removed the
+  // /tl/* browser proxy path and the deploy contract no longer
+  // requires a working TL_API_KEY, so we skip these unconditionally
+  // until the seed path is rewritten to hit our own /upload → /kb
+  // pipeline. That rewrite is non-trivial (each real upload runs
+  // 30-90s through the async pipeline) so it's tracked separately.
+  test.skip(true, "legacy TL SaaS seed path unavailable in v0.4 — rewrite tracked separately");
   test("detach removes the item from the active KB grid", async ({ signedInPage }) => {
     // Resolve the index this account uses (we need it for asset creation).
     const indexList = await tlGet<{ data: any[] }>("/indexes?page_limit=20");

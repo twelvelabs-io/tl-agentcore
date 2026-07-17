@@ -59,7 +59,10 @@ test.describe("Visual regression: layout baselines", () => {
 
   test("History drawer open", async ({ signedInPage }) => {
     await signedInPage.locator('button.tab:has-text("Rough Cut")').first().click();
-    await signedInPage.locator('button:has-text("History")').first().click();
+    // The trigger button label is lowercase "history" in the SPA;
+    // the drawer header is "§ History". Mixing the case here made
+    // the click miss.
+    await signedInPage.locator('button:has-text("history")').first().click();
     await expect(signedInPage.locator('text=§ History').first()).toBeVisible({ timeout: 5_000 });
     await signedInPage.waitForTimeout(400);
     await expect(signedInPage).toHaveScreenshot("history-drawer.png", {
@@ -68,17 +71,17 @@ test.describe("Visual regression: layout baselines", () => {
     });
   });
 
-  test("Sign-in (Cognito Hosted UI)", async ({ browser }) => {
-    // Fresh context — no storage state. App boot redirects to Hosted UI.
+  test("Sign-in (in-SPA SignInScreen)", async ({ browser }) => {
+    // Fresh context — no storage state. App boot renders the in-SPA
+    // SignInScreen (v0.3+ replaced the Cognito Hosted UI redirect).
     const context = await browser.newContext();
     const page = await context.newPage();
     await page.goto(testConfig.baseUrl);
-    await page.waitForURL(/amazoncognito\.com/, { timeout: 30_000 });
-    await page.locator('#signInFormUsername:visible').first().waitFor();
+    await page.locator('input[type="email"]').first().waitFor({ timeout: 15_000 });
     await page.waitForTimeout(500);
-    // Cognito Hosted UI loads custom CSS; baseline catches any breakage
-    // in our login-screen branding without driving a sign-in.
-    await expect(page).toHaveScreenshot("signin-hosted-ui.png", {
+    // Baseline catches any breakage to the SignInScreen layout /
+    // branding without driving a sign-in.
+    await expect(page).toHaveScreenshot("signin-screen.png", {
       maxDiffPixelRatio: 0.03,
     });
     await context.close();

@@ -1,4 +1,4 @@
-import { test, expect, testConfig, selectKs } from "./fixtures";
+import { test, expect } from "./fixtures";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -40,7 +40,33 @@ test.describe("Library: upload happy path", () => {
   test("dropping a file streams through presign → S3 → asset → attach → done", async ({ signedInPage }) => {
     const mp4 = ensureFixtureMp4();
 
-    await selectKs(signedInPage, testConfig.mutationsKsId);
+    // Create a per-test scratch KS via the same POST /kb/knowledge-stores
+    // path the SPA uses, then activate it via LS_LAST_KS_ID + reload.
+    // globalSetup's TL-SaaS-backed mutations KS is gated on TL_API_KEY
+    // and can leave a stale id in .env.test — driving the scratch KS
+    // from inside the spec makes this test self-sufficient.
+    const uniqueName = `e2e-upload-${Date.now()}`;
+    const ks = await signedInPage.evaluate(async (name: string) => {
+      let token: string | null = null;
+      for (let i = 0; i < localStorage.length; i += 1) {
+        const k = localStorage.key(i);
+        if (k && k.endsWith(".accessToken")) { token = localStorage.getItem(k); break; }
+      }
+      const res = await fetch("/kb/knowledge-stores", {
+        method: "POST",
+        headers: { "authorization": `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ name, description: "e2e upload happy-path" }),
+      });
+      if (!res.ok) throw new Error(`create failed: ${res.status}`);
+      return res.json();
+    }, uniqueName);
+    await signedInPage.evaluate((id: string) => {
+      localStorage.setItem("tl-agentcore.lastKsId", id);
+    }, ks._id);
+    await signedInPage.reload();
+    await expect(signedInPage.locator(`button:has-text("Knowledge base") >> text=${uniqueName}`).first())
+      .toBeVisible({ timeout: 15_000 });
+
     await signedInPage.locator('button.tab:has-text("Library")').first().click();
     await expect(signedInPage.locator("text=§ Library").first()).toBeVisible({ timeout: 10_000 });
 

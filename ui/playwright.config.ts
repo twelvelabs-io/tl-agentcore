@@ -42,6 +42,12 @@ export default defineConfig({
     {
       name: "chromium",
       use: { ...devices["Desktop Chrome"] },
+      // Curated numbered suite (01-*.spec.ts … 34-*.spec.ts). The
+      // comprehensive/ subdirectory is a separate regime with its own
+      // Bedrock-Claude semantic reasoner — run it via
+      // `npm run test:e2e:comprehensive` explicitly, not as part of
+      // `make check-fast`.
+      testIgnore: ["comprehensive/**"],
     },
     // Firefox + WebKit projects run a curated smoke set, not the full
     // suite. Goal: catch obvious cross-browser breakage (CSS variable

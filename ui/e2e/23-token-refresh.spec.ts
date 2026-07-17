@@ -58,34 +58,10 @@ test.describe("Token refresh: silent reauth via refresh_token", () => {
     ).toBeGreaterThan(Date.now() + 60_000);
   });
 
-  test("clearing tokens triggers PKCE flow and re-acquires a session", async ({ signedInPage }) => {
-    // Clear local SPA tokens. The IdP session cookie at the Cognito
-    // domain is unchanged, so the SPA's redirect to Hosted UI will
-    // auto-bounce back with ?code=... without prompting the user.
-    // This still exercises the full PKCE code-exchange path.
-    await signedInPage.evaluate(() => {
-      localStorage.removeItem("tl-agentcore.tokens");
-      localStorage.removeItem("tl-agentcore.pkce");
-    });
-    await signedInPage.reload();
-
-    // After the round-trip, the SPA should land back on its own origin
-    // (NOT stuck on Cognito) and localStorage should have fresh tokens.
-    await signedInPage.waitForURL(
-      (url) => !url.toString().includes("amazoncognito.com") && !url.toString().includes("code="),
-      { timeout: 30_000 },
-    );
-    await expect(signedInPage.locator('h1', { hasText: "Rough Cut" })).toBeVisible({ timeout: 15_000 });
-    // Wait for the masthead to transition from "connecting" to "live" —
-    // that's the SPA's signal that the token exchange finished and the
-    // KS list call returned 200.
-    await expect(signedInPage.locator('text=live').first()).toBeVisible({ timeout: 30_000 });
-
-    const reacquired = await signedInPage.evaluate(() => {
-      const t = JSON.parse(localStorage.getItem("tl-agentcore.tokens") || "null");
-      return { has_access: !!t?.access_token, expires_in_future: (t?.expires_at || 0) > Date.now() };
-    });
-    expect(reacquired.has_access).toBe(true);
-    expect(reacquired.expires_in_future).toBe(true);
-  });
+  // Removed: `clearing tokens triggers PKCE flow and re-acquires a
+  // session` — v0.3 replaced the Cognito Hosted UI redirect with the
+  // in-SPA SignInScreen, so clearing tokens now renders the sign-in
+  // form instead of round-tripping through amazoncognito.com. The
+  // silent-refresh test above still covers the refresh_token path
+  // that ships in v0.3+.
 });

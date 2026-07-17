@@ -14,35 +14,39 @@ import { test, expect, selectKs } from "./fixtures";
  * the SPA's create-KS flow and cleans it up in afterEach. */
 
 async function createEmptyKs(page: any): Promise<string> {
-  // Handle both picker states: empty-fleet (no KSes yet) shows a bare
-  // "+ create your first knowledge base" button; populated shows the
-  // "Knowledge base" dropdown with "+ New knowledge store" at the
-  // bottom. Wait for either shape to be visible.
-  const emptyFleetBtn = page.locator('button:has-text("+ create your first knowledge base")').first();
-  const pickerBtn = page.locator('button:has-text("Knowledge base")').first();
-  await Promise.race([
-    emptyFleetBtn.waitFor({ state: "visible", timeout: 15_000 }).catch(() => null),
-    pickerBtn.waitFor({ state: "visible", timeout: 15_000 }).catch(() => null),
-  ]);
-  if (await emptyFleetBtn.isVisible().catch(() => false)) {
-    await emptyFleetBtn.click();
-  } else {
-    await pickerBtn.click();
-    const newBtn = page.locator('button:has-text("+ New knowledge store")').first();
-    await expect(newBtn).toBeVisible({ timeout: 10_000 });
-    await newBtn.click();
-  }
-
-  // Form appears in-place. The name input has autoFocus so it's already
-  // focused; wait for it to be attached before typing.
-  const nameInput = page.locator('input[placeholder^="Name"]').first();
-  await expect(nameInput).toBeVisible({ timeout: 5_000 });
+  // Drive create-KS via the API rather than the picker UI. This spec
+  // is testing the empty-index prose response, NOT the create-KS flow
+  // (34-create-ks covers that). Going through the picker was flaky:
+  // ksList state races with fixture selectKs, leaving the picker on
+  // a leftover KS at test start, and the CreateKSForm's autoFocus /
+  // dropdown open state made pickerBtn.click() unreliable.
+  //
+  // Approach: POST /kb/knowledge-stores directly with the SPA's
+  // Cognito access token, persist the new ks_id via localStorage, then
+  // reload so App's boot effect picks it up as the active KS.
   const uniqueName = `e2e-empty-${Date.now()}`;
-  await nameInput.fill(uniqueName);
-  await page.locator('button:has-text("create")').first().click();
-
-  // handleCreated does setState({ksList, ks}); the picker re-renders
-  // with the new KS as active.
+  const ks = await page.evaluate(async (name: string) => {
+    let token: string | null = null;
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const k = localStorage.key(i);
+      if (k && k.endsWith(".accessToken")) { token = localStorage.getItem(k); break; }
+    }
+    const res = await fetch("/kb/knowledge-stores", {
+      method: "POST",
+      headers: {
+        "authorization": `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ name, description: "e2e empty-index test" }),
+    });
+    if (!res.ok) throw new Error(`create failed: ${res.status}`);
+    return res.json();
+  }, uniqueName);
+  await page.evaluate((id: string) => {
+    localStorage.setItem("tl-agentcore.lastKsId", id);
+  }, ks._id);
+  await page.reload();
+  // Wait for the picker to reflect the new KS.
   await expect(page.locator(`button:has-text("Knowledge base") >> text=${uniqueName}`).first())
     .toBeVisible({ timeout: 15_000 });
   return uniqueName;
