@@ -1,10 +1,12 @@
 import { test, expect, testConfig } from "./fixtures";
 
 test.describe("KS picker", () => {
-  test("populates from /tl/knowledge-stores", async ({ signedInPage }) => {
-    // Picker is in the masthead. After app boot it should hold the seed KS
-    // (the dev account's first KS, set by setState in App.tsx).
-    const picker = signedInPage.locator('[data-testid="ks-picker"], button:has-text("ks_"), select').first();
+  test("populates from /kb/knowledge-stores", async ({ signedInPage }) => {
+    // v0.4 moved the list source from the TL SaaS proxy (/tl/*) to our
+    // own POST /kb/knowledge-stores lambda. The picker shape didn't
+    // change — still a masthead button labeled "Knowledge base" with
+    // the active KS underneath.
+    const picker = signedInPage.locator('button:has-text("Knowledge base")').first();
     await expect(picker).toBeVisible({ timeout: 30_000 });
   });
 

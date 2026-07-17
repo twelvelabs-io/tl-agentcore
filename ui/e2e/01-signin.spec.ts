@@ -1,14 +1,16 @@
 import { test, expect, testConfig } from "./fixtures";
 
 test.describe("Sign-in flow", () => {
-  test("lands on Hosted UI when unauthenticated", async ({ browser }) => {
+  test("renders the in-SPA SignInScreen when unauthenticated", async ({ browser }) => {
+    // v0.3 replaced the Cognito Hosted UI redirect with an in-SPA
+    // SignInScreen. An unauthenticated boot now shows the form
+    // inline; no cross-origin bounce to amazoncognito.com.
     const context = await browser.newContext();
     const page = await context.newPage();
     await page.goto(testConfig.baseUrl);
-    // App boot triggers ensureSignedIn() → redirect to Hosted UI.
-    await page.waitForURL(/amazoncognito\.com/, { timeout: 30_000 });
-    await expect(page.locator('#signInFormUsername:visible').first()).toBeVisible();
-    await expect(page.locator('#signInFormPassword:visible').first()).toBeVisible();
+    await expect(page.locator('input[type="email"]').first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('input[type="password"]').first()).toBeVisible();
+    await expect(page.locator('button[type="submit"]').first()).toBeVisible();
     await context.close();
   });
 

@@ -7,17 +7,18 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
 test.describe("Sign out", () => {
-  test("sign-out clears the session and bounces back to Hosted UI", async ({ signedInPage }) => {
-    // The signed-in email's local-part is rendered as a clickable
-    // "sign out" trigger in the masthead.
+  test("sign-out clears the session and renders the SignInScreen", async ({ signedInPage }) => {
+    // v0.3+: sign-out clears tokens locally + rerenders in-SPA — no
+    // cross-origin bounce to Cognito /logout. The masthead's user
+    // menu is a dropdown; expand it, then click "sign out".
+    const userMenu = signedInPage.locator('button:has-text("▾")').first();
+    await expect(userMenu).toBeVisible();
+    await userMenu.click();
     const signOutBtn = signedInPage.locator('button:has-text("sign out")').first();
     await expect(signOutBtn).toBeVisible();
     await signOutBtn.click();
-
-    // We land on Cognito /logout which then bounces to the SPA root.
-    // The SPA, with no tokens, will redirect back to /authorize. The
-    // round trip can be quick; we just need to land on amazoncognito.
-    await signedInPage.waitForURL(/amazoncognito\.com/, { timeout: 30_000 });
+    // Sign-in form should be back.
+    await expect(signedInPage.locator('input[type="email"]').first()).toBeVisible({ timeout: 15_000 });
   });
 
   test.afterAll(() => {
