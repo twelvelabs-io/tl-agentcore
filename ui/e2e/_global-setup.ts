@@ -35,46 +35,51 @@ async function tl<T = any>(method: string, p: string, body?: any, multipart = fa
 }
 
 export default async function globalSetup() {
-  // TL enforces KS-name uniqueness even against soft-deleted entries, so
-  // a fixed name collides forever after the first run. Suffix every run
-  // with a timestamp so each one gets a guaranteed-fresh name. We use a
-  // shared prefix so this file's cleanup pass can sweep up KSes that
-  // earlier crashed runs failed to teardown.
+  // Legacy: this used to provision a throwaway KS in TwelveLabs SaaS
+  // via api.twelvelabs.io for specs 12 + 13 (library upload + mutation).
+  // v0.4 removed the /tl/* browser proxy path entirely — the deployment
+  // is AWS-native — and the TL API key that this hook depends on is
+  // no longer part of the deploy contract. Gate the whole hook behind
+  // TL_API_KEY presence + fail-soft on any TL error so the remaining
+  // 30+ specs (which don't need TL) can still run. Specs 12 + 13 will
+  // be rewritten to hit our own POST /kb/knowledge-stores separately.
+  if (!process.env.TL_API_KEY) {
+    console.warn("[e2e] TL_API_KEY not set — skipping mutations-KS setup (legacy TL SaaS hook).");
+    return;
+  }
+
   const PREFIX = "tl-agentcore-e2e-mut-";
   const MUTATIONS_KS_NAME = PREFIX + Date.now();
 
-  // Best-effort sweep of prefix-matching KSes left behind by prior runs.
-  // (Run before create so the account doesn't accumulate junk over time.)
-  const list = await tl<{ data: any[] }>("GET", "/knowledge-stores?page_limit=50");
-  for (const k of list.data || []) {
-    if (typeof k.name === "string" && k.name.startsWith(PREFIX)) {
-      try {
-        const items = await tl<{ data: any[] }>("GET", `/knowledge-stores/${k._id}/items?page_limit=50`);
-        for (const it of items.data || []) {
-          if (it._id) await tl("DELETE", `/knowledge-stores/${k._id}/items/${it._id}`).catch(() => {});
+  try {
+    const list = await tl<{ data: any[] }>("GET", "/knowledge-stores?page_limit=50");
+    for (const k of list.data || []) {
+      if (typeof k.name === "string" && k.name.startsWith(PREFIX)) {
+        try {
+          const items = await tl<{ data: any[] }>("GET", `/knowledge-stores/${k._id}/items?page_limit=50`);
+          for (const it of items.data || []) {
+            if (it._id) await tl("DELETE", `/knowledge-stores/${k._id}/items/${it._id}`).catch(() => {});
+          }
+          await tl("DELETE", `/knowledge-stores/${k._id}`);
+          console.log(`[e2e] swept orphan KS ${k._id} (${k.name})`);
+        } catch (e) {
+          console.warn(`[e2e] failed to sweep ${k._id}:`, e);
         }
-        await tl("DELETE", `/knowledge-stores/${k._id}`);
-        console.log(`[e2e] swept orphan KS ${k._id} (${k.name})`);
-      } catch (e) {
-        console.warn(`[e2e] failed to sweep ${k._id}:`, e);
       }
     }
+
+    const ks = await tl<any>("POST", "/knowledge-stores", {
+      name: MUTATIONS_KS_NAME,
+      description: "Per-run throwaway for Playwright Library upload + mutation specs.",
+    });
+    console.log(`[e2e] mutations KS: ${ks._id} (${ks.name})`);
+
+    upsertEnv(ENV_PATH, "TEST_MUTATIONS_KS_ID", ks._id);
+    process.env.TEST_MUTATIONS_KS_ID = ks._id;
+    console.log(`[e2e] wrote TEST_MUTATIONS_KS_ID=${ks._id} to ${ENV_PATH}`);
+  } catch (e) {
+    console.warn(`[e2e] TL SaaS provisioning failed; other specs will still run:`, e);
   }
-
-  const ks = await tl<any>("POST", "/knowledge-stores", {
-    name: MUTATIONS_KS_NAME,
-    description: "Per-run throwaway for Playwright Library upload + mutation specs.",
-  });
-  console.log(`[e2e] mutations KS: ${ks._id} (${ks.name})`);
-
-  // (KS is brand-new this run, so it's already empty — no drain needed.)
-
-  // Persist the id into .env.test so a manual re-run of a subset of
-  // specs (without re-running globalSetup) can still find it, AND set
-  // it on process.env so worker processes spawned next inherit it.
-  upsertEnv(ENV_PATH, "TEST_MUTATIONS_KS_ID", ks._id);
-  process.env.TEST_MUTATIONS_KS_ID = ks._id;
-  console.log(`[e2e] wrote TEST_MUTATIONS_KS_ID=${ks._id} to ${ENV_PATH}`);
 }
 
 function upsertEnv(filePath: string, key: string, value: string) {
