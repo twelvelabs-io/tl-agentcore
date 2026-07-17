@@ -223,6 +223,31 @@ Bedrock Marengo 3.0 runs via `StartAsyncInvoke`, returning the standard
 `asset_id`, `knowledge_store_id`, `start_sec`, `end_sec`, and `s3_uri`
 as filterable metadata.
 
+## Teardown
+
+`terraform destroy` on this stack has two known ordering quirks. Both
+have one-line workarounds; documenting them here so a POC teardown
+doesn't leave orphaned AWS resources.
+
+```bash
+# 1. The Cognito UI customization can only be modified while its
+#    domain still exists, but Terraform tries to destroy them in
+#    parallel. Drop the UI customization from state first.
+terraform state rm aws_cognito_user_pool_ui_customization.this
+
+# 2. terraform destroy on the clips bucket will succeed for greenfield
+#    tests via the `force_destroy = true` on the resource. If you
+#    forked before v0.4.6 or set force_destroy=false, empty the bucket
+#    manually first:
+# aws s3 rm s3://<clips-bucket> --recursive --profile <your-profile>
+
+# Now destroy cleanly.
+terraform destroy \
+  -var="aws_profile=your-profile" \
+  -var="seed_admin_email=you@example.com" \
+  -var="agent_image_tag=<v-tag>"
+```
+
 ## Implementation notes
 
 Operational gotchas worth knowing before the first apply:

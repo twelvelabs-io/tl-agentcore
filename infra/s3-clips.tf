@@ -16,6 +16,12 @@
 
 resource "aws_s3_bucket" "clips" {
   bucket = "${local.fqname}-clips"
+  # Clean-teardown parity with the frontend bucket: terraform destroy
+  # should be able to remove the deploy even when the bucket has
+  # uploads/clips/hls/embeddings objects in it. Production deployments
+  # that never destroy should flip this to false if the accidental-
+  # wipe risk is a concern.
+  force_destroy = true
 }
 
 resource "aws_s3_bucket_ownership_controls" "clips" {
