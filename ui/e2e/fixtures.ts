@@ -106,9 +106,16 @@ export const test = base.extend<Fixtures>({
       await context.storageState({ path: STORAGE_STATE });
     } else if (await page.locator('input[type="email"]').first().isVisible().catch(() => false)) {
       // In-SPA SignInScreen path. Fill email + password and submit.
+      // The form is a motion.form (Framer Motion) whose entry/pane
+      // animations keep the submit button in an "unstable" bounding
+      // box for the first ~300ms — click() would keep re-checking
+      // stability and time out. Pressing Enter on the password field
+      // triggers the form's native onSubmit and skips the whole click
+      // stability dance.
       await page.locator('input[type="email"]').first().fill(testConfig.userEmail);
-      await page.locator('input[type="password"]').first().fill(testConfig.userPassword);
-      await page.locator('button[type="submit"]').first().click();
+      const pwd = page.locator('input[type="password"]').first();
+      await pwd.fill(testConfig.userPassword);
+      await pwd.press("Enter");
       // Wait for the masthead to settle after sign-in.
       await page.locator('text=Rough Cut').first().waitFor({ timeout: 30_000 });
       await context.storageState({ path: STORAGE_STATE });

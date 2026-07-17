@@ -4,26 +4,21 @@ import { test, expect } from "./fixtures";
  *  is reachable from any tab via the in-page "history" button. */
 
 async function ensureAtLeastOneSavedCut(page: import("@playwright/test").Page) {
-  // Open the drawer first; if it has entries, we're done.
-  await page.locator('button.tab:has-text("Rough Cut")').first().click();
-  await page.locator('button:has-text("history")').first().click();
-  const drawer = page.locator("aside.fixed");
-  await expect(drawer).toBeVisible();
-  const haveEntry = await drawer.locator("div.cursor-pointer").count();
-  if (haveEntry > 0) {
-    await page.keyboard.press("Escape");
-    await expect(drawer).toBeHidden();
-    return;
-  }
-  await page.keyboard.press("Escape");
-  await expect(drawer).toBeHidden();
-
-  // Plant a synthetic history entry directly in localStorage — plan
+  // Unconditionally plant a synthetic history entry. Live plan
   // generation would need 60-180 s of real Bedrock calls and can be
-  // brittle on small KSes. We just need SOME entry to test drawer
-  // delete against; the history data-format is stable.
-  await page.evaluate(() => {
+  // brittle on small KSes; the drawer render + delete UI is what the
+  // test really cares about.
+  //
+  // No page.reload — the drawer's useEffect on `open` re-reads
+  // localStorage every time it opens, so we don't need to bounce the
+  // page. Also, reload risks losing the Cognito auth state on some
+  // browsers and would force a re-sign-in.
+  await page.locator('button.tab:has-text("Rough Cut")').first().click();
+  const planted = await page.evaluate(() => {
     const key = "tl-agentcore.roughcut.history.v1";
+    const existing = (() => {
+      try { return JSON.parse(localStorage.getItem(key) || "[]"); } catch { return []; }
+    })();
     const entry = {
       id: `e2e-${Date.now()}`,
       kind: "rough_cut",
@@ -34,10 +29,11 @@ async function ensureAtLeastOneSavedCut(page: import("@playwright/test").Page) {
       plan: { title: "e2e", scenes: [{ scene_id: "01", scene_name: "e2e", clips: [] }] },
       messages: [],
     };
-    localStorage.setItem(key, JSON.stringify([entry]));
+    const list = [entry, ...existing];
+    localStorage.setItem(key, JSON.stringify(list));
+    return list.length;
   });
-  await page.reload();
-  await page.locator('button.tab:has-text("Rough Cut")').first().click();
+  if (planted === 0) throw new Error("failed to plant history entry — localStorage set-and-read returned empty");
 }
 
 test.describe("History drawer paths", () => {
@@ -74,10 +70,13 @@ test.describe("History drawer paths", () => {
     await signedInPage.locator('button:has-text("history")').first().click();
     const drawer = signedInPage.locator("aside.fixed");
     await expect(drawer).toBeVisible({ timeout: 10_000 });
-    // Rough-cut cards have data-kind="rough_cut" (an unambiguous
-    // selector). The old `div.cursor-pointer` matched non-card
-    // elements too.
+    // Drawer entries state hydrates from localStorage inside a
+    // useEffect that runs after the first render, so on cold open the
+    // cards briefly count 0 before the second render lands. Wait
+    // (with polling) for the first card to become visible before
+    // measuring — count() alone doesn't retry.
     const cards = drawer.locator('[data-kind="rough_cut"], [data-kind="agent"]');
+    await expect(cards.first()).toBeVisible({ timeout: 10_000 });
     const initialCount = await cards.count();
     console.log(`drawer card count: ${initialCount}`);
     expect(initialCount).toBeGreaterThan(0);

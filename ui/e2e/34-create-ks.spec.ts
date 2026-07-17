@@ -45,7 +45,11 @@ test.describe("Create knowledge store", () => {
     await expect(nameInput).toBeVisible({ timeout: 5_000 });
     await nameInput.fill(uniqueName);
     await signedInPage.locator('input[placeholder^="Description"]').first().fill("created by 34-create-ks.spec.ts");
-    await signedInPage.locator('button:has-text("create")').first().click();
+    // Exact-name match: leftover KSes from prior runs are named
+    // `e2e-createks-<ts>` and their row buttons match a substring
+    // "create" selector, so .first() would click the wrong element and
+    // close the dropdown without submitting the form.
+    await signedInPage.getByRole("button", { name: "create", exact: true }).click();
 
     // The new KS becomes active — the picker button now shows its name.
     await expect(signedInPage.locator(`button:has-text("Knowledge base") >> text=${uniqueName}`).first())
@@ -56,22 +60,23 @@ test.describe("Create knowledge store", () => {
     console.log(`created ks_id: ${createdKsId}`);
 
     // Cleanup: DELETE the KS via the same authenticated fetch the SPA uses.
-    // We drive it from the page context so the Cognito access token is
-    // whatever the SPA is using in this session.
+    // Cognito's amazon-cognito-identity-js stores tokens under
+    // `CognitoIdentityServiceProvider.<ClientId>.<Username>.accessToken` —
+    // scan localStorage for that key shape rather than guess the exact
+    // one, then send an authorized DELETE from the page context.
     const deleteResult = await signedInPage.evaluate(async (ksId) => {
-      const authHeader = (window as any).localStorage.getItem("cognito.access_token") ||
-                         (window as any).localStorage.getItem("access_token");
-      // Fall back to fetching the /kb list first to grab any auth wiring;
-      // simplest is: rely on the same-origin cookie/token flow. The SPA
-      // stores tokens in localStorage under Cognito's identityjs keys.
-      // Just call the endpoint and rely on the browser's context.
+      let token: string | null = null;
+      for (let i = 0; i < localStorage.length; i += 1) {
+        const k = localStorage.key(i);
+        if (k && k.endsWith(".accessToken")) { token = localStorage.getItem(k); break; }
+      }
       const res = await fetch(`/kb/knowledge-stores/${ksId}`, {
         method: "DELETE",
-        headers: authHeader ? { authorization: `Bearer ${authHeader}` } : {},
+        headers: token ? { authorization: `Bearer ${token}` } : {},
       });
-      return { status: res.status, body: await res.text().catch(() => "") };
+      return { status: res.status, hadToken: !!token };
     }, createdKsId);
-    console.log(`delete cleanup: ${deleteResult.status}`);
+    console.log(`delete cleanup: ${deleteResult.status} (auth=${deleteResult.hadToken})`);
     // Non-fatal if cleanup misfires — the row just lingers in DDB.
 
     // Re-select the pre-existing test KS so the next spec's signedInPage
