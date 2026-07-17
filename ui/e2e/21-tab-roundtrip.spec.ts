@@ -32,9 +32,14 @@ test.describe("Tab navigation", () => {
     // localStorage history when generate() finished, so the recovery
     // path is: open the history drawer and restore.
     await signedInPage.locator('button.tab:has-text("Rough Cut")').first().click();
-    await expect(signedInPage.locator("text=§ Brief").first()).toBeVisible({ timeout: 10_000 });
-    // Brief textarea is back to the default sample script.
-    await expect(signedInPage.locator("text=§ Chat")).toBeHidden();
+    // Back on RoughCut. The Brief header switches between "Brief"
+    // (empty state) and "§ Brief" (collapsed after any turn). Match
+    // either flavor.
+    await expect(signedInPage.locator('.label:has-text("Brief")').first()).toBeVisible({ timeout: 10_000 });
+    // Note: earlier UI iterations dropped in-memory chat state on tab
+    // unmount and required a history-drawer restore to recover. Current
+    // UI hydrates from localStorage on remount, so the chat thread may
+    // still be present — we no longer assert on it here.
 
     // KS picker shows the same KS (KS state lives in the global store
     // and survives tab switches).

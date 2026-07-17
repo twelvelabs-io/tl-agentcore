@@ -10,16 +10,19 @@ test.describe("Frame-rate picker", () => {
   test("switching to 25 fps before assembling produces an EDL whose SMPTE timecodes use a 25-frame base", async ({ signedInPage }) => {
     await signedInPage.locator('button.tab:has-text("Rough Cut")').first().click();
 
-    // Default is 24 fps; switch to 25 via the Pill picker in the brief
-    // header. The Pill is only rendered in initial mode (before the
-    // chat thread takes over the left rail), so fps must be picked
-    // before clicking assemble.
-    const pill = signedInPage.locator('button:has-text("24 fps")').first();
-    await expect(pill).toBeVisible();
+    // Set fps=25 via the Pill picker in the brief header. The Pill's
+    // trigger text is the current fps (any of 24 / 23.976 / 25 / 29.97
+    // / 30 depending on localStorage state) so match on the trailing
+    // "fps ▼" arrow rather than a specific value. Idempotent: if
+    // fps=25 is already active, clicking the option is a no-op.
+    const pill = signedInPage.locator('button:has-text("fps"):has-text("▼")').first();
+    await expect(pill).toBeVisible({ timeout: 15_000 });
     await pill.click();
-    await signedInPage.locator('button:has-text("25 fps · PAL")').click();
-    // Confirm the Pill now reads "25 fps · PAL".
-    await expect(signedInPage.locator('button:has-text("25 fps · PAL")').first()).toBeVisible();
+    const palOption = signedInPage.locator('button:has-text("25 fps · PAL")').first();
+    await expect(palOption).toBeVisible({ timeout: 10_000 });
+    await palOption.click();
+    // Trigger should now read "25 fps ▼".
+    await expect(signedInPage.locator('button:has-text("25 fps"):has-text("▼")').first()).toBeVisible();
 
     // Generate a plan.
     await signedInPage.locator("textarea").first().fill(

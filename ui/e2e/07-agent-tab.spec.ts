@@ -27,10 +27,12 @@ test.describe("Agent tab", () => {
   test("sending a short question yields a streamed text response", async ({ signedInPage }) => {
     await signedInPage.locator('button.tab:has-text("Agent")').first().click();
 
-    // Block until the Agent tab has actually mounted (tool catalog + the
-    // ask textarea + the session info that confirms ks is set).
+    // Block until the Agent tab has actually mounted (tool catalog +
+    // the ask textarea). "Knowledge store" as a visible label was
+    // replaced by the § Question header + tool-catalog vocabulary in a
+    // later UI iteration; assert on those instead.
     await expect(signedInPage.locator("text=vector_search").first()).toBeVisible({ timeout: 10_000 });
-    await expect(signedInPage.locator('text=Knowledge store').first()).toBeVisible({ timeout: 5_000 });
+    await expect(signedInPage.locator("text=§ Question").first()).toBeVisible({ timeout: 5_000 });
 
     // Fill the question textarea. Use pressSequentially over fill so the
     // onChange handler fires per-character — fill() can race the React

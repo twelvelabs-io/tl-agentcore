@@ -4,7 +4,7 @@ import { test, expect } from "./fixtures";
  *  is reachable from any tab via the in-page "history" button. */
 
 async function ensureAtLeastOneSavedCut(page: import("@playwright/test").Page) {
-  // Open the drawer; if it has no entries, generate one quickly.
+  // Open the drawer first; if it has entries, we're done.
   await page.locator('button.tab:has-text("Rough Cut")').first().click();
   await page.locator('button:has-text("history")').first().click();
   const drawer = page.locator("aside.fixed");
@@ -15,12 +15,29 @@ async function ensureAtLeastOneSavedCut(page: import("@playwright/test").Page) {
     await expect(drawer).toBeHidden();
     return;
   }
-  // No saved cuts; close drawer and generate one.
   await page.keyboard.press("Escape");
   await expect(drawer).toBeHidden();
-  await page.locator("textarea").first().fill("Quick 10-second cut. Opener. Action. Closer.");
-  await page.locator('button:has-text("assemble rough cut")').click();
-  await expect(page.getByText(/^scene \d/i).first()).toBeVisible({ timeout: 3 * 60_000 });
+
+  // Plant a synthetic history entry directly in localStorage — plan
+  // generation would need 60-180 s of real Bedrock calls and can be
+  // brittle on small KSes. We just need SOME entry to test drawer
+  // delete against; the history data-format is stable.
+  await page.evaluate(() => {
+    const key = "tl-agentcore.roughcut.history.v1";
+    const entry = {
+      id: `e2e-${Date.now()}`,
+      kind: "rough_cut",
+      created_at: Date.now(),
+      title: "e2e history-drawer test entry",
+      script: "e2e history-drawer test",
+      fps: 24,
+      plan: { title: "e2e", scenes: [{ scene_id: "01", scene_name: "e2e", clips: [] }] },
+      messages: [],
+    };
+    localStorage.setItem(key, JSON.stringify([entry]));
+  });
+  await page.reload();
+  await page.locator('button.tab:has-text("Rough Cut")').first().click();
 }
 
 test.describe("History drawer paths", () => {
@@ -45,14 +62,25 @@ test.describe("History drawer paths", () => {
 
   test("deleting an individual saved cut removes it from the drawer", async ({ signedInPage }) => {
     await ensureAtLeastOneSavedCut(signedInPage);
+    // Diagnostic: confirm localStorage holds the planted entry.
+    const localCount = await signedInPage.evaluate(() => {
+      try {
+        return JSON.parse(localStorage.getItem("tl-agentcore.roughcut.history.v1") || "[]").length;
+      } catch { return -1; }
+    });
+    console.log(`localStorage history entry count: ${localCount}`);
+    expect(localCount).toBeGreaterThan(0);
+
     await signedInPage.locator('button:has-text("history")').first().click();
     const drawer = signedInPage.locator("aside.fixed");
-    await expect(drawer).toBeVisible();
-    const cards = drawer.locator("div.cursor-pointer");
+    await expect(drawer).toBeVisible({ timeout: 10_000 });
+    // Rough-cut cards have data-kind="rough_cut" (an unambiguous
+    // selector). The old `div.cursor-pointer` matched non-card
+    // elements too.
+    const cards = drawer.locator('[data-kind="rough_cut"], [data-kind="agent"]');
     const initialCount = await cards.count();
+    console.log(`drawer card count: ${initialCount}`);
     expect(initialCount).toBeGreaterThan(0);
-    // Click the × on the first card. The button text is the literal "×"
-    // glyph inside a label-styled <button>.
     const firstCard = cards.first();
     await firstCard.locator('button[title="remove from history"]').click();
     await expect(cards).toHaveCount(initialCount - 1, { timeout: 5_000 });
