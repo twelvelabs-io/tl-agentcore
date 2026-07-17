@@ -57,6 +57,13 @@ provider block pins to `var.aws_profile` (default `"default"`), so
 cd infra
 terraform init
 
+# Install lambda deps. The terraform archive_file resources zip each
+# lambda's directory verbatim — including node_modules. On a fresh
+# clone, node_modules/ doesn't exist, so any lambda that imports a
+# third-party module (aws-jwt-verify, @aws-sdk/*) 500s at runtime
+# with "Cannot find package …". Idempotent, one-time per host.
+./install-lambda-deps.sh
+
 # Phase 1 — the ECR repo the runtime image needs to exist before the
 # runtime resource. -target picks up its transitive dependencies too.
 terraform apply \
@@ -74,6 +81,10 @@ terraform apply \
   -var="seed_admin_email=you@example.com" \
   -var="agent_image_tag=<v-timestamp-from-build-agent.sh>"
 ```
+
+If you cloned before running `install-lambda-deps.sh`, don't worry —
+just run it now and repeat the phase 2 apply. Terraform detects the
+archive hash change and redeploys every lambda whose deps just landed.
 
 Subsequent applies are single-phase — pass the current `agent_image_tag`
 each time so Terraform doesn't try to downgrade the runtime to the
