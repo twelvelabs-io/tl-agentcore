@@ -77,14 +77,10 @@ export async function fetchKbGraph(ks_id: string): Promise<GraphPayload> {
   if (!r.ok) throw new Error(`kb-graph ${r.status}: ${await r.text().catch(() => "")}`);
   return r.json();
 }
-const DEMO_PASSWORD = import.meta.env.VITE_DEMO_PASSWORD || "";
-
 async function authHeaders(): Promise<Record<string, string>> {
-  // Prefer Cognito JWT when signed in; fall back to legacy password during
-  // dev or pre-auth bootstrap. The lambdas accept either.
   const token = await getAccessToken();
   if (token) return { authorization: `Bearer ${token}` };
-  return DEMO_PASSWORD ? { "x-demo-password": DEMO_PASSWORD } : {};
+  return {};
 }
 
 async function call<T = any>(method: string, path: string, body?: any, isJson = true): Promise<T> {

@@ -49,7 +49,7 @@ const cors = () => ({
   headers: {
     "access-control-allow-origin": "*",
     "access-control-allow-methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
-    "access-control-allow-headers": "authorization,content-type,x-demo-password",
+    "access-control-allow-headers": "authorization,content-type",
   },
   body: "",
 });
