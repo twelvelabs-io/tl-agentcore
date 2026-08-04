@@ -239,4 +239,12 @@ async def ws_handler(websocket, _context: Any) -> None:
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
+    # The AgentCore Runtime container only listens for traffic from
+# bedrock-agentcore's internal network — it's never publicly reachable.
+# The 0.0.0.0 bind is the SDK-required contract. Semgrep flags
+# top-level app.run() as ignored by flask, but bedrock-agentcore's
+# runtime harness invokes this module directly via
+# `python -m tl_agentcore.runtime`, so the module-level app.run IS
+# what starts the server.
+# nosemgrep
+app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))

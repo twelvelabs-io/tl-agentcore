@@ -23,6 +23,15 @@ RUN pip install --no-index --find-links=/wheels -r requirements.txt \
 
 COPY tl_agentcore ./tl_agentcore
 
+# Drop root before the process runs. AgentCore doesn't require root
+# and the container talks only to STDOUT + a single HTTP port — no
+# host mounts, no privileged syscalls. Fixed uid/gid so build layers
+# (`chown ...`) are cache-stable across rebuilds.
+RUN groupadd --system --gid 1001 agent \
+ && useradd  --system --uid 1001 --gid 1001 --create-home --home-dir /home/agent agent \
+ && chown -R agent:agent /app
+USER agent
+
 EXPOSE 8080
 
 CMD ["python", "-m", "tl_agentcore.runtime"]

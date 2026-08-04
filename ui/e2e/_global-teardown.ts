@@ -24,6 +24,9 @@ async function tl<T = any>(method: string, p: string): Promise<T | null> {
     }
     return res.status === 204 ? (null as any) : (res.json() as Promise<T>);
   } catch (e) {
+    // Template literal, not util.format — Semgrep pattern is a false
+    // positive here (no format specifiers evaluated).
+    // nosemgrep: javascript.lang.security.audit.unsafe-formatstring.unsafe-formatstring
     console.warn(`[e2e teardown] ${method} ${p}:`, e);
     return null;
   }

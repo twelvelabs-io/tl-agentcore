@@ -63,6 +63,8 @@ resource "aws_lambda_function" "kb_graph" {
   timeout          = 30
   memory_size      = 512
 
+  tracing_config { mode = "Active" }
+
   environment {
     variables = {
       KB_CACHE_TABLE       = aws_dynamodb_table.kb_cache.name

@@ -57,12 +57,14 @@ resource "aws_lambda_function" "hls_finalize" {
   timeout          = 30
   memory_size      = 256
 
+  tracing_config { mode = "Active" }
+
   environment {
     variables = {
-      ASSETS_TABLE        = aws_dynamodb_table.assets.name
-      CLIPS_BUCKET        = aws_s3_bucket.clips.bucket
-      PLAYBACK_BASE_URL   = "https://${aws_cloudfront_distribution.frontend.domain_name}"
-      INDEX_FACES_LAMBDA  = aws_lambda_function.index_faces.function_name
+      ASSETS_TABLE       = aws_dynamodb_table.assets.name
+      CLIPS_BUCKET       = aws_s3_bucket.clips.bucket
+      PLAYBACK_BASE_URL  = "https://${aws_cloudfront_distribution.frontend.domain_name}"
+      INDEX_FACES_LAMBDA = aws_lambda_function.index_faces.function_name
     }
   }
 }

@@ -1,7 +1,13 @@
 strands-agents>=1.38.0
-bedrock-agentcore>=1.8.0
+bedrock-agentcore>=1.18.1
 boto3>=1.43.0
 httpx>=0.27
 # Pillow is used by find_by_image's Marengo fallback to upscale sub-128px
 # face crops before StartAsyncInvoke (Marengo rejects smaller inputs).
-Pillow>=10.0
+# Lower bound 12.3.0 pulls in fixes for the CVE cluster tracked as
+# PYSEC-2026-3493..3496 + earlier.
+Pillow>=12.3.0
+# Transitive pins for known-vulnerable versions surfaced by OSV. Both
+# come in via strands-agents / bedrock-agentcore.
+idna>=3.15
+python-multipart>=0.0.31

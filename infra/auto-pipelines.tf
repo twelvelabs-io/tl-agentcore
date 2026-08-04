@@ -74,6 +74,8 @@ resource "aws_lambda_function" "asset_profile" {
   timeout     = 300
   memory_size = 512
 
+  tracing_config { mode = "Active" }
+
   environment {
     variables = {
       CLIPS_BUCKET       = aws_s3_bucket.clips.bucket
@@ -160,6 +162,8 @@ resource "aws_lambda_function" "ks_rollup" {
   # there are many; 5 minutes covers a KS up to ~1,500 assets.
   timeout     = 600
   memory_size = 1024
+
+  tracing_config { mode = "Active" }
 
   environment {
     variables = {

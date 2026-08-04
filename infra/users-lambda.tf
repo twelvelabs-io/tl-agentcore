@@ -30,7 +30,7 @@ resource "aws_iam_role_policy_attachment" "users_basic" {
 
 data "aws_iam_policy_document" "users_perms" {
   statement {
-    sid     = "CognitoUserAdmin"
+    sid = "CognitoUserAdmin"
     actions = [
       "cognito-idp:ListUsers",
       "cognito-idp:AdminGetUser",
@@ -59,6 +59,8 @@ resource "aws_lambda_function" "users" {
   source_code_hash = data.archive_file.users.output_base64sha256
   timeout          = 15
   memory_size      = 256
+
+  tracing_config { mode = "Active" }
 
   environment {
     variables = {

@@ -51,6 +51,8 @@ resource "aws_lambda_function" "presign_upload" {
   timeout          = 10
   memory_size      = 256
 
+  tracing_config { mode = "Active" }
+
   environment {
     variables = {
       CLIPS_BUCKET_NAME    = aws_s3_bucket.clips.bucket
@@ -140,8 +142,8 @@ data "aws_iam_policy_document" "embed_clip_start_perms" {
   # AccessDeniedException from Bedrock — same bug we hit on the
   # runtime IAM policy in v0.4.5.
   statement {
-    sid       = "BedrockAsync"
-    actions   = ["bedrock:StartAsyncInvoke", "bedrock:GetAsyncInvoke", "bedrock:InvokeModel"]
+    sid     = "BedrockAsync"
+    actions = ["bedrock:StartAsyncInvoke", "bedrock:GetAsyncInvoke", "bedrock:InvokeModel"]
     resources = [
       "arn:aws:bedrock:*::foundation-model/*",
       "arn:aws:bedrock:*:${data.aws_caller_identity.current.account_id}:async-invoke/*",
@@ -157,19 +159,19 @@ data "aws_iam_policy_document" "embed_clip_start_perms" {
   # rows immediately; hls_finalize / Marengo finalize flip the status
   # fields later.
   statement {
-    sid     = "WriteAssetsRow"
-    actions = ["dynamodb:PutItem", "dynamodb:UpdateItem"]
+    sid       = "WriteAssetsRow"
+    actions   = ["dynamodb:PutItem", "dynamodb:UpdateItem"]
     resources = [aws_dynamodb_table.assets.arn]
   }
   # MediaConvert: endpoint discovery + job creation + pass the service role.
   statement {
-    sid     = "MediaConvertJob"
-    actions = ["mediaconvert:DescribeEndpoints", "mediaconvert:CreateJob", "mediaconvert:GetJob"]
+    sid       = "MediaConvertJob"
+    actions   = ["mediaconvert:DescribeEndpoints", "mediaconvert:CreateJob", "mediaconvert:GetJob"]
     resources = ["*"]
   }
   statement {
-    sid     = "PassMediaConvertRole"
-    actions = ["iam:PassRole"]
+    sid       = "PassMediaConvertRole"
+    actions   = ["iam:PassRole"]
     resources = [aws_iam_role.mediaconvert.arn]
     condition {
       test     = "StringEquals"
@@ -193,6 +195,8 @@ resource "aws_lambda_function" "embed_clip_start" {
   source_code_hash = data.archive_file.embed_clip_start.output_base64sha256
   timeout          = 30
   memory_size      = 512
+
+  tracing_config { mode = "Active" }
 
   environment {
     variables = {
@@ -290,6 +294,8 @@ resource "aws_lambda_function" "embed_clip_finalize" {
   source_code_hash = data.archive_file.embed_clip_finalize.output_base64sha256
   timeout          = 120
   memory_size      = 512
+
+  tracing_config { mode = "Active" }
 
   environment {
     variables = {

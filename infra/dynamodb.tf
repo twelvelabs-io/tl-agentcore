@@ -28,7 +28,11 @@ resource "aws_dynamodb_table" "kb_cache" {
   name         = "${local.fqname}-kb-cache"
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "pk"
-  range_key    = "sk"
+
+  point_in_time_recovery {
+    enabled = true
+  }
+  range_key = "sk"
 
   attribute {
     name = "pk"
@@ -45,6 +49,10 @@ resource "aws_dynamodb_table" "rights" {
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "asset_id"
 
+  point_in_time_recovery {
+    enabled = true
+  }
+
   attribute {
     name = "asset_id"
     type = "S"
@@ -55,6 +63,10 @@ resource "aws_dynamodb_table" "audiences" {
   name         = "${local.fqname}-audiences"
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "segment_id"
+
+  point_in_time_recovery {
+    enabled = true
+  }
 
   attribute {
     name = "segment_id"
@@ -72,6 +84,10 @@ resource "aws_dynamodb_table" "knowledge_stores" {
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "ks_id"
 
+  point_in_time_recovery {
+    enabled = true
+  }
+
   attribute {
     name = "ks_id"
     type = "S"
@@ -85,6 +101,10 @@ resource "aws_dynamodb_table" "assets" {
   name         = "${local.fqname}-assets"
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "asset_id"
+
+  point_in_time_recovery {
+    enabled = true
+  }
 
   attribute {
     name = "asset_id"

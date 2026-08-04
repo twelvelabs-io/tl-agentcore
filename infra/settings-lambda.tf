@@ -27,7 +27,7 @@ resource "aws_iam_role_policy_attachment" "settings_basic" {
 
 data "aws_iam_policy_document" "settings_perms" {
   statement {
-    sid     = "PromptOverridesRW"
+    sid = "PromptOverridesRW"
     actions = [
       "dynamodb:GetItem",
       "dynamodb:PutItem",
@@ -52,6 +52,8 @@ resource "aws_lambda_function" "settings" {
   source_code_hash = data.archive_file.settings.output_base64sha256
   timeout          = 15
   memory_size      = 256
+
+  tracing_config { mode = "Active" }
 
   environment {
     variables = {

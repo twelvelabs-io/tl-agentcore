@@ -1,0 +1,23 @@
+# E2E test infrastructure — test harness code, not production paths.
+# Semgrep flags template literals passed to console.warn (unsafe-format-
+# string false positives on JS template literals) and non-literal-regex
+# false positives where the input is a hard-coded config key. Neither
+# has an attacker-reachable input surface.
+ui/e2e/
+
+# Dev tooling — not shipped, not run against untrusted input.
+scripts/
+eval/
+
+# Build output.
+ui/dist/
+**/node_modules/
+agent/wheels/
+infra/.build/
+infra/.terraform/
+
+# Terraform is covered by Checkov + TFLint (see .checkov.yaml,
+# .tflint.hcl). Semgrep's terraform ruleset duplicates the CMK / KMS
+# hardening set we've reasoned through in .checkov.yaml, so run
+# those tools instead and skip Semgrep here to avoid double reporting.
+infra/

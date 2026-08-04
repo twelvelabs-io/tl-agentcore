@@ -30,6 +30,15 @@ resource "aws_cloudfront_distribution" "frontend" {
   default_root_object = "index.html"
   comment             = "${local.fqname} — tl-agentcore demo UI"
   price_class         = "PriceClass_100"
+  # WAFv2 web ACL — AWS managed common + known-bad-inputs rules. Defined
+  # in waf.tf. WAFv2 for CloudFront must live in us-east-1.
+  web_acl_id = aws_wafv2_web_acl.frontend.arn
+
+  logging_config {
+    bucket          = aws_s3_bucket.logs.bucket_domain_name
+    include_cookies = false
+    prefix          = "cloudfront/"
+  }
 
   origin {
     domain_name              = aws_s3_bucket.frontend.bucket_regional_domain_name
@@ -113,15 +122,15 @@ resource "aws_cloudfront_distribution" "frontend" {
   # MP4s assembled by the stitch lambda. Public via CloudFront only;
   # the bucket itself stays private.
   ordered_cache_behavior {
-    path_pattern             = "/stitched/*"
-    target_origin_id         = "clips-s3"
-    viewer_protocol_policy   = "redirect-to-https"
-    allowed_methods          = ["GET", "HEAD", "OPTIONS"]
-    cached_methods           = ["GET", "HEAD"]
-    compress                 = true
-    min_ttl                  = 0
-    default_ttl              = 300
-    max_ttl                  = 86400
+    path_pattern           = "/stitched/*"
+    target_origin_id       = "clips-s3"
+    viewer_protocol_policy = "redirect-to-https"
+    allowed_methods        = ["GET", "HEAD", "OPTIONS"]
+    cached_methods         = ["GET", "HEAD"]
+    compress               = true
+    min_ttl                = 0
+    default_ttl            = 300
+    max_ttl                = 86400
     forwarded_values {
       query_string = false
       cookies { forward = "none" }
@@ -146,15 +155,15 @@ resource "aws_cloudfront_distribution" "frontend" {
   # HLS output; no Cognito on the playback hop (public by random-id
   # obscurity in the asset_id namespace).
   ordered_cache_behavior {
-    path_pattern             = "/hls/*"
-    target_origin_id         = "clips-s3"
-    viewer_protocol_policy   = "redirect-to-https"
-    allowed_methods          = ["GET", "HEAD", "OPTIONS"]
-    cached_methods           = ["GET", "HEAD"]
-    compress                 = true
-    min_ttl                  = 0
-    default_ttl              = 300
-    max_ttl                  = 86400
+    path_pattern           = "/hls/*"
+    target_origin_id       = "clips-s3"
+    viewer_protocol_policy = "redirect-to-https"
+    allowed_methods        = ["GET", "HEAD", "OPTIONS"]
+    cached_methods         = ["GET", "HEAD"]
+    compress               = true
+    min_ttl                = 0
+    default_ttl            = 300
+    max_ttl                = 86400
     forwarded_values {
       query_string = false
       cookies { forward = "none" }

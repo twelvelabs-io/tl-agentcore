@@ -85,6 +85,9 @@ export default async function globalSetup() {
 function upsertEnv(filePath: string, key: string, value: string) {
   let content = "";
   if (fs.existsSync(filePath)) content = fs.readFileSync(filePath, "utf-8");
+  // `key` is a hard-coded string literal at every call site — never
+  // user input — so the ReDoS class Semgrep flags here doesn't apply.
+  // nosemgrep: javascript.lang.security.detect-non-literal-regexp.detect-non-literal-regexp
   const re = new RegExp(`^${key}=.*$`, "m");
   if (re.test(content)) content = content.replace(re, `${key}=${value}`);
   else content += `${content.endsWith("\n") || !content ? "" : "\n"}${key}=${value}\n`;

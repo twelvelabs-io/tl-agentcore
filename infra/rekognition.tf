@@ -31,7 +31,7 @@ resource "aws_iam_role_policy_attachment" "index_faces_basic" {
 
 data "aws_iam_policy_document" "index_faces_perms" {
   statement {
-    sid     = "RekognitionCollections"
+    sid = "RekognitionCollections"
     actions = [
       "rekognition:CreateCollection",
       "rekognition:IndexFaces",
@@ -78,12 +78,14 @@ resource "aws_lambda_function" "index_faces" {
   timeout     = 900
   memory_size = 512
 
+  tracing_config { mode = "Active" }
+
   environment {
     variables = {
-      STACK_FQNAME       = local.fqname
-      CLIPS_BUCKET_NAME  = aws_s3_bucket.clips.bucket
-      ASSETS_TABLE       = aws_dynamodb_table.assets.name
-      FRAMES_PER_ASSET   = "4"
+      STACK_FQNAME         = local.fqname
+      CLIPS_BUCKET_NAME    = aws_s3_bucket.clips.bucket
+      ASSETS_TABLE         = aws_dynamodb_table.assets.name
+      FRAMES_PER_ASSET     = "4"
       MIN_CELEB_CONFIDENCE = "85.0"
     }
   }

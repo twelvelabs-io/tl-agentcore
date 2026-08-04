@@ -75,7 +75,7 @@ resource "aws_cognito_user_pool" "this" {
           </body>
         </html>
       HTML
-      sms_message = "Rough Cut Lab — temp password for {username}: {####}"
+      sms_message   = "Rough Cut Lab — temp password for {username}: {####}"
     }
   }
 

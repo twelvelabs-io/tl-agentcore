@@ -33,17 +33,27 @@ resource "aws_iam_role" "runtime" {
 
 data "aws_iam_policy_document" "runtime_perms" {
   # Pull the container image at runtime start.
+  # ECR pull is split: `GetAuthorizationToken` is a service-level API
+  # with no resource ARN (must be `*`); the three read actions are
+  # scoped to the specific agent repo.
   statement {
-    sid = "EcrPull"
+    sid       = "EcrGetAuthToken"
+    actions   = ["ecr:GetAuthorizationToken"]
+    resources = ["*"]
+  }
+  statement {
+    sid = "EcrPullAgentRepo"
     actions = [
-      "ecr:GetAuthorizationToken",
       "ecr:BatchGetImage",
       "ecr:GetDownloadUrlForLayer",
       "ecr:BatchCheckLayerAvailability",
     ]
-    resources = ["*"]
+    resources = [aws_ecr_repository.agent.arn]
   }
-  # CloudWatch Logs.
+  # CloudWatch Logs — narrow to the runtime's log group. AgentCore
+  # creates a log group `bedrock-agentcore/runtimes/<runtime-id>-*`
+  # under the account, so we grant the log-group wildcard scoped to
+  # the current account/region.
   statement {
     sid = "Cloudwatch"
     actions = [
@@ -52,7 +62,10 @@ data "aws_iam_policy_document" "runtime_perms" {
       "logs:PutLogEvents",
       "logs:DescribeLogStreams",
     ]
-    resources = ["*"]
+    resources = [
+      "arn:aws:logs:${var.region}:${data.aws_caller_identity.current.account_id}:log-group:/aws/bedrock-agentcore/*",
+      "arn:aws:logs:${var.region}:${data.aws_caller_identity.current.account_id}:log-group:/aws/bedrock-agentcore/*:log-stream:*",
+    ]
   }
   # Invoke the Bedrock model + the cross-region inference profile.
   # Narrowed to just the three models the agent actually uses:
@@ -114,8 +127,8 @@ data "aws_iam_policy_document" "runtime_perms" {
   # to embed-cache/marengo/. StartAsyncInvoke writes its output to
   # async-out-eval/ which the agent then reads.
   statement {
-    sid       = "MarengoAsyncInvokeIO"
-    actions   = ["s3:PutObject"]
+    sid     = "MarengoAsyncInvokeIO"
+    actions = ["s3:PutObject"]
     resources = [
       "${aws_s3_bucket.clips.arn}/async-in-eval/*",
       "${aws_s3_bucket.clips.arn}/async-out-eval/*",
@@ -123,8 +136,8 @@ data "aws_iam_policy_document" "runtime_perms" {
     ]
   }
   statement {
-    sid       = "MarengoAsyncInvoke"
-    actions   = ["bedrock:InvokeModel", "bedrock:StartAsyncInvoke", "bedrock:GetAsyncInvoke"]
+    sid     = "MarengoAsyncInvoke"
+    actions = ["bedrock:InvokeModel", "bedrock:StartAsyncInvoke", "bedrock:GetAsyncInvoke"]
     resources = [
       "arn:aws:bedrock:*::foundation-model/twelvelabs.marengo-embed-3-0-v1:0",
       # Bedrock returns InvokeModel-denied on the async-invoke resource
@@ -136,8 +149,8 @@ data "aws_iam_policy_document" "runtime_perms" {
   }
   # v0.4 hybrid entity-reID: query per-KS Rekognition face collections.
   statement {
-    sid     = "RekognitionSearch"
-    actions = ["rekognition:SearchFacesByImage", "rekognition:DescribeCollection"]
+    sid       = "RekognitionSearch"
+    actions   = ["rekognition:SearchFacesByImage", "rekognition:DescribeCollection"]
     resources = ["arn:aws:rekognition:${var.region}:${data.aws_caller_identity.current.account_id}:collection/${local.fqname}-ks-*"]
   }
   # Read the cache DDB tables. kb_cache is Query-driven (single-

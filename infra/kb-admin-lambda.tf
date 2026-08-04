@@ -26,7 +26,7 @@ resource "aws_iam_role_policy_attachment" "kb_admin_basic" {
 
 data "aws_iam_policy_document" "kb_admin_perms" {
   statement {
-    sid     = "KsAndAssetsRW"
+    sid = "KsAndAssetsRW"
     actions = [
       "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem",
       "dynamodb:Query", "dynamodb:Scan",
@@ -68,12 +68,14 @@ resource "aws_lambda_function" "kb_admin" {
   timeout          = 30
   memory_size      = 512
 
+  tracing_config { mode = "Active" }
+
   environment {
     variables = {
-      KS_TABLE             = aws_dynamodb_table.knowledge_stores.name
-      ASSETS_TABLE         = aws_dynamodb_table.assets.name
-      KB_CACHE_TABLE       = aws_dynamodb_table.kb_cache.name
-      CLIPS_BUCKET         = aws_s3_bucket.clips.bucket
+      KS_TABLE       = aws_dynamodb_table.knowledge_stores.name
+      ASSETS_TABLE   = aws_dynamodb_table.assets.name
+      KB_CACHE_TABLE = aws_dynamodb_table.kb_cache.name
+      CLIPS_BUCKET   = aws_s3_bucket.clips.bucket
       # CloudFront URL that fronts /hls/* against the clips bucket. Stamped
       # onto every asset row so the player can build manifest URLs without
       # round-tripping to this lambda.

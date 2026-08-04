@@ -28,13 +28,13 @@ resource "aws_iam_role_policy_attachment" "stitch_basic" {
 
 data "aws_iam_policy_document" "stitch_perms" {
   statement {
-    sid     = "MediaConvertJob"
-    actions = ["mediaconvert:DescribeEndpoints", "mediaconvert:CreateJob", "mediaconvert:GetJob"]
+    sid       = "MediaConvertJob"
+    actions   = ["mediaconvert:DescribeEndpoints", "mediaconvert:CreateJob", "mediaconvert:GetJob"]
     resources = ["*"]
   }
   statement {
-    sid     = "PassMediaConvertRole"
-    actions = ["iam:PassRole"]
+    sid       = "PassMediaConvertRole"
+    actions   = ["iam:PassRole"]
     resources = [aws_iam_role.mediaconvert.arn]
     condition {
       test     = "StringEquals"
@@ -46,8 +46,8 @@ data "aws_iam_policy_document" "stitch_perms" {
   # observed), the lambda lists the stitched/<jobId>/ prefix to find the
   # actual MP4 key MC wrote.
   statement {
-    sid     = "ListStitchedOutputs"
-    actions = ["s3:ListBucket"]
+    sid       = "ListStitchedOutputs"
+    actions   = ["s3:ListBucket"]
     resources = [aws_s3_bucket.clips.arn]
     condition {
       test     = "StringLike"
@@ -71,6 +71,8 @@ resource "aws_lambda_function" "stitch" {
   source_code_hash = data.archive_file.stitch.output_base64sha256
   timeout          = 30
   memory_size      = 512
+
+  tracing_config { mode = "Active" }
 
   environment {
     variables = {

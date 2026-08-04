@@ -1,0 +1,125 @@
+# Checkov policy exemptions. Each skip has a documented reason.
+# Reviewed against Checkov 3.3.9 output on 2026-08-04.
+#
+# Run: `checkov -d infra --framework terraform`
+
+directory:
+  - infra
+
+framework:
+  - terraform
+
+# Skips are grouped by rationale. Do not add to this list without a
+# comment explaining why the check does not apply.
+skip-check:
+  # ── False positives for our architecture ──────────────────────────
+  #
+  # Auth is enforced INSIDE every lambda (aws-jwt-verify) rather than at
+  # the API Gateway route level. Checkov can't see through the JWT
+  # library call and flags every route. Coverage exists — see
+  # lambda/*/auth.mjs.
+  - CKV_AWS_309    # API GatewayV2 route lacks authorization_type
+
+  # Reference implementation targets accounts without a VPC layer. Every
+  # lambda talks to AWS-native services (Bedrock, S3, DynamoDB, Cognito)
+  # over public endpoints that don't need VPC egress.
+  - CKV_AWS_117    # Lambda not configured inside a VPC
+
+  # Concurrency + DLQ are ops-level decisions for the deploying customer
+  # to make against their traffic + budget. Zero traffic during a demo
+  # doesn't warrant reserved concurrency; adding DLQ hides real errors
+  # behind an async queue for tiny volume.
+  - CKV_AWS_115    # Lambda has no reserved concurrent execution limit
+  - CKV_AWS_116    # Lambda has no Dead Letter Queue
+
+  # Lambda code signing adds a `terraform apply` prerequisite (create
+  # signing profile + sign zips) that would fork the deploy story
+  # for a reference stack. Customer-specific enterprise concern.
+  - CKV_AWS_272    # Lambda code signing not enabled
+
+  # CloudWatch retention 1yr → 14d is a deliberate cost trade-off for
+  # a reference implementation. Adjust in the customer fork.
+  - CKV_AWS_338    # Log group retention < 1 year
+
+  # Reference stack is single-region. Cross-region replication doubles
+  # storage cost + operational surface; customer decision.
+  - CKV_AWS_144    # S3 cross-region replication disabled
+  - CKV_AWS_310    # CloudFront lacks origin failover
+
+  # Geo restriction is a customer policy call, not a security default.
+  - CKV_AWS_374    # CloudFront no geo restriction
+
+  # Not applicable: TL-Solutions stack runs Node + Python lambdas, no
+  # Java code path.
+  - CKV2_AWS_47    # WAFv2 lacks AMR Log4j rule
+
+  # Custom SSL cert + response-headers policy = custom-domain deploy.
+  # Reference stack uses the default `*.cloudfront.net` cert, which
+  # is TLSv1.2+ by default.
+  - CKV2_AWS_42    # CloudFront custom SSL certificate
+  - CKV2_AWS_32    # CloudFront response headers policy
+  - CKV_AWS_174    # CloudFront viewer TLS version — default *.cloudfront.net is TLS 1.2+
+
+  # Event notifications on S3 = customer integration hook. Reference
+  # stack drives S3 from the SPA/lambdas synchronously; nothing to
+  # notify.
+  - CKV2_AWS_62    # S3 bucket has no event notifications
+
+  # S3 lifecycle: clips + frontend have no expiration by design (users
+  # own their media; SPA assets version-controlled via CloudFront
+  # invalidation). The logs bucket DOES have a lifecycle (see
+  # s3-logging.tf).
+  - CKV2_AWS_61    # S3 lifecycle configuration missing
+  - CKV_AWS_300    # S3 lifecycle for aborting multipart uploads (see logs bucket)
+
+  # ── Customer-managed KMS is opt-in ────────────────────────────────
+  #
+  # AWS-managed keys (SSE-S3, SSE-DDB, etc.) cover encryption-at-rest
+  # for a reference implementation. Customers with compliance
+  # requirements (HIPAA, FedRAMP) can layer CMK/BYOK on top by
+  # setting kms_master_key_id / server_side_encryption on the
+  # relevant resources. Cost per CMK: ~$1/mo + IAM plumbing.
+  - CKV_AWS_145    # S3 bucket not encrypted with KMS CMK
+  - CKV_AWS_119    # DynamoDB not encrypted with KMS CMK
+  - CKV_AWS_136    # ECR not encrypted with KMS
+  - CKV_AWS_158    # CloudWatch log group not encrypted with KMS
+  - CKV_AWS_173    # Lambda env vars not encrypted with KMS CMK
+
+  # ── Workflow choices ──────────────────────────────────────────────
+  #
+  # We overwrite `:latest` on every build so `terraform apply` sees the
+  # same tag pointer regardless of image content; the versioned
+  # `:v<timestamp>` tag pin is what drives the runtime redeploy. Making
+  # tags immutable would break both patterns.
+  - CKV_AWS_51     # ECR image tags mutable
+
+  # ECR image scan on push adds ~30s to every build for a reference
+  # stack that's rebuilt every code change. Customers should turn this
+  # on in their production fork.
+  - CKV_AWS_163    # ECR image scan on push disabled
+
+  # Lambda function URL auth: none of our lambdas expose function URLs
+  # (all fronted by API Gateway). Where this fires it's a false
+  # positive on internal roles.
+  - CKV_AWS_363    # Lambda function URL authentication
+
+  # MediaConvert API constraints: DescribeEndpoints is service-scoped
+  # (no resource ARN exists), and CreateJob without a specific queue
+  # ARN forces `*`. Applies to stitch + embed_clip_start policies.
+  # The paired PassMediaConvertRole IS narrowed to the specific role
+  # + service condition, so escalation via PassRole is blocked.
+  - CKV_AWS_111    # IAM write access without constraints
+  - CKV_AWS_356    # IAM `*` resource for restrictable actions
+
+  # CloudFront's legacy standard log delivery writes into the log bucket
+  # via awslogsdelivery ACL — the `log-delivery-write` bucket ACL is
+  # mandatory. Ownership + public-access-block still block everything
+  # else.
+  - CKV2_AWS_65    # S3 bucket ACLs enabled
+
+  # WAF logging requires a paired Kinesis Firehose delivery stream (or
+  # a specific S3 prefix). Reference stack doesn't provision one;
+  # customers wanting audit trails can add the destination and re-
+  # enable this check. CloudWatch metrics are on so rule-hit counts
+  # are visible in the console today.
+  - CKV2_AWS_31    # WAFv2 lacks logging configuration
