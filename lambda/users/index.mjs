@@ -36,14 +36,13 @@ const ADMIN_GROUP = process.env.ADMIN_GROUP_NAME || "admins";
 
 const json = (statusCode, body) => ({
   statusCode,
-  headers: { "content-type": "application/json", "access-control-allow-origin": "*" },
+  headers: { "content-type": "application/json" },
   body: typeof body === "string" ? body : JSON.stringify(body),
 });
 
 const cors = () => ({
   statusCode: 204,
   headers: {
-    "access-control-allow-origin": "*",
     "access-control-allow-methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
     "access-control-allow-headers": "authorization,content-type",
   },

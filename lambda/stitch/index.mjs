@@ -45,14 +45,13 @@ async function getMc() {
 
 const json = (statusCode, body) => ({
   statusCode,
-  headers: { "content-type": "application/json", "access-control-allow-origin": "*" },
+  headers: { "content-type": "application/json" },
   body: JSON.stringify(body),
 });
 
 const cors = () => ({
   statusCode: 204,
   headers: {
-    "access-control-allow-origin": "*",
     "access-control-allow-methods": "GET,POST,OPTIONS",
     "access-control-allow-headers": "authorization,content-type",
   },

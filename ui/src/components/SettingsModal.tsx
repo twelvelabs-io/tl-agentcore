@@ -158,19 +158,34 @@ function PromptsTab() {
   }
   return (
     <>
+      {!isAdmin() && (
+        <div
+          className="px-5 py-3 label font-mono text-[11px]"
+          style={{ color: "var(--color-ink-faint)", borderBottom: "1px solid var(--color-rule)" }}
+        >
+          read-only · prompt edits are gated on the admins Cognito group
+        </div>
+      )}
       {(Object.keys(prompts) as PromptId[]).map((id) => (
-        <PromptEditor key={id} id={id} info={prompts[id]} onUpdated={(next) => setPrompts(next)} />
+        <PromptEditor
+          key={id}
+          id={id}
+          info={prompts[id]}
+          readOnly={!isAdmin()}
+          onUpdated={(next) => setPrompts(next)}
+        />
       ))}
     </>
   );
 }
 
 function PromptEditor({
-  id, info, onUpdated,
+  id, info, onUpdated, readOnly = false,
 }: {
   id: PromptId;
   info: PromptInfo;
   onUpdated: (next: Prompts) => void;
+  readOnly?: boolean;
 }) {
   const [draft, setDraft] = useState(info.current);
   useEffect(() => { setDraft(info.current); }, [info.current]);
@@ -239,6 +254,7 @@ function PromptEditor({
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         spellCheck={false}
+        readOnly={readOnly}
         className="w-full mt-3 font-mono text-[12px] leading-snug rounded-[var(--radius-card)] p-3"
         style={{
           background: "var(--color-surface)",
@@ -268,24 +284,24 @@ function PromptEditor({
             className="label rounded-full px-3 py-1.5"
             style={{
               border: "1px solid var(--color-rule)",
-              opacity: !info.overridden ? 0.4 : 1,
-              cursor: !info.overridden ? "not-allowed" : "pointer",
+              opacity: readOnly || !info.overridden ? 0.4 : 1,
+              cursor: readOnly || !info.overridden ? "not-allowed" : "pointer",
             }}
             onClick={onReset}
-            disabled={busy === "reset" || !info.overridden}
+            disabled={busy === "reset" || !info.overridden || readOnly}
           >
             {busy === "reset" ? "resetting…" : "reset to default"}
           </button>
           <button
             className="label rounded-full px-3 py-1.5"
             style={{
-              background: dirty ? "var(--color-cue)" : "transparent",
-              color: dirty ? "var(--color-paper)" : "var(--color-ink-faint)",
-              border: `1px solid ${dirty ? "var(--color-cue)" : "var(--color-rule)"}`,
-              cursor: dirty ? "pointer" : "not-allowed",
+              background: dirty && !readOnly ? "var(--color-cue)" : "transparent",
+              color: dirty && !readOnly ? "var(--color-paper)" : "var(--color-ink-faint)",
+              border: `1px solid ${dirty && !readOnly ? "var(--color-cue)" : "var(--color-rule)"}`,
+              cursor: dirty && !readOnly ? "pointer" : "not-allowed",
             }}
             onClick={onSave}
-            disabled={!dirty || busy === "save"}
+            disabled={!dirty || busy === "save" || readOnly}
           >
             {busy === "save" ? "saving…" : "save"}
           </button>

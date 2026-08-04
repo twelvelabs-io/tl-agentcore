@@ -13,7 +13,28 @@ import { useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
+import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import { getAsset, getItem, type Asset, type KSItem } from "./api";
+
+// Agent output is untrusted markdown — it can contain prompt-injected
+// HTML. rehype-raw parses the raw HTML so our custom vref/tref/aref
+// tags reach the components map; rehype-sanitize (running AFTER
+// rehype-raw) then strips anything not on this allowlist. Without it,
+// a prompt-injected `<img src=x onerror=…>` would run JS in the SPA
+// context with the user's Cognito tokens in scope.
+const SANITIZE_SCHEMA = {
+  ...defaultSchema,
+  tagNames: [
+    ...(defaultSchema.tagNames || []),
+    "vref", "tref", "aref",
+  ],
+  attributes: {
+    ...(defaultSchema.attributes || {}),
+    vref: ["id", "start", "end"],
+    tref: ["id"],
+    aref: ["id"],
+  },
+};
 import { setState } from "./store";
 
 type Resolved = { item: KSItem; asset?: Asset };
@@ -161,7 +182,7 @@ export function ResponseMarkdown({ text, ksId }: { text: string; ksId?: string }
     <div className="response-md">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeRaw]}
+        rehypePlugins={[rehypeRaw, [rehypeSanitize, SANITIZE_SCHEMA]]}
         components={components as never}
       >
         {prepared}

@@ -26,14 +26,35 @@
 
 import { DynamoDBClient, QueryCommand } from "@aws-sdk/client-dynamodb";
 import { authorize } from "./auth.mjs";
+import { GetItemCommand } from "@aws-sdk/client-dynamodb";
 
 const ddb = new DynamoDBClient({});
 
 const KB_CACHE_TABLE = process.env.KB_CACHE_TABLE;
+const KS_TABLE       = process.env.KS_TABLE;
+const ADMIN_GROUP    = process.env.ADMIN_GROUP_NAME || "admins";
+
+// Ownership check for KS reads. Returns null if the caller is
+// allowed, or a { statusCode, body } reply if not. Legacy KSes
+// without owner_sub are considered shared (backwards compat with
+// pre-migration rows).
+async function checkKsRead(ks_id, identity) {
+  if (!KS_TABLE) return null; // env not wired, fail-open pre-migration
+  const isAdmin = Array.isArray(identity.groups) && identity.groups.includes(ADMIN_GROUP);
+  if (isAdmin) return null;
+  const out = await ddb.send(new GetItemCommand({
+    TableName: KS_TABLE, Key: { ks_id: { S: ks_id } },
+  }));
+  if (!out.Item) return reply(404, { error: "ks not found" });
+  const owner = out.Item.owner_sub?.S;
+  if (!owner) return null; // legacy row, shared read
+  if (owner !== identity.sub) return reply(403, { error: "not allowed to read this ks" });
+  return null;
+}
 
 const reply = (statusCode, body) => ({
   statusCode,
-  headers: { "content-type": "application/json", "access-control-allow-origin": "*" },
+  headers: { "content-type": "application/json" },
   body: JSON.stringify(body),
 });
 
@@ -71,7 +92,7 @@ const queryAll = async (ks_id) => {
 
 export const handler = async (event) => {
   if (event.requestContext?.http?.method === "OPTIONS") {
-    return { statusCode: 204, headers: { "access-control-allow-origin": "*" }, body: "" };
+    return { statusCode: 204, headers: {  }, body: "" };
   }
 
   const auth = await authorize(event.headers || {});
@@ -82,6 +103,9 @@ export const handler = async (event) => {
   const qs = event.queryStringParameters || {};
   const ks_id = qs.ks_id;
   if (!ks_id) return reply(400, { error: "ks_id query param required" });
+
+  const denial = await checkKsRead(ks_id, auth.identity);
+  if (denial) return denial;
 
   let rows;
   try {

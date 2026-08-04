@@ -1,3 +1,10 @@
 node_modules/
 dist/
 .vite/
+# Real-deployment env — leaks tenant identifiers (Cognito pool, agent
+# runtime ARN, account id). deploy.sh writes this from terraform
+# outputs at deploy time; only .env.example is tracked.
+.env.production
+.env.local
+.env
+

@@ -55,12 +55,11 @@ resource "aws_bedrockagentcore_agent_runtime" "this" {
     server_protocol = "HTTP"
   }
 
-  # Cognito JWT authorizer — replaces the previous SigV4/IAM default so the
-  # browser can WS-connect directly to wss://bedrock-agentcore.<region>.
-  # amazonaws.com/runtimes/<arn>/ws using the user's access token (via the
-  # Sec-WebSocket-Protocol subprotocol trick, since browsers can't set custom
-  # headers on the handshake). The chat lambda's SigV4 invocation path stops
-  # working when this is set, which is intended — we're cutting it over.
+  # Cognito JWT authorizer — the browser WS-connects directly to
+  # wss://bedrock-agentcore.<region>.amazonaws.com/runtimes/<arn>/ws
+  # using the user's access token (via the Sec-WebSocket-Protocol
+  # subprotocol trick, since browsers can't set custom headers on the
+  # handshake). v0.3 removed the legacy chat-lambda relay entirely.
   authorizer_configuration {
     custom_jwt_authorizer {
       discovery_url   = "https://cognito-idp.${var.region}.amazonaws.com/${aws_cognito_user_pool.this.id}/.well-known/openid-configuration"

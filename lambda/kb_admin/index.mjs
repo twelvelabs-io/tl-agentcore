@@ -40,14 +40,13 @@ const PLAYBACK_BASE = (process.env.PLAYBACK_BASE_URL || "").replace(/\/$/, "");
 
 const json = (statusCode, body) => ({
   statusCode,
-  headers: { "content-type": "application/json", "access-control-allow-origin": "*" },
+  headers: { "content-type": "application/json" },
   body: typeof body === "string" ? body : JSON.stringify(body),
 });
 
 const cors = () => ({
   statusCode: 204,
   headers: {
-    "access-control-allow-origin": "*",
     "access-control-allow-methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
     "access-control-allow-headers": "authorization,content-type",
   },
@@ -88,10 +87,28 @@ const assetId = () => {
 };
 const nowIso = () => new Date().toISOString();
 
+// ─── Ownership helpers ────────────────────────────────────────────────────
+// KS/asset rows carry an owner_sub attribute set on create. Regular
+// users can only read/mutate rows they own; admins bypass the check;
+// legacy rows without an owner_sub attribute are treated as "shared"
+// — any signed-in user can read them, and only admins can mutate
+// them (protects existing customer data from a low-priv user deleting
+// pre-migration KSes).
+function canRead(row, identity) {
+  if (identity.isAdmin) return true;
+  if (!row.owner_sub) return true; // legacy row, shared read
+  return row.owner_sub === identity.sub;
+}
+function canMutate(row, identity) {
+  if (identity.isAdmin) return true;
+  if (!row.owner_sub) return false; // legacy row, admin-only mutation
+  return row.owner_sub === identity.sub;
+}
+
 // ─── KS handlers ───────────────────────────────────────────────────────────
-async function listKnowledgeStores() {
+async function listKnowledgeStores(identity) {
   const out = await ddb.send(new ScanCommand({ TableName: KS_TABLE, Limit: 200 }));
-  const rows = (out.Items || []).map(itemToObj);
+  const rows = (out.Items || []).map(itemToObj).filter((r) => canRead(r, identity));
   // Newest first by created_at when present.
   rows.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
   // Map to the shape the UI's KS type expects (`_id`, `name`, etc.)
@@ -105,7 +122,7 @@ async function listKnowledgeStores() {
   return json(200, { data });
 }
 
-async function createKnowledgeStore(body) {
+async function createKnowledgeStore(body, identity) {
   const name = (body?.name || "").trim();
   if (!name) return json(400, { error: "name required" });
   const id = ksId();
@@ -115,6 +132,7 @@ async function createKnowledgeStore(body) {
     description: body?.description || "",
     item_count: 0,
     created_at: nowIso(),
+    owner_sub: identity.sub,
   };
   await ddb.send(new PutItemCommand({
     TableName: KS_TABLE,
@@ -124,17 +142,25 @@ async function createKnowledgeStore(body) {
   return json(200, { _id: id, name: ks.name, description: ks.description, item_count: 0, created_at: ks.created_at });
 }
 
-async function getKnowledgeStore(ksIdParam) {
+async function fetchKsRow(ksIdParam) {
   const out = await ddb.send(new GetItemCommand({
     TableName: KS_TABLE,
     Key: { ks_id: { S: ksIdParam } },
   }));
-  if (!out.Item) return json(404, { error: "ks not found" });
-  const r = itemToObj(out.Item);
+  return out.Item ? itemToObj(out.Item) : null;
+}
+
+async function getKnowledgeStore(ksIdParam, identity) {
+  const r = await fetchKsRow(ksIdParam);
+  if (!r) return json(404, { error: "ks not found" });
+  if (!canRead(r, identity)) return json(403, { error: "not allowed to read this ks" });
   return json(200, { _id: r.ks_id, name: r.name, description: r.description, item_count: r.item_count || 0, created_at: r.created_at });
 }
 
-async function deleteKnowledgeStore(ksIdParam) {
+async function deleteKnowledgeStore(ksIdParam, identity) {
+  const r = await fetchKsRow(ksIdParam);
+  if (!r) return json(404, { error: "ks not found" });
+  if (!canMutate(r, identity)) return json(403, { error: "not allowed to delete this ks" });
   await ddb.send(new DeleteItemCommand({
     TableName: KS_TABLE,
     Key: { ks_id: { S: ksIdParam } },
@@ -158,7 +184,19 @@ async function deleteKnowledgeStore(ksIdParam) {
 }
 
 // ─── KS items (asset attach/detach) ───────────────────────────────────────
-async function listKsItems(ksIdParam) {
+async function fetchAssetRow(assetIdParam) {
+  const out = await ddb.send(new GetItemCommand({
+    TableName: ASSETS_TABLE,
+    Key: { asset_id: { S: assetIdParam } },
+  }));
+  return out.Item ? itemToObj(out.Item) : null;
+}
+
+async function listKsItems(ksIdParam, identity) {
+  // Reading a KS's items is a read on the KS itself.
+  const ks = await fetchKsRow(ksIdParam);
+  if (!ks) return json(404, { error: "ks not found" });
+  if (!canRead(ks, identity)) return json(403, { error: "not allowed to read this ks" });
   const out = await ddb.send(new QueryCommand({
     TableName: ASSETS_TABLE,
     IndexName: "by-ks",
@@ -170,9 +208,15 @@ async function listKsItems(ksIdParam) {
   return json(200, { data });
 }
 
-async function attachItem(ksIdParam, body) {
+async function attachItem(ksIdParam, body, identity) {
   const aid = body?.asset_id;
   if (!aid) return json(400, { error: "asset_id required" });
+  const ks = await fetchKsRow(ksIdParam);
+  if (!ks) return json(404, { error: "ks not found" });
+  if (!canMutate(ks, identity)) return json(403, { error: "not allowed to modify this ks" });
+  const asset = await fetchAssetRow(aid);
+  if (!asset) return json(404, { error: "asset not found" });
+  if (!canMutate(asset, identity)) return json(403, { error: "not allowed to attach this asset" });
   await ddb.send(new UpdateItemCommand({
     TableName: ASSETS_TABLE,
     Key: { asset_id: { S: aid } },
@@ -181,10 +225,13 @@ async function attachItem(ksIdParam, body) {
     ConditionExpression: "attribute_exists(asset_id)",
   }));
   // Return the canonical asset row in KSItem shape.
-  return getItem(ksIdParam, aid);
+  return getItem(ksIdParam, aid, identity);
 }
 
-async function detachItem(_ksIdParam, itemId) {
+async function detachItem(ksIdParam, itemId, identity) {
+  const asset = await fetchAssetRow(itemId);
+  if (!asset) return json(404, { error: "asset not found" });
+  if (!canMutate(asset, identity)) return json(403, { error: "not allowed to detach this asset" });
   // Items and assets are the same row here; "detach" clears the KS pointer
   // but keeps the asset (matches the prior TL semantics in api.ts comment).
   await ddb.send(new UpdateItemCommand({
@@ -195,13 +242,11 @@ async function detachItem(_ksIdParam, itemId) {
   return json(200, { detached: itemId });
 }
 
-async function getItem(_ksIdParam, itemId) {
-  const out = await ddb.send(new GetItemCommand({
-    TableName: ASSETS_TABLE,
-    Key: { asset_id: { S: itemId } },
-  }));
-  if (!out.Item) return json(404, { error: "asset not found" });
-  return json(200, rowToKsItem(itemToObj(out.Item)));
+async function getItem(_ksIdParam, itemId, identity) {
+  const r = await fetchAssetRow(itemId);
+  if (!r) return json(404, { error: "asset not found" });
+  if (!canRead(r, identity)) return json(403, { error: "not allowed to read this asset" });
+  return json(200, rowToKsItem(r));
 }
 
 const rowToKsItem = (r) => ({
@@ -212,11 +257,14 @@ const rowToKsItem = (r) => ({
 });
 
 // ─── Asset handlers ────────────────────────────────────────────────────────
-async function listAssets(qs) {
+async function listAssets(qs, identity) {
   const ks = qs.knowledge_store_id;
   const limit = parseInt(qs.limit || "200", 10);
   let items;
   if (ks) {
+    const ksRow = await fetchKsRow(ks);
+    if (!ksRow) return json(404, { error: "ks not found" });
+    if (!canRead(ksRow, identity)) return json(403, { error: "not allowed to read this ks" });
     const out = await ddb.send(new QueryCommand({
       TableName: ASSETS_TABLE,
       IndexName: "by-ks",
@@ -230,20 +278,21 @@ async function listAssets(qs) {
     const out = await ddb.send(new ScanCommand({ TableName: ASSETS_TABLE, Limit: limit }));
     items = out.Items || [];
   }
-  const assets = items.map(itemToObj).map(rowToAsset);
+  const assets = items.map(itemToObj).filter((r) => canRead(r, identity)).map(rowToAsset);
   return json(200, { data: assets, page_info: { total_results: assets.length } });
 }
 
-async function getAssetHandler(assetIdParam) {
-  const out = await ddb.send(new GetItemCommand({
-    TableName: ASSETS_TABLE,
-    Key: { asset_id: { S: assetIdParam } },
-  }));
-  if (!out.Item) return json(404, { error: "asset not found" });
-  return json(200, rowToAsset(itemToObj(out.Item)));
+async function getAssetHandler(assetIdParam, identity) {
+  const r = await fetchAssetRow(assetIdParam);
+  if (!r) return json(404, { error: "asset not found" });
+  if (!canRead(r, identity)) return json(403, { error: "not allowed to read this asset" });
+  return json(200, rowToAsset(r));
 }
 
-async function deleteAssetHandler(assetIdParam) {
+async function deleteAssetHandler(assetIdParam, identity) {
+  const r = await fetchAssetRow(assetIdParam);
+  if (!r) return json(404, { error: "asset not found" });
+  if (!canMutate(r, identity)) return json(403, { error: "not allowed to delete this asset" });
   // Best-effort: blow away the row, the source mp4, and the HLS bundle.
   await ddb.send(new DeleteItemCommand({
     TableName: ASSETS_TABLE,
@@ -292,37 +341,38 @@ export const handler = async (event) => {
   }
   const qs = event.queryStringParameters || {};
 
+  const identity = auth.identity;
   try {
     // KS routes
     let m = path.match(/^\/kb\/knowledge-stores\/?$/);
     if (m) {
-      if (method === "GET")  return await listKnowledgeStores();
-      if (method === "POST") return await createKnowledgeStore(body || {});
+      if (method === "GET")  return await listKnowledgeStores(identity);
+      if (method === "POST") return await createKnowledgeStore(body || {}, identity);
     }
     m = path.match(/^\/kb\/knowledge-stores\/([^/]+)\/items\/([^/]+)\/?$/);
     if (m) {
-      if (method === "DELETE") return await detachItem(m[1], m[2]);
-      if (method === "GET")    return await getItem(m[1], m[2]);
+      if (method === "DELETE") return await detachItem(m[1], m[2], identity);
+      if (method === "GET")    return await getItem(m[1], m[2], identity);
     }
     m = path.match(/^\/kb\/knowledge-stores\/([^/]+)\/items\/?$/);
     if (m) {
-      if (method === "GET")  return await listKsItems(m[1]);
-      if (method === "POST") return await attachItem(m[1], body || {});
+      if (method === "GET")  return await listKsItems(m[1], identity);
+      if (method === "POST") return await attachItem(m[1], body || {}, identity);
     }
     m = path.match(/^\/kb\/knowledge-stores\/([^/]+)\/?$/);
     if (m) {
-      if (method === "GET")    return await getKnowledgeStore(m[1]);
-      if (method === "DELETE") return await deleteKnowledgeStore(m[1]);
+      if (method === "GET")    return await getKnowledgeStore(m[1], identity);
+      if (method === "DELETE") return await deleteKnowledgeStore(m[1], identity);
     }
     // Asset routes
     m = path.match(/^\/kb\/assets\/([^/]+)\/?$/);
     if (m) {
-      if (method === "GET")    return await getAssetHandler(m[1]);
-      if (method === "DELETE") return await deleteAssetHandler(m[1]);
+      if (method === "GET")    return await getAssetHandler(m[1], identity);
+      if (method === "DELETE") return await deleteAssetHandler(m[1], identity);
     }
     m = path.match(/^\/kb\/assets\/?$/);
     if (m) {
-      if (method === "GET") return await listAssets(qs);
+      if (method === "GET") return await listAssets(qs, identity);
     }
     return json(404, { error: "no route", path, method });
   } catch (e) {

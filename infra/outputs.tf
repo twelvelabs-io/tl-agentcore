@@ -70,12 +70,7 @@ output "cognito_hosted_ui_domain" {
   description = "Hosted UI base URL (with https:// — the UI feeds this into new URL() so the protocol is required)."
 }
 
-# ─── WebSocket + CloudFront ───────────────────────────────────────────────
-output "ws_api_url" {
-  value       = "${aws_apigatewayv2_api.ws.api_endpoint}/${aws_apigatewayv2_stage.ws_live.name}"
-  description = "Direct WebSocket URL (wss://...). The UI normally hits the CloudFront-fronted path instead."
-}
-
+# ─── CloudFront ───────────────────────────────────────────────────────────
 output "frontend_url" {
   value       = "https://${aws_cloudfront_distribution.frontend.domain_name}"
   description = "Public URL of the demo UI."

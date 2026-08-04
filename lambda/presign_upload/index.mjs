@@ -23,7 +23,7 @@ const GET_TTL = 60 * 60;     // 1 h — TL pulls the bytes after asset create
 function reply(statusCode, body) {
   return {
     statusCode,
-    headers: { "content-type": "application/json", "access-control-allow-origin": "*" },
+    headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   };
 }
@@ -39,7 +39,7 @@ function safeExt(filename) {
 
 export const handler = async (event) => {
   if (event.requestContext?.http?.method === "OPTIONS") {
-    return { statusCode: 204, headers: { "access-control-allow-origin": "*" }, body: "" };
+    return { statusCode: 204, headers: {  }, body: "" };
   }
   const auth = await authorize(event.headers || {});
   if (!auth.ok) return reply(auth.status, { error: auth.message });
@@ -56,7 +56,12 @@ export const handler = async (event) => {
   if (!filename) return reply(400, { error: "filename is required" });
 
   const ext = safeExt(filename);
-  const key = `uploads/${randomUUID()}.${ext}`;
+  // Namespace the presigned key under the caller's Cognito sub so the
+  // finalize step (embed_clip_start) can verify the same caller owns
+  // the key it's being asked to copy — a different signed-in user
+  // can't finalize someone else's still-pending upload by guessing
+  // the uuid.
+  const key = `uploads/${auth.identity.sub}/${randomUUID()}.${ext}`;
 
   let putUrl, getUrl;
   try {
