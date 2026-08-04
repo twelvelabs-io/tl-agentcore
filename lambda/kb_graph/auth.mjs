@@ -24,7 +24,8 @@ export async function authorize(headers) {
     const token = auth.slice(7).trim();
     try {
       const claims = await getVerifier().verify(token);
-      return { ok: true, identity: { sub: claims.sub, username: claims.username || claims["cognito:username"] } };
+      const groups = Array.isArray(claims["cognito:groups"]) ? claims["cognito:groups"] : [];
+      return { ok: true, identity: { sub: claims.sub, username: claims.username || claims["cognito:username"], groups } };
     } catch (e) {
       return { ok: false, status: 401, message: `JWT verification failed: ${String(e?.message || e)}` };
     }

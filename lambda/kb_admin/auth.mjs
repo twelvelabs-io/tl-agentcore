@@ -1,4 +1,8 @@
 // Verifies a Cognito access token (JWT). Mirrors tl_proxy/auth.mjs.
+//
+// Exposes the caller's Cognito sub, username, and groups list so
+// handlers can enforce per-user ownership + admin bypass on KS +
+// asset mutations.
 
 import { CognitoJwtVerifier } from "aws-jwt-verify";
 
@@ -14,6 +18,8 @@ function getVerifier() {
   return verifier;
 }
 
+const ADMIN_GROUP = process.env.ADMIN_GROUP_NAME || "admins";
+
 export async function authorize(headers) {
   const lc = Object.fromEntries(
     Object.entries(headers || {}).map(([k, v]) => [k.toLowerCase(), v])
@@ -24,7 +30,16 @@ export async function authorize(headers) {
     const token = auth.slice(7).trim();
     try {
       const claims = await getVerifier().verify(token);
-      return { ok: true, identity: { sub: claims.sub, username: claims.username || claims["cognito:username"] } };
+      const groups = Array.isArray(claims["cognito:groups"]) ? claims["cognito:groups"] : [];
+      return {
+        ok: true,
+        identity: {
+          sub: claims.sub,
+          username: claims.username || claims["cognito:username"],
+          groups,
+          isAdmin: groups.includes(ADMIN_GROUP),
+        },
+      };
     } catch (e) {
       return { ok: false, status: 401, message: `JWT verification failed: ${String(e?.message || e)}` };
     }

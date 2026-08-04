@@ -16,7 +16,7 @@
 
 import { readFileSync } from "node:fs";
 import { DynamoDBClient, GetItemCommand, PutItemCommand, DeleteItemCommand, QueryCommand } from "@aws-sdk/client-dynamodb";
-import { authorize } from "./auth.mjs";
+import { authorize, authorizeAdmin } from "./auth.mjs";
 
 const ddb = new DynamoDBClient({});
 const KB_CACHE = process.env.KB_CACHE_TABLE;
@@ -28,14 +28,13 @@ const PROMPT_IDS = Object.keys(DEFAULTS);
 
 const json = (statusCode, body) => ({
   statusCode,
-  headers: { "content-type": "application/json", "access-control-allow-origin": "*" },
+  headers: { "content-type": "application/json" },
   body: typeof body === "string" ? body : JSON.stringify(body),
 });
 
 const cors = () => ({
   statusCode: 204,
   headers: {
-    "access-control-allow-origin": "*",
     "access-control-allow-methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
     "access-control-allow-headers": "authorization,content-type",
   },
@@ -106,7 +105,13 @@ export const handler = async (event) => {
 
   if (method === "OPTIONS") return cors();
 
-  const auth = await authorize(event.headers || {});
+  // GET is read-only — any signed-in user can view the current prompts.
+  // PUT/DELETE mutate global state that every subsequent agent run
+  // reads, so they require the `admins` group.
+  const needsAdmin = method === "PUT" || method === "DELETE";
+  const auth = needsAdmin
+    ? await authorizeAdmin(event.headers || {})
+    : await authorize(event.headers || {});
   if (!auth.ok) return json(auth.status, { error: auth.message });
 
   // GET /settings/prompts

@@ -2,9 +2,8 @@
 #
 # Layout:
 #   /        → S3 bucket (the built React SPA)
-#   /live*   → WebSocket API Gateway (chat lambda); CloudFront passes WSS
-#              through transparently. Browser opens wss://<cf>/live?token=…
-#              and the WSS upgrade survives the CDN hop.
+#   (agent stream is browser-direct to bedrock-agentcore, not routed
+#    through this distribution; see ui/src/lib/agent-api.ts)
 
 resource "aws_s3_bucket" "frontend" {
   bucket        = "${local.fqname}-frontend"
@@ -36,18 +35,6 @@ resource "aws_cloudfront_distribution" "frontend" {
     domain_name              = aws_s3_bucket.frontend.bucket_regional_domain_name
     origin_id                = "frontend-s3"
     origin_access_control_id = aws_cloudfront_origin_access_control.frontend.id
-  }
-
-  origin {
-    domain_name = replace(replace(aws_apigatewayv2_api.ws.api_endpoint, "wss://", ""), "/", "")
-    origin_id   = "chat-ws"
-
-    custom_origin_config {
-      http_port              = 80
-      https_port             = 443
-      origin_protocol_policy = "https-only"
-      origin_ssl_protocols   = ["TLSv1.2"]
-    }
   }
 
   # HTTP API Gateway — fronts kb_admin (KS+asset CRUD), kb_graph, presign_upload,
@@ -90,18 +77,9 @@ resource "aws_cloudfront_distribution" "frontend" {
     max_ttl     = 300
   }
 
-  # /live* → WebSocket API Gateway. AWS managed cache + request policies
-  # (AllViewer + Managed-CachingDisabled) for pass-through behavior.
-  ordered_cache_behavior {
-    path_pattern             = "/live*"
-    target_origin_id         = "chat-ws"
-    viewer_protocol_policy   = "redirect-to-https"
-    allowed_methods          = ["GET", "HEAD", "OPTIONS"]
-    cached_methods           = ["GET", "HEAD"]
-    compress                 = false
-    origin_request_policy_id = "b689b0a8-53d0-40ab-baf2-68738e2966ac" # AllViewer
-    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # CachingDisabled
-  }
+  # (v0.3+ removed the chat lambda + /live* WS route: the browser now
+  # connects directly to wss://bedrock-agentcore.<region>.amazonaws.com
+  # for the agent stream — see ui/src/lib/agent-api.ts.)
 
   # /stitch and /stitch/* → HTTP API Gateway (stitch lambda → MediaConvert).
   # POST /stitch starts a render, GET /stitch/{job_id} polls status.

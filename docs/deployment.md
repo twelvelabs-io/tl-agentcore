@@ -22,15 +22,17 @@ end:
   this bucket. Async-invoke output lands under `embeddings/<id>/` with a
   seven-day lifecycle rule.
 - **Edge + transport.** CloudFront fronts an S3 bucket of built UI
-  assets plus two API Gateway origins: a WebSocket for the chat lambda
-  that invokes the runtime, and an HTTP API for the `tl_proxy` lambda
-  that forwards `/tl/*` browser calls to the TwelveLabs API.
+  assets plus one HTTP API Gateway that routes `/kb/*`, `/kb-graph`,
+  `/upload/*`, `/settings/*`, `/users/*`, and `/stitch*` to the
+  respective lambdas. The agent stream is browser-direct to
+  `wss://bedrock-agentcore.<region>.amazonaws.com` — no chat-lambda
+  relay, no WS API Gateway (v0.3+ removed both).
 - **Identity.** Cognito User Pool with `allow_admin_create_user_only =
   true`: no self-registration, and admins onboard every user via
   `aws cognito-idp admin-create-user`. An `admins` group surfaces the
   admin role to the UI as a claim. The Cognito JWT flows end-to-end
-  from browser through CloudFront, through the WebSocket and HTTP APIs,
-  and into the lambdas that verify it before invoking the runtime.
+  from browser through CloudFront to the HTTP API + AgentCore Runtime
+  authorizer.
 - **Bedrock model access.** The runtime calls Marengo 3.0, Pegasus 1.2,
   and Claude Haiku 4.5 through the Bedrock Marketplace / Anthropic
   Bedrock catalog. Grant model access in the Bedrock console
@@ -204,6 +206,26 @@ aws cloudfront create-invalidation \
 The seed admin's invite email links to `terraform output frontend_url`,
 so make sure the SPA is deployed before the admin clicks through.
 
+## Tighten CORS after first apply
+
+The first `terraform apply` doesn't know the CloudFront domain (it
+gets minted in the same apply), so API Gateway's CORS
+`allow_origins` falls back to `*`. That's still safe on its own —
+every lambda verifies a Cognito JWT — but tightening it to the
+specific SPA origin removes a defense-in-depth gap against
+token-theft cross-origin abuse. After the first apply completes,
+grab the CloudFront domain and re-apply with the variable set:
+
+```bash
+cd infra
+DOMAIN=$(terraform output -raw frontend_url | sed 's|https://||')
+terraform apply -var "frontend_domain=$DOMAIN" -var "aws_profile=<your-profile>"
+```
+
+Both applies converge on the same infra — the second one just
+narrows the CORS allowlist. Add this variable to your CI-run
+tfvars going forward.
+
 ## Ingesting video
 
 Use the SPA's Library tab to upload. The auto-pipeline takes it from
@@ -254,8 +276,6 @@ Operational gotchas worth knowing before the first apply:
 
 - **AgentCore Runtime is arm64-only.** linux/amd64 images get rejected
   at `CreateAgentRuntime` with `Architecture incompatible`.
-- **API Gateway WebSocket has a 30 s integration cap.** It cannot be
-  raised, which forces an async self-invoke pattern in the chat lambda.
 - **Async lambda retry produces phantom duplicate runs.**
   `aws_lambda_function_event_invoke_config { maximum_retry_attempts = 0 }`
   is mandatory; otherwise every timeout fires the agent twice.

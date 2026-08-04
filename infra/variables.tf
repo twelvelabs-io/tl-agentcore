@@ -44,3 +44,14 @@ variable "pegasus_bedrock_model_id" {
   default     = "us.twelvelabs.pegasus-1-2-v1:0"
   description = "Bedrock model id for Pegasus when pegasus_provider = 'bedrock'. Defaults to the us cross-region inference profile of Pegasus 1.2."
 }
+
+# Frontend origin for CORS narrowing. Chicken-and-egg with the
+# CloudFront distribution — set to null on the first apply, then run
+# `terraform apply -var frontend_domain="$(terraform output -raw frontend_url | sed 's|https://||')"`
+# to lock CORS down to the actual SPA origin. See
+# docs/deployment.md#tighten-cors for the exact sequence.
+variable "frontend_domain" {
+  type        = string
+  default     = null
+  description = "CloudFront domain that hosts the SPA (no scheme). Set after first apply to narrow API GW CORS from `*` to the specific origin. Empty/null keeps the wildcard."
+}

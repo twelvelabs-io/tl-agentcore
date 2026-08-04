@@ -16,7 +16,7 @@ type Activity = "idle" | "active" | "recent";
 const SPINE: { id: NodeId; title: string; sub?: string; tag?: string }[] = [
   { id: "browser",     title: "Browser",     sub: "wss + REST · Cognito JWT", tag: "client" },
   { id: "cloudfront",  title: "CloudFront",  sub: "edge · pass-through",      tag: "edge" },
-  { id: "apigw",       title: "API Gateway", sub: "WS /live + HTTP /tl/* /kb-graph", tag: "ingress" },
+  { id: "apigw",       title: "API Gateway", sub: "HTTP /kb/* /kb-graph /upload/*", tag: "ingress" },
 ];
 
 // Lambdas behind the API gateway; rendered as a mini-cluster because they

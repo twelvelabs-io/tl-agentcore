@@ -81,6 +81,7 @@ resource "aws_lambda_function" "kb_admin" {
       COGNITO_USER_POOL_ID = aws_cognito_user_pool.this.id
       COGNITO_CLIENT_ID    = aws_cognito_user_pool_client.spa.id
       STACK_FQNAME         = local.fqname
+      ADMIN_GROUP_NAME     = aws_cognito_user_group.admins.name
     }
   }
 }

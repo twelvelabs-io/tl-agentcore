@@ -56,7 +56,7 @@ async function getMc() {
 function reply(statusCode, body) {
   return {
     statusCode,
-    headers: { "content-type": "application/json", "access-control-allow-origin": "*" },
+    headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   };
 }
@@ -211,7 +211,7 @@ function hlsJobSettings(asset, srcKey) {
 
 export const handler = async (event) => {
   if (event.requestContext?.http?.method === "OPTIONS") {
-    return { statusCode: 204, headers: { "access-control-allow-origin": "*" }, body: "" };
+    return { statusCode: 204, headers: {  }, body: "" };
   }
   const auth = await authorize(event.headers || {});
   if (!auth.ok) return reply(auth.status, { error: auth.message });
@@ -232,6 +232,18 @@ export const handler = async (event) => {
   }
   if (!uploadKey.startsWith("uploads/")) {
     return reply(400, { error: "key must live under the uploads/ prefix" });
+  }
+  // The presign lambda writes keys as `uploads/<caller.sub>/<uuid>.<ext>`.
+  // Reject anything that doesn't include the current caller's sub so a
+  // different signed-in user can't finalize someone else's upload by
+  // guessing the uuid. Legacy keys without a sub segment (from before
+  // this check landed) are still accepted so pre-existing pending
+  // uploads don't wedge.
+  const expectedPrefix = `uploads/${auth.identity.sub}/`;
+  const parts = uploadKey.split("/");
+  const looksNamespaced = parts.length >= 3;
+  if (looksNamespaced && !uploadKey.startsWith(expectedPrefix)) {
+    return reply(403, { error: "upload key does not belong to caller" });
   }
 
   // Mint the asset_id server-side so the row exists before any downstream
@@ -280,6 +292,9 @@ export const handler = async (event) => {
         hls_manifest_url:   hlsUrl ? toAv(hlsUrl) : { NULL: true },
         thumbnail_status:   toAv("pending"),
         thumbnail_url:      thumbUrl ? toAv(thumbUrl) : { NULL: true },
+        // Ownership: kb_admin's canRead/canMutate uses this. Set once
+        // at create; kb_admin's attach/detach never rewrites it.
+        owner_sub:          toAv(auth.identity.sub),
       },
       ConditionExpression: "attribute_not_exists(asset_id)",
     }));

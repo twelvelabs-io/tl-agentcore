@@ -78,7 +78,9 @@ resource "aws_s3_bucket_cors_configuration" "clips" {
       "https://${aws_cloudfront_distribution.frontend.domain_name}",
       "http://localhost:5173",
     ]
-    allowed_headers = ["*"]
+    # Presigned PUT signs Content-Type + Content-Length; we don't need
+    # a wildcard here. `*` was defense-in-depth-worst — narrow it.
+    allowed_headers = ["content-type", "content-length"]
     expose_headers  = ["ETag"]
     max_age_seconds = 3600
   }

@@ -40,6 +40,12 @@ data "aws_iam_policy_document" "kb_graph_perms" {
     actions   = ["dynamodb:Query"]
     resources = [aws_dynamodb_table.kb_cache.arn]
   }
+  # Read the KS row to enforce per-user ownership before serving the graph.
+  statement {
+    sid       = "ReadKsRow"
+    actions   = ["dynamodb:GetItem"]
+    resources = [aws_dynamodb_table.knowledge_stores.arn]
+  }
 }
 
 resource "aws_iam_role_policy" "kb_graph" {
@@ -60,8 +66,10 @@ resource "aws_lambda_function" "kb_graph" {
   environment {
     variables = {
       KB_CACHE_TABLE       = aws_dynamodb_table.kb_cache.name
+      KS_TABLE             = aws_dynamodb_table.knowledge_stores.name
       COGNITO_USER_POOL_ID = aws_cognito_user_pool.this.id
       COGNITO_CLIENT_ID    = aws_cognito_user_pool_client.spa.id
+      ADMIN_GROUP_NAME     = aws_cognito_user_group.admins.name
     }
   }
 }

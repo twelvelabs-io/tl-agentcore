@@ -178,8 +178,15 @@ resource "aws_cognito_user_pool_client" "spa" {
 
   prevent_user_existence_errors = "ENABLED"
 
-  access_token_validity  = 24
-  id_token_validity      = 24
+  # Access/ID token validity is 1h so a stolen access token (e.g. from a
+  # transient XSS) can be authorized only within its remaining life,
+  # not for a full day. The SPA silently exchanges the long-lived
+  # refresh token for a fresh access token before expiry
+  # (ui/src/lib/auth.ts:getAccessToken), so producers don't see re-auth
+  # prompts. Refresh token remains at 30d for the "one login per
+  # month" UX.
+  access_token_validity  = 1
+  id_token_validity      = 1
   refresh_token_validity = 30
   token_validity_units {
     access_token  = "hours"
