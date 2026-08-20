@@ -1,17 +1,16 @@
 name: daily-smoke
 
-# Daily smoke run against the deployed stack. Runs the chromium suite
-# only (no cross-browser, no MediaConvert), posts a one-line summary to
-# Slack on completion (success or failure), and archives the full
-# report for two weeks.
+# Smoke run against a deployed stack. Chromium suite only (no cross-
+# browser, no MediaConvert), posts a one-line summary to Slack on
+# completion (success or failure), and archives the full report for
+# two weeks.
 #
-# To enable:
-#   1. Set the same E2E secrets as e2e.yml.
-#   2. Add SLACK_WEBHOOK_URL pointing at the channel for build pings.
-#   3. Adjust the cron expression below (UTC) for your team's morning.
+# Manual trigger only — the reference repo has no deployed target,
+# so a cron would just spam failures. Consumers who fork and deploy
+# should add their own schedule alongside workflow_dispatch and set:
+#   1. The same E2E secrets as e2e.yml.
+#   2. SLACK_WEBHOOK_URL pointing at the channel for build pings.
 on:
-  schedule:
-    - cron: "0 13 * * *"  # 06:00 PT / 13:00 UTC
   workflow_dispatch: {}
 
 permissions:
