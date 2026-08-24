@@ -84,6 +84,33 @@ export function Library() {
     return () => { cancelled = true; };
   }, [items]);
 
+  // Poll non-terminal assets until HLS is ready (or failed). Without this
+  // the detail panel's `transcoding…` overlay stays stuck when the user
+  // opens a card mid-transcode — MediaConvert finishes 5-10 min later
+  // but nothing re-fetches getAsset() to pick up hls.status="ready".
+  useEffect(() => {
+    if (!items.length) return;
+    const isTerminal = (a?: Asset) => {
+      const hls = a?.hls?.status;
+      const overall = (a?.status || "").toLowerCase();
+      return (hls === "ready" || hls === "failed")
+          && (overall === "ready" || overall === "failed");
+    };
+    const pending = items.filter((it) => it.asset_id && details[it.asset_id] && !isTerminal(details[it.asset_id]));
+    if (!pending.length) return;
+    let cancelled = false;
+    const id = window.setInterval(async () => {
+      for (const it of pending) {
+        if (cancelled || !it.asset_id) continue;
+        try {
+          const asset = await getAsset(it.asset_id);
+          if (!cancelled) setDetails((d) => ({ ...d, [it.asset_id!]: asset }));
+        } catch { /* transient failures — next tick retries */ }
+      }
+    }, 8000);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, [items, details]);
+
   // Filter + sort items for display.
   const visible = useMemo(() => {
     const q = filter.trim().toLowerCase();
