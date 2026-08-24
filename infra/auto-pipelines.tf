@@ -56,6 +56,14 @@ data "aws_iam_policy_document" "asset_profile_perms" {
     actions   = ["s3:GetObject"]
     resources = ["${aws_s3_bucket.clips.arn}/clips/*"]
   }
+  # Async-invoke ks_rollup on the KS this asset belongs to, so OVERVIEW /
+  # ENTITY# / EVENT# rows refresh within seconds of the last asset in the
+  # KS finishing its profile — no 4-hour cache-miss window.
+  statement {
+    sid       = "InvokeKsRollup"
+    actions   = ["lambda:InvokeFunction"]
+    resources = [aws_lambda_function.ks_rollup.arn]
+  }
 }
 
 resource "aws_iam_role_policy" "asset_profile" {
@@ -83,6 +91,7 @@ resource "aws_lambda_function" "asset_profile" {
       ASSETS_TABLE       = aws_dynamodb_table.assets.name
       KB_CACHE_TABLE     = aws_dynamodb_table.kb_cache.name
       PEGASUS_MODEL_ID   = var.pegasus_bedrock_model_id
+      KS_ROLLUP_LAMBDA   = aws_lambda_function.ks_rollup.function_name
     }
   }
 }

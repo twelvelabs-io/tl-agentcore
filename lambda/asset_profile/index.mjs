@@ -14,9 +14,11 @@
 
 import { BedrockRuntimeClient, InvokeModelCommand } from "@aws-sdk/client-bedrock-runtime";
 import { DynamoDBClient, GetItemCommand, PutItemCommand } from "@aws-sdk/client-dynamodb";
+import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
 
 const br = new BedrockRuntimeClient({});
 const ddb = new DynamoDBClient({});
+const lam = new LambdaClient({});
 
 // Per-deployment override of PROFILE_PROMPT, written by the settings lambda.
 // Cached for the lifetime of a warm container (Pegasus is slow enough that a
@@ -46,6 +48,7 @@ const CLIPS_BUCKET_OWNER = process.env.CLIPS_BUCKET_OWNER;
 const ASSETS_TABLE = process.env.ASSETS_TABLE;
 const KB_CACHE_TABLE = process.env.KB_CACHE_TABLE;
 const PEGASUS_MODEL_ID = process.env.PEGASUS_MODEL_ID || "us.twelvelabs.pegasus-1-2-v1:0";
+const KS_ROLLUP_LAMBDA = process.env.KS_ROLLUP_LAMBDA;
 
 const PROFILE_PROMPT = `Analyze this video and respond with ONLY a single JSON object — no preamble, no code fences. Keys (all required):
 
@@ -211,6 +214,26 @@ export const handler = async (event) => {
       console.log(`asset_profile: ${assetId} → ASSET# row written (ks=${row.knowledge_store_id})`);
     } catch (e) {
       console.warn(`asset_profile: write failed for ${assetId}`, e);
+      continue;
+    }
+
+    // Fire ks_rollup async for this KS so OVERVIEW / ENTITY# / EVENT#
+    // rows update within seconds of the last asset finishing profiling.
+    // Without this, get_kb_overview stays cached=false until the next
+    // scheduled 4-hour rollup and the agent falls back to slow live
+    // retrieval. Best-effort: an Invoke failure here doesn't reverse the
+    // ASSET# write.
+    if (KS_ROLLUP_LAMBDA) {
+      try {
+        await lam.send(new InvokeCommand({
+          FunctionName:   KS_ROLLUP_LAMBDA,
+          InvocationType: "Event",
+          Payload:        Buffer.from(JSON.stringify({ ks_id: row.knowledge_store_id })),
+        }));
+        console.log(`asset_profile: queued ks_rollup for ks=${row.knowledge_store_id}`);
+      } catch (e) {
+        console.warn(`asset_profile: ks_rollup invoke failed for ks=${row.knowledge_store_id}`, e);
+      }
     }
   }
   return { ok: true };
