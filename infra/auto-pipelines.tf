@@ -153,6 +153,14 @@ data "aws_iam_policy_document" "ks_rollup_perms" {
     actions   = ["bedrock:InvokeModel"]
     resources = ["arn:aws:bedrock:*::foundation-model/*", "arn:aws:bedrock:*:${data.aws_caller_identity.current.account_id}:inference-profile/*"]
   }
+  # Dual-write nodes/edges to Neptune Analytics after the DDB rollup
+  # writes finish. All calls are SigV4-signed; the graph identifier is
+  # passed via the GRAPH_ID env var below.
+  statement {
+    sid       = "GraphWrite"
+    actions   = ["neptune-graph:ReadDataViaQuery", "neptune-graph:WriteDataViaQuery"]
+    resources = [aws_neptunegraph_graph.this.arn]
+  }
 }
 
 resource "aws_iam_role_policy" "ks_rollup" {
@@ -180,6 +188,7 @@ resource "aws_lambda_function" "ks_rollup" {
       KB_CACHE_TABLE  = aws_dynamodb_table.kb_cache.name
       ASSETS_TABLE    = aws_dynamodb_table.assets.name
       CLAUDE_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+      GRAPH_ID        = aws_neptunegraph_graph.this.id
     }
   }
 }

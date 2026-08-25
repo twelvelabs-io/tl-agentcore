@@ -20,6 +20,7 @@ import {
   PutItemCommand, BatchWriteItemCommand,
 } from "@aws-sdk/client-dynamodb";
 import { BedrockRuntimeClient, InvokeModelCommand } from "@aws-sdk/client-bedrock-runtime";
+import { syncGraphForKs } from "./graph.mjs";
 
 const ddb = new DynamoDBClient({});
 const br = new BedrockRuntimeClient({});
@@ -364,12 +365,17 @@ export const handler = async (event) => {
       const events = await clusterEvents(ksId, profiles);
       if (events.length) await writeEvents(ksId, events);
 
+      // Dual-write to Neptune Analytics. Best-effort: a graph failure
+      // logs but doesn't mark the rollup as errored.
+      const graphResult = await syncGraphForKs(ksId, profiles, entities, events, celebrities);
+
       results.push({
         ks_id: ksId, status: "rolled-up",
         profiles: profiles.length,
         entities: entities.length,
         celebrities: celebrities.length,
         events: events.length,
+        graph: graphResult,
       });
       console.log(`ks_rollup ${ksId}: profiles=${profiles.length} entities=${entities.length} celebrities=${celebrities.length} events=${events.length}`);
     } catch (e) {
