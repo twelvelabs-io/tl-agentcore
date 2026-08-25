@@ -322,10 +322,13 @@ async function writeEvents(ksId, events) {
 // ── Main handler ───────────────────────────────────────────────────────
 export const handler = async (event) => {
   // EventBridge schedule passes `detail-type: Scheduled Event`; manual
-  // invocations can pass { ks_id: "..." } to force-roll one KS.
+  // invocations can pass { ks_id: "..." } to force-roll one KS, or
+  // { force: true } to bypass the "unchanged" skip check (used by the
+  // graph_backfill lambda when the graph was rebuilt from empty).
   const oneKs = event?.ks_id;
+  const force = event?.force === true;
   const ksIds = oneKs ? [oneKs] : await listKsIds();
-  console.log(`ks_rollup: rolling up ${ksIds.length} KSes`);
+  console.log(`ks_rollup: rolling up ${ksIds.length} KSes${force ? " (forced)" : ""}`);
 
   const results = [];
   for (const ksId of ksIds) {
@@ -337,7 +340,7 @@ export const handler = async (event) => {
       }
       const latestProfile = Math.max(...profiles.map((p) => p.ingested_at || 0));
       const ovIng = await readOverviewIngestedAt(ksId);
-      if (!oneKs && ovIng != null && ovIng >= latestProfile) {
+      if (!oneKs && !force && ovIng != null && ovIng >= latestProfile) {
         results.push({ ks_id: ksId, status: "skip-unchanged", profiles: profiles.length });
         continue;
       }

@@ -23,6 +23,7 @@ locals {
     embed_clip_finalize     = aws_iam_role.embed_clip_finalize.name
     enrich_transcribe_start = aws_iam_role.enrich_transcribe_start.name
     enrich_comprehend       = aws_iam_role.enrich_comprehend.name
+    graph_backfill          = aws_iam_role.graph_backfill.name
   }
 }
 
