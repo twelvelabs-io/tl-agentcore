@@ -35,9 +35,11 @@ resource "aws_iam_role_policy_attachment" "kb_graph_basic" {
 }
 
 data "aws_iam_policy_document" "kb_graph_perms" {
+  # Overview row is still read from kb_cache (kept as the single source
+  # of truth for the corpus digest). Nodes + edges come from the graph.
   statement {
-    sid       = "QueryKbCache"
-    actions   = ["dynamodb:Query"]
+    sid       = "ReadOverviewRow"
+    actions   = ["dynamodb:GetItem"]
     resources = [aws_dynamodb_table.kb_cache.arn]
   }
   # Read the KS row to enforce per-user ownership before serving the graph.
@@ -45,6 +47,13 @@ data "aws_iam_policy_document" "kb_graph_perms" {
     sid       = "ReadKsRow"
     actions   = ["dynamodb:GetItem"]
     resources = [aws_dynamodb_table.knowledge_stores.arn]
+  }
+  # Read-only Neptune Analytics access — the graph render is a straight
+  # projection; kb_graph never writes.
+  statement {
+    sid       = "GraphRead"
+    actions   = ["neptune-graph:ReadDataViaQuery"]
+    resources = [aws_neptunegraph_graph.this.arn]
   }
 }
 
@@ -69,6 +78,7 @@ resource "aws_lambda_function" "kb_graph" {
     variables = {
       KB_CACHE_TABLE       = aws_dynamodb_table.kb_cache.name
       KS_TABLE             = aws_dynamodb_table.knowledge_stores.name
+      GRAPH_ID             = aws_neptunegraph_graph.this.id
       COGNITO_USER_POOL_ID = aws_cognito_user_pool.this.id
       COGNITO_CLIENT_ID    = aws_cognito_user_pool_client.spa.id
       ADMIN_GROUP_NAME     = aws_cognito_user_group.admins.name
