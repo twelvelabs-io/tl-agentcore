@@ -1,0 +1,9 @@
+{
+  "name": "enrich-transcribe-start",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "@aws-sdk/client-transcribe": "^3.700.0"
+  }
+}

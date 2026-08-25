@@ -349,9 +349,21 @@ resource "aws_s3_bucket_notification" "clips_triggers" {
     filter_suffix       = ".mp4"
   }
 
+  # enrich_comprehend runs on the Transcribe output — it's the second
+  # half of the Transcribe → Comprehend → MENTIONED_IN pipeline started
+  # by asset_profile's async invoke of enrich_transcribe_start.
+  lambda_function {
+    id                  = "enrich-comprehend"
+    lambda_function_arn = aws_lambda_function.enrich_comprehend.arn
+    events              = ["s3:ObjectCreated:*"]
+    filter_prefix       = "transcripts/"
+    filter_suffix       = ".json"
+  }
+
   depends_on = [
     aws_lambda_permission.s3_invoke_embed_clip_finalize,
     aws_lambda_permission.s3_invoke_hls_finalize,
     aws_lambda_permission.s3_invoke_asset_profile,
+    aws_lambda_permission.s3_invoke_enrich_comprehend,
   ]
 }

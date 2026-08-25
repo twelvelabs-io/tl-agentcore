@@ -58,11 +58,17 @@ data "aws_iam_policy_document" "asset_profile_perms" {
   }
   # Async-invoke ks_rollup on the KS this asset belongs to, so OVERVIEW /
   # ENTITY# / EVENT# rows refresh within seconds of the last asset in the
-  # KS finishing its profile — no 4-hour cache-miss window.
+  # KS finishing its profile — no 4-hour cache-miss window. Also invokes
+  # enrich_transcribe_start to kick off Transcribe on the audio track;
+  # the transcript finalize step (Comprehend + graph MERGE) runs S3-
+  # triggered on the transcribe output.
   statement {
-    sid       = "InvokeKsRollup"
-    actions   = ["lambda:InvokeFunction"]
-    resources = [aws_lambda_function.ks_rollup.arn]
+    sid     = "InvokeDownstream"
+    actions = ["lambda:InvokeFunction"]
+    resources = [
+      aws_lambda_function.ks_rollup.arn,
+      aws_lambda_function.enrich_transcribe_start.arn,
+    ]
   }
 }
 
@@ -90,8 +96,9 @@ resource "aws_lambda_function" "asset_profile" {
       CLIPS_BUCKET_OWNER = data.aws_caller_identity.current.account_id
       ASSETS_TABLE       = aws_dynamodb_table.assets.name
       KB_CACHE_TABLE     = aws_dynamodb_table.kb_cache.name
-      PEGASUS_MODEL_ID   = var.pegasus_bedrock_model_id
-      KS_ROLLUP_LAMBDA   = aws_lambda_function.ks_rollup.function_name
+      PEGASUS_MODEL_ID           = var.pegasus_bedrock_model_id
+      KS_ROLLUP_LAMBDA           = aws_lambda_function.ks_rollup.function_name
+      ENRICH_TRANSCRIBE_LAMBDA   = aws_lambda_function.enrich_transcribe_start.function_name
     }
   }
 }
