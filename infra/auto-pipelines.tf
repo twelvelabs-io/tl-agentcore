@@ -92,13 +92,13 @@ resource "aws_lambda_function" "asset_profile" {
 
   environment {
     variables = {
-      CLIPS_BUCKET       = aws_s3_bucket.clips.bucket
-      CLIPS_BUCKET_OWNER = data.aws_caller_identity.current.account_id
-      ASSETS_TABLE       = aws_dynamodb_table.assets.name
-      KB_CACHE_TABLE     = aws_dynamodb_table.kb_cache.name
-      PEGASUS_MODEL_ID           = var.pegasus_bedrock_model_id
-      KS_ROLLUP_LAMBDA           = aws_lambda_function.ks_rollup.function_name
-      ENRICH_TRANSCRIBE_LAMBDA   = aws_lambda_function.enrich_transcribe_start.function_name
+      CLIPS_BUCKET             = aws_s3_bucket.clips.bucket
+      CLIPS_BUCKET_OWNER       = data.aws_caller_identity.current.account_id
+      ASSETS_TABLE             = aws_dynamodb_table.assets.name
+      KB_CACHE_TABLE           = aws_dynamodb_table.kb_cache.name
+      PEGASUS_MODEL_ID         = var.pegasus_bedrock_model_id
+      KS_ROLLUP_LAMBDA         = aws_lambda_function.ks_rollup.function_name
+      ENRICH_TRANSCRIBE_LAMBDA = aws_lambda_function.enrich_transcribe_start.function_name
     }
   }
 }

@@ -35,8 +35,8 @@ data "aws_iam_policy_document" "graph_backfill_perms" {
   # to build the asset_id → ks_id map used when writing Rights edges.
   # Scan the rights table to source the Rights nodes themselves.
   statement {
-    sid       = "ScanTables"
-    actions   = ["dynamodb:Scan"]
+    sid     = "ScanTables"
+    actions = ["dynamodb:Scan"]
     resources = [
       aws_dynamodb_table.knowledge_stores.arn,
       aws_dynamodb_table.assets.arn,
@@ -80,11 +80,11 @@ resource "aws_lambda_function" "graph_backfill" {
 
   environment {
     variables = {
-      KS_TABLE       = aws_dynamodb_table.knowledge_stores.name
-      ASSETS_TABLE   = aws_dynamodb_table.assets.name
-      RIGHTS_TABLE   = aws_dynamodb_table.rights.name
-      KS_ROLLUP_ARN  = aws_lambda_function.ks_rollup.arn
-      GRAPH_ID       = aws_neptunegraph_graph.this.id
+      KS_TABLE      = aws_dynamodb_table.knowledge_stores.name
+      ASSETS_TABLE  = aws_dynamodb_table.assets.name
+      RIGHTS_TABLE  = aws_dynamodb_table.rights.name
+      KS_ROLLUP_ARN = aws_lambda_function.ks_rollup.arn
+      GRAPH_ID      = aws_neptunegraph_graph.this.id
     }
   }
 }
