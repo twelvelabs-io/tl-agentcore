@@ -4,9 +4,10 @@ boto3>=1.43.0
 httpx>=0.27
 # Pillow is used by find_by_image's Marengo fallback to upscale sub-128px
 # face crops before StartAsyncInvoke (Marengo rejects smaller inputs).
-# Lower bound 12.3.0 pulls in fixes for the CVE cluster tracked as
-# PYSEC-2026-3493..3496 + earlier.
-Pillow>=12.3.0
+# 12.2.x is the latest available at build time and covers the CVE cluster
+# tracked as PYSEC-2026-3493..3496 + earlier; bump the lower bound when
+# a newer minor lands on PyPI.
+Pillow>=12.2.0
 # Transitive pins for known-vulnerable versions surfaced by OSV. Both
 # come in via strands-agents / bedrock-agentcore.
 idna>=3.15
