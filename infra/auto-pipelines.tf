@@ -58,11 +58,17 @@ data "aws_iam_policy_document" "asset_profile_perms" {
   }
   # Async-invoke ks_rollup on the KS this asset belongs to, so OVERVIEW /
   # ENTITY# / EVENT# rows refresh within seconds of the last asset in the
-  # KS finishing its profile — no 4-hour cache-miss window.
+  # KS finishing its profile — no 4-hour cache-miss window. Also invokes
+  # enrich_transcribe_start to kick off Transcribe on the audio track;
+  # the transcript finalize step (Comprehend + graph MERGE) runs S3-
+  # triggered on the transcribe output.
   statement {
-    sid       = "InvokeKsRollup"
-    actions   = ["lambda:InvokeFunction"]
-    resources = [aws_lambda_function.ks_rollup.arn]
+    sid     = "InvokeDownstream"
+    actions = ["lambda:InvokeFunction"]
+    resources = [
+      aws_lambda_function.ks_rollup.arn,
+      aws_lambda_function.enrich_transcribe_start.arn,
+    ]
   }
 }
 
@@ -86,12 +92,13 @@ resource "aws_lambda_function" "asset_profile" {
 
   environment {
     variables = {
-      CLIPS_BUCKET       = aws_s3_bucket.clips.bucket
-      CLIPS_BUCKET_OWNER = data.aws_caller_identity.current.account_id
-      ASSETS_TABLE       = aws_dynamodb_table.assets.name
-      KB_CACHE_TABLE     = aws_dynamodb_table.kb_cache.name
-      PEGASUS_MODEL_ID   = var.pegasus_bedrock_model_id
-      KS_ROLLUP_LAMBDA   = aws_lambda_function.ks_rollup.function_name
+      CLIPS_BUCKET             = aws_s3_bucket.clips.bucket
+      CLIPS_BUCKET_OWNER       = data.aws_caller_identity.current.account_id
+      ASSETS_TABLE             = aws_dynamodb_table.assets.name
+      KB_CACHE_TABLE           = aws_dynamodb_table.kb_cache.name
+      PEGASUS_MODEL_ID         = var.pegasus_bedrock_model_id
+      KS_ROLLUP_LAMBDA         = aws_lambda_function.ks_rollup.function_name
+      ENRICH_TRANSCRIBE_LAMBDA = aws_lambda_function.enrich_transcribe_start.function_name
     }
   }
 }
@@ -153,6 +160,14 @@ data "aws_iam_policy_document" "ks_rollup_perms" {
     actions   = ["bedrock:InvokeModel"]
     resources = ["arn:aws:bedrock:*::foundation-model/*", "arn:aws:bedrock:*:${data.aws_caller_identity.current.account_id}:inference-profile/*"]
   }
+  # Dual-write nodes/edges to Neptune Analytics after the DDB rollup
+  # writes finish. All calls are SigV4-signed; the graph identifier is
+  # passed via the GRAPH_ID env var below.
+  statement {
+    sid       = "GraphWrite"
+    actions   = ["neptune-graph:ReadDataViaQuery", "neptune-graph:WriteDataViaQuery"]
+    resources = [aws_neptunegraph_graph.this.arn]
+  }
 }
 
 resource "aws_iam_role_policy" "ks_rollup" {
@@ -180,6 +195,7 @@ resource "aws_lambda_function" "ks_rollup" {
       KB_CACHE_TABLE  = aws_dynamodb_table.kb_cache.name
       ASSETS_TABLE    = aws_dynamodb_table.assets.name
       CLAUDE_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+      GRAPH_ID        = aws_neptunegraph_graph.this.id
     }
   }
 }

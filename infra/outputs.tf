@@ -30,6 +30,21 @@ output "vector_index_name" {
   description = "S3 Vectors index name (single index per bucket; KS scoping is done via metadata filter)."
 }
 
+output "graph_id" {
+  value       = aws_neptunegraph_graph.this.id
+  description = "Neptune Analytics graph identifier (g-xxxxxxxxxx). Data-plane calls target {graph_id}.{region}.neptune-graph.amazonaws.com."
+}
+
+output "graph_endpoint" {
+  value       = aws_neptunegraph_graph.this.endpoint
+  description = "Neptune Analytics HTTPS data-plane endpoint for ExecuteQuery / StartImportTask."
+}
+
+output "graph_import_role_arn" {
+  value       = aws_iam_role.graph_import.arn
+  description = "IAM role the graph service assumes for S3 bulk imports. Pass as roleArn to StartImportTask."
+}
+
 output "rekognition_collection_prefix" {
   value       = "${local.fqname}-ks-"
   description = "Per-KS Rekognition Faces collection id is <this>+<ks_id>. Lazy-created on first IndexFaces call by the index_faces lambda."

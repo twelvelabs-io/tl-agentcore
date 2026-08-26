@@ -49,6 +49,7 @@ const ASSETS_TABLE = process.env.ASSETS_TABLE;
 const KB_CACHE_TABLE = process.env.KB_CACHE_TABLE;
 const PEGASUS_MODEL_ID = process.env.PEGASUS_MODEL_ID || "us.twelvelabs.pegasus-1-2-v1:0";
 const KS_ROLLUP_LAMBDA = process.env.KS_ROLLUP_LAMBDA;
+const ENRICH_TRANSCRIBE_LAMBDA = process.env.ENRICH_TRANSCRIBE_LAMBDA;
 
 const PROFILE_PROMPT = `Analyze this video and respond with ONLY a single JSON object — no preamble, no code fences. Keys (all required):
 
@@ -246,6 +247,23 @@ export const handler = async (event) => {
         console.log(`asset_profile: queued ks_rollup for ks=${row.knowledge_store_id}`);
       } catch (e) {
         console.warn(`asset_profile: ks_rollup invoke failed for ks=${row.knowledge_store_id}`, e);
+      }
+    }
+
+    // Kick off Transcribe on the audio track. Comprehend + graph MERGE
+    // for the resulting transcript runs S3-triggered in enrich_comprehend.
+    // Best-effort — an asset without dialogue produces no MENTIONED_IN
+    // edges, which is fine (visual APPEARS_IN edges still cover it).
+    if (ENRICH_TRANSCRIBE_LAMBDA) {
+      try {
+        await lam.send(new InvokeCommand({
+          FunctionName:   ENRICH_TRANSCRIBE_LAMBDA,
+          InvocationType: "Event",
+          Payload:        Buffer.from(JSON.stringify({ asset_id: assetId })),
+        }));
+        console.log(`asset_profile: queued transcribe for asset=${assetId}`);
+      } catch (e) {
+        console.warn(`asset_profile: transcribe invoke failed for asset=${assetId}`, e);
       }
     }
   }

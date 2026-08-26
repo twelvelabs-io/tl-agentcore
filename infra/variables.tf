@@ -55,3 +55,13 @@ variable "frontend_domain" {
   default     = null
   description = "CloudFront domain that hosts the SPA (no scheme). Set after first apply to narrow API GW CORS from `*` to the specific origin. Empty/null keeps the wildcard."
 }
+
+# Neptune Analytics has no serverless tier — the graph bills continuously
+# once created. 32 m-NCU is the smallest useful config (each m-NCU ≈ 1 GiB
+# memory, ~$0.16/m-NCU-hr in us-east-1). Bump for larger graphs or higher
+# query concurrency.
+variable "graph_provisioned_memory" {
+  type        = number
+  default     = 32
+  description = "Neptune Analytics graph size in m-NCU (min 32). Affects hourly cost — expect ~$5/hr at the floor."
+}

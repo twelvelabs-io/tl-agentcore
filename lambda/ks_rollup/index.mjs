@@ -20,6 +20,7 @@ import {
   PutItemCommand, BatchWriteItemCommand,
 } from "@aws-sdk/client-dynamodb";
 import { BedrockRuntimeClient, InvokeModelCommand } from "@aws-sdk/client-bedrock-runtime";
+import { syncGraphForKs } from "./graph.mjs";
 
 const ddb = new DynamoDBClient({});
 const br = new BedrockRuntimeClient({});
@@ -321,10 +322,13 @@ async function writeEvents(ksId, events) {
 // ── Main handler ───────────────────────────────────────────────────────
 export const handler = async (event) => {
   // EventBridge schedule passes `detail-type: Scheduled Event`; manual
-  // invocations can pass { ks_id: "..." } to force-roll one KS.
+  // invocations can pass { ks_id: "..." } to force-roll one KS, or
+  // { force: true } to bypass the "unchanged" skip check (used by the
+  // graph_backfill lambda when the graph was rebuilt from empty).
   const oneKs = event?.ks_id;
+  const force = event?.force === true;
   const ksIds = oneKs ? [oneKs] : await listKsIds();
-  console.log(`ks_rollup: rolling up ${ksIds.length} KSes`);
+  console.log(`ks_rollup: rolling up ${ksIds.length} KSes${force ? " (forced)" : ""}`);
 
   const results = [];
   for (const ksId of ksIds) {
@@ -336,7 +340,7 @@ export const handler = async (event) => {
       }
       const latestProfile = Math.max(...profiles.map((p) => p.ingested_at || 0));
       const ovIng = await readOverviewIngestedAt(ksId);
-      if (!oneKs && ovIng != null && ovIng >= latestProfile) {
+      if (!oneKs && !force && ovIng != null && ovIng >= latestProfile) {
         results.push({ ks_id: ksId, status: "skip-unchanged", profiles: profiles.length });
         continue;
       }
@@ -364,12 +368,17 @@ export const handler = async (event) => {
       const events = await clusterEvents(ksId, profiles);
       if (events.length) await writeEvents(ksId, events);
 
+      // Dual-write to Neptune Analytics. Best-effort: a graph failure
+      // logs but doesn't mark the rollup as errored.
+      const graphResult = await syncGraphForKs(ksId, profiles, entities, events, celebrities);
+
       results.push({
         ks_id: ksId, status: "rolled-up",
         profiles: profiles.length,
         entities: entities.length,
         celebrities: celebrities.length,
         events: events.length,
+        graph: graphResult,
       });
       console.log(`ks_rollup ${ksId}: profiles=${profiles.length} entities=${entities.length} celebrities=${celebrities.length} events=${events.length}`);
     } catch (e) {
