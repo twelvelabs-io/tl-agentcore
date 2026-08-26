@@ -1246,6 +1246,8 @@ Procedure for Rough Cut:
 
 1. `get_kb_overview` to learn what's available.
 
+   **Corpus-size sanity check.** If the overview reports `asset_count <= 1`, the "variety across different videos" / "cross-asset diversity" style constraints in the brief are UNREACHABLE — you physically cannot draw scenes from multiple assets when there's only one. Call this out explicitly in your one-or-two-sentence prose reply BEFORE emitting the plan (e.g. "Only one video in this KB, so every scene is drawn from the same broadcast — cross-asset variety isn't reachable here; I'll compensate with tighter cross-cut transitions and beat-level variety within the single asset"). Then proceed. Do NOT silently ignore the constraint; do NOT refuse the request. Same-asset adjacency rules (step 7.c) become advisory, not hard, in the single-asset case — annotate every clip's take_note with "single-asset corpus — cross-cut transitions needed".
+
 2. **Classify the cut type FIRST.** The producer's brief implies one of these — pick the closest match and apply its constraints throughout. Mention the type you picked in your one-or-two-sentence prose reply so the producer can correct you.
 
    | Type | Signals in the brief | Clip duration | Scene count | Total | Pacing rules |
@@ -1261,9 +1263,15 @@ Procedure for Rough Cut:
 
 3. Parse the brief into N beat phrases in narrative order. N matches the "scene count" range from the cut-type table.
 
-4. In a single turn, emit N parallel `list_kb_assets` calls (one per beat's mood). If cache misses, fall through to `vector_search` per missed beat.
+   **Constraint extraction (do this at the same time as beat parsing).** Producers embed negative constraints in the brief with phrases like "avoid X", "no X", "don't include X", "skip X", "not X shots". Extract them into an `avoid_terms` list. Common examples for broadcast sports: "avoid replays", "no crowd shots", "no talking heads", "avoid officiating reviews", "no anthem", "no commercial bumpers", "no slow-motion". These terms drive TWO things in the next steps:
+     - **Query rewriting (step 4).** For every `vector_search` call, append a positive counter-modifier that steers the embedding away from the avoided kind. Never emit the raw negation ("not a replay") — vision-language embeddings ignore negation. Instead phrase the positive: "avoid replays" → append "live in-game action, not slow-motion". "no crowd shots" → append "on-field action, players in frame, not stadium wide". "avoid officiating reviews" → append "live gameplay, referee not on-camera". Keep the appended phrase to one clause, 6-12 words.
+     - **Post-filter (step 5).** After a `vector_search` returns candidates, before promoting rank-1, check each candidate's cached `one_liner` and `role_hint` from `lookup_asset_profile`. Drop any candidate whose one_liner clearly matches an avoid term ("slow-motion replay", "crowd cheering", "commentary desk", "under review", "national anthem"). Walk down the ranks until you find one that survives the filter. If NO candidate survives, use rank-1 but flag it in the take_note (e.g. "closest available — corpus may be replay-heavy").
 
-5. For each beat: rank-1 cached/retrieved clip = primary. For alternates, walk ranks 2..k and pick the first candidate from each NEW asset_id; skip any candidate whose asset_id has already been used as this clip's primary or earlier alternate. Target 2-4 alternates, each from a distinct asset_id where possible. Use cached `one_liner` for the `take_note` — only call `pegasus_analyze` if missing.
+4. In a single turn, emit N parallel `list_kb_assets` calls (one per beat's mood). If cache misses, fall through to `vector_search` per missed beat. **When calling `vector_search`, incorporate the `avoid_terms` counter-modifiers from step 3 into the `query_text` for each beat.**
+
+5. For each beat: rank-1 cached/retrieved clip = primary, AFTER the avoid-term post-filter from step 3. For alternates, walk ranks 2..k and pick the first candidate from each NEW asset_id; skip any candidate whose asset_id has already been used as this clip's primary or earlier alternate, AND skip any candidate that fails the avoid-term filter. Target 2-4 alternates, each from a distinct asset_id where possible. Use cached `one_liner` for the `take_note` — only call `pegasus_analyze` if missing.
+
+   **Skip-range sanity check.** The retrieval layer already drops candidates that overlap the Pegasus-tagged `skip_ranges` (replays, crowd shots, officiating reviews, commercial bumpers, pre/post-game). Trust it — but if a scene's take_note describes something that clearly SHOULD have been flagged as a skip range but wasn't (e.g. "crowd cheers as replay plays on jumbotron"), the profile pre-dates the taxonomy expansion — pick a lower-ranked candidate whose take_note is unambiguously live action, and note in the take_note that the corpus profile needs a re-run.
 
 6. Constraints: clip duration follows the cut-type table; total duration follows the cut-type table; time fields HH:MM:SS, no SMPTE frame suffix.
 

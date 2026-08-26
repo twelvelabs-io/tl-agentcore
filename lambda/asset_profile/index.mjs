@@ -60,7 +60,7 @@ const PROFILE_PROMPT = `Analyze this video and respond with ONLY a single JSON o
   "visual_style": "one of: cinematic, documentary, archival, animated, sports, news, music-video, vlog, mixed",
   "role_hint": "one of: cold-open, action-set-piece, emotional-coda, b-roll, hero-shot, transition, dialogue, atmospheric",
   "skip_ranges": [
-    {"start_sec": 0.0, "end_sec": 2.5, "kind": "studio_logo | title_card | credits | fade_black | bars_tone | instructional"}
+    {"start_sec": 0.0, "end_sec": 2.5, "kind": "studio_logo | title_card | credits | fade_black | bars_tone | instructional | replay | crowd_shot | commentary_desk | officiating_review | commercial_bumper | pre_or_post_game"}
   ],
   "key_entities": [
     {
@@ -78,8 +78,16 @@ skip_ranges should list timestamp regions a producer assembling a sizzle/highlig
   - "fade_black" (a solid-black or extended-fade region > 1.5s)
   - "bars_tone" (color bars, SMPTE leader, slate)
   - "instructional" (chalkboard plays, playbook diagrams, coaching whiteboard explainers, on-screen text-tutorial overlays — any region that is teaching about the content rather than being the content; for a sports highlight reel a coach-explains-the-play sequence is "instructional" even if there's commentary audio).
+  - "replay" (any slow-motion or duplicate re-showing of a moment that already aired live earlier in this asset — includes multi-angle replays and network-branded "REPLAY" title cards. Highlight reels want the LIVE moment, not the replay).
+  - "crowd_shot" (cutaway to fans, stadium exterior, arena lights, or empty-play crowd reactions where no on-field/on-ice action is happening. Brief cheers between plays are OK; extended crowd b-roll is not).
+  - "commentary_desk" (studio analysts, in-booth announcers on camera, sideline reporters piece-to-camera, halftime/intermission desk segments — anyone talking ABOUT the game rather than the game happening).
+  - "officiating_review" (refs at the video review monitor, on-ice/on-court conference, VAR/VMR frame-by-frame review overlays, "under review" title cards, "no goal / no play" ruling delivery. The clip after the ruling is fine — the review process itself is dead air).
+  - "commercial_bumper" (sponsor cards, network idents, in-game brand overlays that take the full screen, break bumpers going to/from commercial).
+  - "pre_or_post_game" (national anthem, player intros with pyro/lights, ceremonial faceoff / puck drop / coin toss, trophy presentation, on-field/on-ice ceremonies, medal ceremonies, extended handshake lines. Game-clinching moments and immediate celebration are NOT this — this is the ceremonial padding around the game).
 
 If a region spans most or all of the asset duration (e.g. a 40-min coaching breakdown that's purely instructional from start to finish), mark the full duration as one "instructional" range — that's correct and lets the retrieval layer exclude the whole asset.
+
+For broadcast sports assets specifically, be aggressive on "replay" — a 2-hour game broadcast can easily have 30-60 replay segments and each one belongs in this list. Every replay you miss becomes a candidate the retrieval layer might pick for a "goal" or "hit" beat.
 
 Use float seconds. If none are present, return an empty list.
 
@@ -131,6 +139,11 @@ async function callPegasusForKey(s3Key) {
       },
     },
     temperature: 0.2,
+    // Broadcast-length assets can legitimately need 30-60 skip_range
+    // entries. Default Bedrock caps that would truncate the JSON before
+    // the closing brace produce a fatal "no_json" parse error, so we
+    // request headroom explicitly.
+    maxOutputTokens: 4000,
   };
   const resp = await br.send(new InvokeModelCommand({
     modelId: PEGASUS_MODEL_ID,
