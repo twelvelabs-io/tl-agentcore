@@ -171,10 +171,15 @@ async function upsertEntityCoOccurrence(ksId, entities) {
 
 async function upsertEvents(ksId, events) {
   if (!events.length) return;
+  // Event records carry the constituent asset list as `participating_assets`
+  // (matches the DDB shape written by ks_rollup and the JSON contract with
+  // the Claude clustering step). We tolerate the legacy `asset_ids` name for
+  // any records lingering from earlier iterations.
+  const assetsOn = (e) => e.participating_assets || e.asset_ids || [];
   const nodeRows = events.map((e) => ({
     event_id:       e.event_id,
     description:    e.description || "",
-    cluster_size:   e.cluster_size || (e.asset_ids || []).length,
+    cluster_size:   e.cluster_size || assetsOn(e).length,
     confidence:     e.confidence || 0,
     mood_signature: (e.mood_signature || []).join(","),
   }));
@@ -189,7 +194,7 @@ async function upsertEvents(ksId, events) {
 
   const edgeRows = [];
   for (const e of events) {
-    for (const aid of e.asset_ids || []) {
+    for (const aid of assetsOn(e)) {
       edgeRows.push({ event_id: e.event_id, asset_id: aid });
     }
   }
