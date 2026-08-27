@@ -118,7 +118,7 @@ data "aws_iam_policy_document" "enrich_comprehend_perms" {
   }
   statement {
     sid       = "GraphMerge"
-    actions   = ["neptune-graph:ReadDataViaQuery", "neptune-graph:WriteDataViaQuery"]
+    actions   = ["neptune-graph:ReadDataViaQuery", "neptune-graph:WriteDataViaQuery", "neptune-graph:DeleteDataViaQuery"]
     resources = [aws_neptunegraph_graph.this.arn]
   }
 }
