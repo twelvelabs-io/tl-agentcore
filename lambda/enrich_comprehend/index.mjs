@@ -119,7 +119,7 @@ async function mergeIntoGraph(ksId, assetId, entities) {
   const out = await graph.send(new ExecuteQueryCommand({
     graphIdentifier: GRAPH_ID,
     language: "OPEN_CYPHER",
-    query: q,
+    queryString: q,
     parameters: { ks_id: ksId, asset_id: assetId, rows },
     planCache: "AUTO",
   }));

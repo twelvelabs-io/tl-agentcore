@@ -58,11 +58,11 @@ async function checkKsRead(ks_id, identity) {
   return null;
 }
 
-async function runQuery(query, parameters) {
+async function runQuery(queryString, parameters) {
   const out = await graph.send(new ExecuteQueryCommand({
     graphIdentifier: GRAPH_ID,
     language: "OPEN_CYPHER",
-    query,
+    queryString,
     parameters,
     planCache: "AUTO",
   }));

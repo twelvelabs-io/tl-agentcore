@@ -127,7 +127,7 @@ async function syncRights() {
   await graph.send(new ExecuteQueryCommand({
     graphIdentifier: GRAPH_ID,
     language: "OPEN_CYPHER",
-    query: `
+    queryString: `
       UNWIND $rows AS row
       MATCH (a:Asset {ks_id: row.ks_id, asset_id: row.asset_id})
       MERGE (r:Rights {ks_id: row.ks_id, asset_id: row.asset_id})

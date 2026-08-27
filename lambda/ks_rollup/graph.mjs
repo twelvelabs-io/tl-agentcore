@@ -32,12 +32,12 @@ import { NeptuneGraphClient, ExecuteQueryCommand } from "@aws-sdk/client-neptune
 const GRAPH_ID = process.env.GRAPH_ID;
 const client = GRAPH_ID ? new NeptuneGraphClient({}) : null;
 
-async function runQuery(query, parameters) {
+async function runQuery(queryString, parameters) {
   if (!client || !GRAPH_ID) return null;
   const out = await client.send(new ExecuteQueryCommand({
     graphIdentifier: GRAPH_ID,
     language: "OPEN_CYPHER",
-    query,
+    queryString,
     parameters,
     planCache: "AUTO",
   }));
