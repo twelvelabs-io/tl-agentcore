@@ -47,6 +47,23 @@ async function runQuery(queryString, parameters) {
   return out;
 }
 
+// Neptune Analytics kills an UNWIND with too many rows in one query —
+// `UnprocessableException: Operation terminated (out of memory)` at
+// 32 m-NCU even for batches of 500 on this graph's size. 100 rows per
+// call stays under the ceiling in practice; bump if you scale up the
+// graph capacity and see per-call latency dominate.
+const BATCH_SIZE = 100;
+
+// Fan out an UNWIND-driven MERGE across chunks so a corpus of tens of
+// thousands of rows doesn't OOM the graph on a single call.
+async function runQueryBatched(queryString, ksId, rows, extraParams = {}) {
+  if (!rows.length) return;
+  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+    const chunk = rows.slice(i, i + BATCH_SIZE);
+    await runQuery(queryString, { ks_id: ksId, rows: chunk, ...extraParams });
+  }
+}
+
 // One UNWIND-driven MERGE per node/edge shape. Batching in a single
 // statement is much cheaper than one round-trip per row.
 
@@ -58,14 +75,14 @@ async function upsertAssets(ksId, profiles) {
     visual_style: p.visual_style || "",
     role_hint:    p.role_hint || "",
   }));
-  await runQuery(`
+  await runQueryBatched(`
     UNWIND $rows AS row
     MERGE (a:Asset {ks_id: $ks_id, asset_id: row.asset_id})
     SET a.title        = row.title,
         a.one_liner    = row.one_liner,
         a.visual_style = row.visual_style,
         a.role_hint    = row.role_hint
-  `, { ks_id: ksId, rows });
+  `, ksId, rows);
 }
 
 async function upsertMoodStyleRoleEdges(ksId, profiles) {
@@ -83,30 +100,24 @@ async function upsertMoodStyleRoleEdges(ksId, profiles) {
       roleRows.push({ asset_id: p.asset_id, name: p.role_hint.trim().toLowerCase() });
     }
   }
-  if (moodRows.length) {
-    await runQuery(`
-      UNWIND $rows AS row
-      MATCH (a:Asset {ks_id: $ks_id, asset_id: row.asset_id})
-      MERGE (m:MoodTag {ks_id: $ks_id, name: row.name})
-      MERGE (a)-[:HAS_MOOD]->(m)
-    `, { ks_id: ksId, rows: moodRows });
-  }
-  if (styleRows.length) {
-    await runQuery(`
-      UNWIND $rows AS row
-      MATCH (a:Asset {ks_id: $ks_id, asset_id: row.asset_id})
-      MERGE (s:Style {ks_id: $ks_id, name: row.name})
-      MERGE (a)-[:HAS_STYLE]->(s)
-    `, { ks_id: ksId, rows: styleRows });
-  }
-  if (roleRows.length) {
-    await runQuery(`
-      UNWIND $rows AS row
-      MATCH (a:Asset {ks_id: $ks_id, asset_id: row.asset_id})
-      MERGE (r:Role {ks_id: $ks_id, name: row.name})
-      MERGE (a)-[:HAS_ROLE]->(r)
-    `, { ks_id: ksId, rows: roleRows });
-  }
+  await runQueryBatched(`
+    UNWIND $rows AS row
+    MATCH (a:Asset {ks_id: $ks_id, asset_id: row.asset_id})
+    MERGE (m:MoodTag {ks_id: $ks_id, name: row.name})
+    MERGE (a)-[:HAS_MOOD]->(m)
+  `, ksId, moodRows);
+  await runQueryBatched(`
+    UNWIND $rows AS row
+    MATCH (a:Asset {ks_id: $ks_id, asset_id: row.asset_id})
+    MERGE (s:Style {ks_id: $ks_id, name: row.name})
+    MERGE (a)-[:HAS_STYLE]->(s)
+  `, ksId, styleRows);
+  await runQueryBatched(`
+    UNWIND $rows AS row
+    MATCH (a:Asset {ks_id: $ks_id, asset_id: row.asset_id})
+    MERGE (r:Role {ks_id: $ks_id, name: row.name})
+    MERGE (a)-[:HAS_ROLE]->(r)
+  `, ksId, roleRows);
 }
 
 async function upsertEntities(ksId, entities) {
@@ -117,13 +128,13 @@ async function upsertEntities(ksId, entities) {
     kind:             e.kind || "unknown",
     appearance_count: e.appearance_count,
   }));
-  await runQuery(`
+  await runQueryBatched(`
     UNWIND $rows AS row
     MERGE (e:Entity {ks_id: $ks_id, canonical: row.canonical})
     SET e.name             = row.name,
         e.kind             = row.kind,
         e.appearance_count = row.appearance_count
-  `, { ks_id: ksId, rows: nodeRows });
+  `, ksId, nodeRows);
 
   // APPEARS_IN edges: one per (asset, entity) pair.
   const edgeRows = [];
@@ -132,14 +143,12 @@ async function upsertEntities(ksId, entities) {
       edgeRows.push({ asset_id: aid, canonical: e.canonical });
     }
   }
-  if (edgeRows.length) {
-    await runQuery(`
-      UNWIND $rows AS row
-      MATCH (a:Asset  {ks_id: $ks_id, asset_id: row.asset_id})
-      MATCH (e:Entity {ks_id: $ks_id, canonical: row.canonical})
-      MERGE (a)-[:APPEARS_IN]->(e)
-    `, { ks_id: ksId, rows: edgeRows });
-  }
+  await runQueryBatched(`
+    UNWIND $rows AS row
+    MATCH (a:Asset  {ks_id: $ks_id, asset_id: row.asset_id})
+    MATCH (e:Entity {ks_id: $ks_id, canonical: row.canonical})
+    MERGE (a)-[:APPEARS_IN]->(e)
+  `, ksId, edgeRows);
 }
 
 async function upsertEntityCoOccurrence(ksId, entities) {
@@ -159,14 +168,13 @@ async function upsertEntityCoOccurrence(ksId, entities) {
       if (shared >= 2) rows.push({ a: a.canonical, b: b.canonical, weight: shared });
     }
   }
-  if (!rows.length) return;
-  await runQuery(`
+  await runQueryBatched(`
     UNWIND $rows AS row
     MATCH (a:Entity {ks_id: $ks_id, canonical: row.a})
     MATCH (b:Entity {ks_id: $ks_id, canonical: row.b})
     MERGE (a)-[r:CO_OCCURS_WITH]->(b)
     SET r.weight = row.weight
-  `, { ks_id: ksId, rows });
+  `, ksId, rows);
 }
 
 async function upsertEvents(ksId, events) {
@@ -183,14 +191,14 @@ async function upsertEvents(ksId, events) {
     confidence:     e.confidence || 0,
     mood_signature: (e.mood_signature || []).join(","),
   }));
-  await runQuery(`
+  await runQueryBatched(`
     UNWIND $rows AS row
     MERGE (ev:Event {ks_id: $ks_id, event_id: row.event_id})
     SET ev.description    = row.description,
         ev.cluster_size   = row.cluster_size,
         ev.confidence     = row.confidence,
         ev.mood_signature = row.mood_signature
-  `, { ks_id: ksId, rows: nodeRows });
+  `, ksId, nodeRows);
 
   const edgeRows = [];
   for (const e of events) {
@@ -198,14 +206,12 @@ async function upsertEvents(ksId, events) {
       edgeRows.push({ event_id: e.event_id, asset_id: aid });
     }
   }
-  if (edgeRows.length) {
-    await runQuery(`
-      UNWIND $rows AS row
-      MATCH (ev:Event {ks_id: $ks_id, event_id: row.event_id})
-      MATCH (a:Asset  {ks_id: $ks_id, asset_id: row.asset_id})
-      MERGE (ev)-[:CONTAINS]->(a)
-    `, { ks_id: ksId, rows: edgeRows });
-  }
+  await runQueryBatched(`
+    UNWIND $rows AS row
+    MATCH (ev:Event {ks_id: $ks_id, event_id: row.event_id})
+    MATCH (a:Asset  {ks_id: $ks_id, asset_id: row.asset_id})
+    MERGE (ev)-[:CONTAINS]->(a)
+  `, ksId, edgeRows);
 }
 
 async function upsertCelebrities(ksId, celebrities) {
@@ -214,11 +220,11 @@ async function upsertCelebrities(ksId, celebrities) {
     name:        c.name,
     asset_count: (c.asset_ids || []).length,
   }));
-  await runQuery(`
+  await runQueryBatched(`
     UNWIND $rows AS row
     MERGE (c:Celebrity {ks_id: $ks_id, name: row.name})
     SET c.asset_count = row.asset_count
-  `, { ks_id: ksId, rows: nodeRows });
+  `, ksId, nodeRows);
 
   const edgeRows = [];
   for (const c of celebrities) {
@@ -226,14 +232,12 @@ async function upsertCelebrities(ksId, celebrities) {
       edgeRows.push({ name: c.name, asset_id: aid });
     }
   }
-  if (edgeRows.length) {
-    await runQuery(`
-      UNWIND $rows AS row
-      MATCH (c:Celebrity {ks_id: $ks_id, name: row.name})
-      MATCH (a:Asset     {ks_id: $ks_id, asset_id: row.asset_id})
-      MERGE (a)-[:HAS_CELEBRITY]->(c)
-    `, { ks_id: ksId, rows: edgeRows });
-  }
+  await runQueryBatched(`
+    UNWIND $rows AS row
+    MATCH (c:Celebrity {ks_id: $ks_id, name: row.name})
+    MATCH (a:Asset     {ks_id: $ks_id, asset_id: row.asset_id})
+    MERGE (a)-[:HAS_CELEBRITY]->(c)
+  `, ksId, edgeRows);
 }
 
 /**
