@@ -53,7 +53,7 @@ data "aws_iam_policy_document" "graph_backfill_perms" {
   # Write Rights nodes + COVERS edges directly.
   statement {
     sid       = "GraphWrite"
-    actions   = ["neptune-graph:ReadDataViaQuery", "neptune-graph:WriteDataViaQuery"]
+    actions   = ["neptune-graph:ReadDataViaQuery", "neptune-graph:WriteDataViaQuery", "neptune-graph:DeleteDataViaQuery"]
     resources = [aws_neptunegraph_graph.this.arn]
   }
 }

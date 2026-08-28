@@ -165,7 +165,7 @@ data "aws_iam_policy_document" "ks_rollup_perms" {
   # passed via the GRAPH_ID env var below.
   statement {
     sid       = "GraphWrite"
-    actions   = ["neptune-graph:ReadDataViaQuery", "neptune-graph:WriteDataViaQuery"]
+    actions   = ["neptune-graph:ReadDataViaQuery", "neptune-graph:WriteDataViaQuery", "neptune-graph:DeleteDataViaQuery"]
     resources = [aws_neptunegraph_graph.this.arn]
   }
 }
