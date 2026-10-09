@@ -41,8 +41,8 @@ variable "seed_admin_email" {
 
 variable "pegasus_bedrock_model_id" {
   type        = string
-  default     = "us.twelvelabs.pegasus-1-2-v1:0"
-  description = "Bedrock model id for Pegasus when pegasus_provider = 'bedrock'. Defaults to the us cross-region inference profile of Pegasus 1.2."
+  default     = "us.twelvelabs.pegasus-1-5-v1:0"
+  description = "Bedrock model id for Pegasus analyze. Defaults to the us cross-region inference profile of Pegasus 1.5 (GA on Bedrock Marketplace 2026-09-18). Set to us.twelvelabs.pegasus-1-2-v1:0 to roll back."
 }
 
 # Frontend origin for CORS narrowing. Chicken-and-egg with the

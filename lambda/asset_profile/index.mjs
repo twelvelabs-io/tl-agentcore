@@ -4,7 +4,7 @@
 //
 // Steps:
 //   1. Read the assets DDB row to recover knowledge_store_id + filename.
-//   2. Call Bedrock Pegasus 1.2 with the structured PROFILE_PROMPT against
+//   2. Call Bedrock Pegasus 1.5 with the structured PROFILE_PROMPT against
 //      the s3Location.
 //   3. Parse the JSON profile, write kb_cache row pk=ks#<id> sk=ASSET#<aid>.
 //
@@ -47,7 +47,7 @@ const CLIPS_BUCKET = process.env.CLIPS_BUCKET;
 const CLIPS_BUCKET_OWNER = process.env.CLIPS_BUCKET_OWNER;
 const ASSETS_TABLE = process.env.ASSETS_TABLE;
 const KB_CACHE_TABLE = process.env.KB_CACHE_TABLE;
-const PEGASUS_MODEL_ID = process.env.PEGASUS_MODEL_ID || "us.twelvelabs.pegasus-1-2-v1:0";
+const PEGASUS_MODEL_ID = process.env.PEGASUS_MODEL_ID || "us.twelvelabs.pegasus-1-5-v1:0";
 const KS_ROLLUP_LAMBDA = process.env.KS_ROLLUP_LAMBDA;
 const ENRICH_TRANSCRIBE_LAMBDA = process.env.ENRICH_TRANSCRIBE_LAMBDA;
 

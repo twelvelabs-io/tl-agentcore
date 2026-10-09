@@ -10,7 +10,7 @@ conversational: a brief in natural language returns an Edit Decision
 List (EDL) of clips; a follow-up question gets a grounded prose answer;
 a *"find me more of this person"* finds them across the entire library.
 Underneath, **every model and every store lives inside the customer's
-AWS account**. Marengo 3.0 (clip embeddings), Pegasus 1.2 (clip
+AWS account**. Marengo 3.0 (clip embeddings), Pegasus 1.5 (clip
 analysis), Titan Multimodal (image embeddings for Re-ID), and Claude 4
 (reasoning + clustering) are all invoked through Bedrock — the
 TwelveLabs models via Bedrock Marketplace, billed through the customer's
@@ -127,7 +127,7 @@ flowchart TD
 
     MC["<b>AWS Elemental MediaConvert</b><br/>HLS transcode"]
     Marengo["<b>Bedrock · Marengo 3.0</b>"]
-    Pegasus["<b>Bedrock · Pegasus 1.2</b>"]
+    Pegasus["<b>Bedrock · Pegasus 1.5</b>"]
     Titan["<b>Bedrock · Titan Multimodal</b>"]
     Claude["<b>Bedrock · Claude</b><br/>sonnet 4.6 (reason) · haiku 4.5 (cluster)"]
 
@@ -246,7 +246,7 @@ the cheap tools cannot.
 |---|---|---|---|---|
 | **0 · retrieval** | `vector_search`, `find_entity_by_image` | S3 Vectors (clips · entity-thumbs · entity-patches) | 250–400 ms per call | Beat-phrase → clip rank; image → similar-entity rank |
 | **1 · cache** | `get_kb_overview`, `list_kb_assets`, `lookup_asset_profile`, `list_kb_events`, `lookup_event`, `find_cached_entity_appearances`, `list_cached_entities`, `lookup_rights`, `list_audiences`, `lookup_audience` | DynamoDB (`kb_cache`, `rights`, `audiences`) | 10–40 ms | "What's in this KS?", "who appears in asset X?", "what events span the corpus?", rights / audience filters |
-| **2 · analyze** | `pegasus_analyze` | Bedrock Pegasus 1.2 → S3 clips | 3–15 s | Ground a follow-up in what the model actually sees on screen |
+| **2 · analyze** | `pegasus_analyze` | Bedrock Pegasus 1.5 → S3 clips | 3–15 s | Ground a follow-up in what the model actually sees on screen |
 
 Tier 1 is the workhorse on conversational follow-ups. *"Who else
 appears in this asset?"* and *"is this clip in our rights window?"*
@@ -394,7 +394,7 @@ shots feel similar?"). Pass the clip's `asset_id` as `target` and the
 question as `prompt`; the response is grounding text the agent
 paraphrases back to the producer.
 
-This routes to **Bedrock Pegasus 1.2** reading
+This routes to **Bedrock Pegasus 1.5** reading
 `s3://CLIPS_BUCKET_NAME/clips/<asset_id>.mp4` directly — no URL
 download, the model reads the S3 object with the runtime's IAM role.
 The agent only invokes Bedrock; there is no TwelveLabs HTTP path on
@@ -510,7 +510,7 @@ between per-asset (cheap, hot) and cross-asset (expensive, batchable):
 flowchart LR
     Trig["S3 ObjectCreated<br/>clips/&lt;asset_id&gt;.mp4"]
     Prof["<b>asset_profile λ</b><br/>per upload"]
-    Pegasus["<b>Bedrock · Pegasus 1.2</b><br/>InvokeModel · per asset"]
+    Pegasus["<b>Bedrock · Pegasus 1.5</b><br/>InvokeModel · per asset"]
     Asset[("DDB · ASSET#&lt;id&gt;<br/>synopsis · entities · mood · style")]
     EB["EventBridge<br/>rate(4 hours)"]
     Roll["<b>ks_rollup λ</b><br/>per KS"]
@@ -539,7 +539,7 @@ flowchart LR
 ```
 
 `asset_profile` fires the moment a new MP4 lands in `clips/`. It calls
-Bedrock Pegasus 1.2 with a structured-output prompt asking for
+Bedrock Pegasus 1.5 with a structured-output prompt asking for
 `{title, one_liner, mood_tags, primary_subjects, visual_style,
 role_hint, key_entities: [{name, kind, appears}]}` and writes that as
 one `ASSET#<asset_id>` row in `kb_cache`. Per-asset, per-upload,
@@ -772,7 +772,7 @@ runtime container makes only AWS calls on the per-turn path:
 | Reasoning (clustering, summaries) | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | InvokeModel |
 | Marengo text embed (vector_search) | `twelvelabs.marengo-embed-3-0-v1:0` | InvokeModel (sync, text) |
 | Marengo video embed (ingest) | `twelvelabs.marengo-embed-3-0-v1:0` | StartAsyncInvoke (S3 in, S3 out) |
-| Pegasus analyze | `us.twelvelabs.pegasus-1-2-v1:0` | InvokeModel (sync, S3 in) |
+| Pegasus analyze | `us.twelvelabs.pegasus-1-5-v1:0` | InvokeModel (sync, S3 in) |
 | Titan Multimodal image embed | `amazon.titan-embed-image-v1` | InvokeModel (sync, image) |
 
 Operational requirement: Bedrock's TwelveLabs models accept media as
