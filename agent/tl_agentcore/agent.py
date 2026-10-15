@@ -1050,6 +1050,370 @@ def find_by_image(
     }
 
 
+# ═══ Transcript / shot / audio-context tools ════════════════════════════════
+# PR #5 of the roadmap: expose per-asset ASR, shot boundaries, and derived
+# audio activity to the agent.
+#
+#   get_transcript       — reads the Transcribe JSON the ingest pipeline
+#                          already landed at s3://CLIPS_BUCKET/transcripts/
+#                          <asset_id>/<asset_id>.json. Pure S3 GetObject —
+#                          no new model call.
+#   get_shot_timeline    — Rekognition SegmentDetection (SHOT type).
+#                          Cache-first via kb_cache SHOTS# rows; on miss,
+#                          kicks off an async job and returns {pending,
+#                          job_id}. Follow-up calls with job_id poll
+#                          GetSegmentDetection and return the parsed cuts.
+#   get_audio_context    — approximation layer. AWS has no first-party
+#                          audio-event classifier, so we derive from the
+#                          Transcribe items (speech vs. silence gaps) and
+#                          Comprehend DetectSentiment on the transcript
+#                          window text. Explicit about being an
+#                          approximation in the docstring.
+
+_rek_video_cli: Optional[object] = None
+_comprehend_cli: Optional[object] = None
+
+
+def _rek_video():
+    global _rek_video_cli
+    if _rek_video_cli is None:
+        _rek_video_cli = boto3.client("rekognition", region_name=AWS_REGION)
+    return _rek_video_cli
+
+
+def _comprehend():
+    global _comprehend_cli
+    if _comprehend_cli is None:
+        _comprehend_cli = boto3.client("comprehend", region_name=AWS_REGION)
+    return _comprehend_cli
+
+
+def _hhmmss_to_secs(s) -> float:
+    """Accept 'HH:MM:SS' or a bare number of seconds; return seconds as float."""
+    if s is None or s == "":
+        return 0.0
+    if isinstance(s, (int, float)):
+        return float(s)
+    s = str(s).strip()
+    if ":" in s:
+        parts = s.split(":")
+        try:
+            parts_f = [float(p) for p in parts]
+        except ValueError:
+            return 0.0
+        if len(parts_f) == 3:
+            h, m, sec = parts_f
+        elif len(parts_f) == 2:
+            h, m, sec = 0.0, parts_f[0], parts_f[1]
+        else:
+            h, m, sec = 0.0, 0.0, parts_f[0]
+        return h * 3600 + m * 60 + sec
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
+@tool
+def get_transcript(
+    asset_id: str,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    max_segments: int = 500,
+) -> dict:
+    """Return the ASR transcript for one asset. Reads the Transcribe JSON
+    the ingest pipeline landed at `s3://CLIPS_BUCKET/transcripts/<asset_id>/
+    <asset_id>.json` — this is a cached read, not a fresh transcription
+    call, so the latency is a single S3 GetObject.
+    Use whenever the brief needs "what's said in this clip" or "who's being
+    quoted" — much cheaper than a `pegasus_analyze` prompt that asks for
+    dialogue, and more accurate for speech content.
+    Args:
+        asset_id: 24-char hex.
+        start_time: optional HH:MM:SS (or seconds) lower bound; segments
+            that end before this are dropped.
+        end_time:   optional HH:MM:SS (or seconds) upper bound.
+        max_segments: cap on returned segments (default 500 — one
+            Transcribe segment ≈ 5–15 s of audio).
+    Returns:
+        {found, asset_id, language, full_text, segments: [{start_sec,
+        end_sec, text}], segment_count, truncated}.
+        found=False → transcript hasn't landed yet (enrich_transcribe_start
+        hasn't run or is still processing). Fall through to `pegasus_analyze`
+        with a transcript-focused prompt.
+    """
+    if not asset_id:
+        return {"found": False, "error": "asset_id required"}
+    if not CLIPS_BUCKET_NAME:
+        return {"found": False, "error": "CLIPS_BUCKET_NAME not configured"}
+    key = f"transcripts/{asset_id}/{asset_id}.json"
+    try:
+        obj = _s3.get_object(Bucket=CLIPS_BUCKET_NAME, Key=key)
+        data = json.loads(obj["Body"].read())
+    except _s3.exceptions.NoSuchKey:
+        return {"found": False, "asset_id": asset_id, "message": "no transcript on file"}
+    except Exception as e:
+        return {"found": False, "asset_id": asset_id, "error": f"transcript read failed: {e}"}
+
+    results = (data.get("results") or {})
+    language = (
+        (results.get("language_identification") or [{}])[0].get("code")
+        if isinstance(results.get("language_identification"), list) and results.get("language_identification")
+        else data.get("results", {}).get("language_code")
+    )
+    transcripts = results.get("transcripts") or [{}]
+    full_text = " ".join(t.get("transcript", "") for t in transcripts).strip()
+
+    lo = _hhmmss_to_secs(start_time) if start_time else None
+    hi = _hhmmss_to_secs(end_time) if end_time else None
+
+    segments: list[dict] = []
+    for seg in (results.get("audio_segments") or []):
+        try:
+            s = float(seg.get("start_time", 0))
+            e = float(seg.get("end_time", 0))
+        except (TypeError, ValueError):
+            continue
+        if lo is not None and e < lo:
+            continue
+        if hi is not None and s > hi:
+            continue
+        segments.append({
+            "start_sec": s,
+            "end_sec":   e,
+            "text":      (seg.get("transcript") or "").strip(),
+        })
+        if len(segments) >= max_segments:
+            break
+
+    truncated = len(segments) >= max_segments
+    return {
+        "found":         True,
+        "asset_id":      asset_id,
+        "language":      language,
+        "full_text":     full_text if (lo is None and hi is None) else " ".join(x["text"] for x in segments),
+        "segments":      segments,
+        "segment_count": len(segments),
+        "truncated":     truncated,
+    }
+
+
+@tool
+def get_shot_timeline(
+    knowledge_store_id: str,
+    asset_id: str,
+    max_shots: int = 100,
+    job_id: Optional[str] = None,
+) -> dict:
+    """Return the shot cut list for one asset. Cache-first: look up
+    `pk=ks#<ks>, sk=SHOTS#<asset_id>` in kb_cache; if present, return
+    those shots immediately. On cache miss, kick off a Rekognition
+    SegmentDetection job (SHOT segment type) and return
+    `{pending: true, job_id, message}` — the caller passes `job_id`
+    back on a later turn to poll completion.
+    Use whenever the brief or follow-up mentions "shots", "cuts",
+    "camera changes", "shot bounds", or needs timecode-precise segment
+    boundaries that vector_search's windows don't give.
+    Args:
+        knowledge_store_id: ks_xxx (needed for the cache key).
+        asset_id: 24-char hex.
+        max_shots: cap on returned shots (default 100).
+        job_id: optional. If provided, poll that in-flight Rekognition
+            job instead of starting a new one.
+    Returns:
+        Cache hit / completed job:
+            {status: "complete", asset_id, shots: [{index, start_sec,
+            end_sec, duration_sec, start_timecode_smpte, confidence}],
+            shot_count, source: "cache"|"rekognition"}.
+        Job in flight:
+            {status: "pending", job_id, message}.
+        Error:
+            {status: "error", error}.
+    """
+    if not knowledge_store_id or not asset_id:
+        return {"status": "error", "error": "knowledge_store_id and asset_id required"}
+    if not CLIPS_BUCKET_NAME:
+        return {"status": "error", "error": "CLIPS_BUCKET_NAME not configured"}
+
+    # Cache-first.
+    cached = _ddb_kb_get(f"ks#{knowledge_store_id}", f"SHOTS#{asset_id}")
+    if cached and cached.get("shots"):
+        shots = cached.get("shots") or []
+        return {
+            "status":     "complete",
+            "asset_id":   asset_id,
+            "shots":      shots[:max_shots],
+            "shot_count": min(len(shots), max_shots),
+            "source":     "cache",
+        }
+
+    rek = _rek_video()
+
+    # Poll an existing job if the caller passed one.
+    if job_id:
+        try:
+            resp = rek.get_segment_detection(JobId=job_id, MaxResults=max_shots)
+        except Exception as e:
+            return {"status": "error", "error": f"GetSegmentDetection failed: {e}"}
+        status = resp.get("JobStatus")
+        if status in ("IN_PROGRESS", "QUEUED"):
+            return {"status": "pending", "job_id": job_id, "message": f"job {status.lower()}"}
+        if status != "SUCCEEDED":
+            return {"status": "error", "error": f"job {status}: {resp.get('StatusMessage')}"}
+        shots = _parse_segments(resp.get("Segments") or [])
+        return {
+            "status":     "complete",
+            "asset_id":   asset_id,
+            "shots":      shots[:max_shots],
+            "shot_count": min(len(shots), max_shots),
+            "source":     "rekognition",
+        }
+
+    # Kick off a new job.
+    try:
+        resp = rek.start_segment_detection(
+            Video={"S3Object": {
+                "Bucket": CLIPS_BUCKET_NAME,
+                "Name":   f"clips/{asset_id}.mp4",
+            }},
+            SegmentTypes=["SHOT"],
+            Filters={"ShotFilter": {"MinSegmentConfidence": 70.0}},
+        )
+    except Exception as e:
+        return {"status": "error", "error": f"StartSegmentDetection failed: {e}"}
+    new_job = resp.get("JobId")
+    return {
+        "status":  "pending",
+        "job_id":  new_job,
+        "message": "shot-detection job started — pass job_id back on a later turn to poll",
+    }
+
+
+def _parse_segments(segments: list[dict]) -> list[dict]:
+    """Convert Rekognition SegmentDetection segment records into the shape
+    the agent returns. Rekognition emits SHOT and TECHNICAL_CUE kinds; we
+    keep SHOT only."""
+    out: list[dict] = []
+    for seg in segments:
+        if seg.get("Type") != "SHOT":
+            continue
+        start_ms = seg.get("StartTimestampMillis") or 0
+        end_ms = seg.get("EndTimestampMillis") or 0
+        shot_detail = seg.get("ShotSegment") or {}
+        out.append({
+            "index":                int(shot_detail.get("Index") or len(out)),
+            "start_sec":             round(start_ms / 1000.0, 3),
+            "end_sec":               round(end_ms / 1000.0, 3),
+            "duration_sec":          round((end_ms - start_ms) / 1000.0, 3),
+            "start_timecode_smpte":  seg.get("StartTimecodeSMPTE"),
+            "confidence":            round(float(shot_detail.get("Confidence") or 0.0), 2),
+        })
+    out.sort(key=lambda r: r["start_sec"])
+    for i, r in enumerate(out):
+        r["index"] = i
+    return out
+
+
+_COMPREHEND_MAX_BYTES = 4500
+
+
+@tool
+def get_audio_context(
+    asset_id: str,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+) -> dict:
+    """Return a transcript-derived audio-activity timeline for one asset.
+    AWS doesn't ship a first-party music/sfx classifier, so this is an
+    **approximation**: speech vs. silence buckets come from the Transcribe
+    items array (word-level timestamps), and dominant sentiment + named
+    mentions come from Comprehend DetectSentiment + DetectEntities on the
+    transcript text in the window. Treat the output as a cheap first-pass
+    audio sketch; call `pegasus_analyze` with an audio-focused prompt if you
+    need true music / sfx / emotion identification.
+    Args:
+        asset_id: 24-char hex.
+        start_time: optional HH:MM:SS lower bound.
+        end_time:   optional HH:MM:SS upper bound.
+    Returns:
+        {found, asset_id, language, speech_segments: [{start_sec, end_sec,
+        text}], silence_gaps: [{start_sec, end_sec, duration_sec}],
+        dominant_sentiment, sentiment_scores, named_mentions,
+        approximation_note}.
+    """
+    t = get_transcript(asset_id, start_time=start_time, end_time=end_time)
+    if not t.get("found"):
+        return {
+            "found":              False,
+            "asset_id":           asset_id,
+            "message":            t.get("message") or t.get("error") or "transcript not available",
+        }
+
+    segments: list[dict] = list(t.get("segments") or [])
+    text_in_window = " ".join(s.get("text", "") for s in segments).strip() or t.get("full_text") or ""
+
+    # Silence gaps between consecutive speech segments.
+    silence_gaps: list[dict] = []
+    for prev, cur in zip(segments, segments[1:]):
+        gap_s = float(prev.get("end_sec") or 0)
+        gap_e = float(cur.get("start_sec") or 0)
+        gap_dur = gap_e - gap_s
+        if gap_dur >= 1.0:
+            silence_gaps.append({
+                "start_sec":    gap_s,
+                "end_sec":      gap_e,
+                "duration_sec": round(gap_dur, 3),
+            })
+
+    sentiment = None
+    sentiment_scores: dict = {}
+    named_mentions: list[dict] = []
+    lang = t.get("language") or "en"
+    # Comprehend only supports a fixed set of language codes; map accents.
+    short_lang = (lang or "en").split("-")[0] if lang else "en"
+    if text_in_window:
+        clipped = text_in_window.encode("utf-8")[:_COMPREHEND_MAX_BYTES].decode("utf-8", errors="ignore")
+        co = _comprehend()
+        try:
+            s_resp = co.detect_sentiment(Text=clipped, LanguageCode=short_lang)
+            sentiment = s_resp.get("Sentiment")
+            sentiment_scores = s_resp.get("SentimentScore") or {}
+        except Exception as e:
+            print(f"get_audio_context: DetectSentiment failed: {e}")
+        try:
+            e_resp = co.detect_entities(Text=clipped, LanguageCode=short_lang)
+            seen: set[str] = set()
+            for ent in (e_resp.get("Entities") or []):
+                name = (ent.get("Text") or "").strip()
+                if not name or name.lower() in seen:
+                    continue
+                seen.add(name.lower())
+                named_mentions.append({
+                    "text":  name,
+                    "type":  ent.get("Type"),
+                    "score": round(float(ent.get("Score") or 0.0), 3),
+                })
+                if len(named_mentions) >= 50:
+                    break
+        except Exception as e:
+            print(f"get_audio_context: DetectEntities failed: {e}")
+
+    return {
+        "found":              True,
+        "asset_id":           asset_id,
+        "language":           lang,
+        "speech_segments":    segments,
+        "silence_gaps":       silence_gaps,
+        "dominant_sentiment": sentiment,
+        "sentiment_scores":   {k: round(float(v), 3) for k, v in sentiment_scores.items()},
+        "named_mentions":     named_mentions,
+        "approximation_note":
+            "Derived from Transcribe + Comprehend; no music/sfx classification. "
+            "For true audio-event identification, call pegasus_analyze with an "
+            "audio-focused prompt.",
+    }
+
+
 # ═══ Ancillary: Domain DDB lookups ════════════════════════════════════════════
 
 @tool
@@ -1168,6 +1532,12 @@ If the cache returns `cached: False` or no matches, fall through to Tier 2.
 ## Tier 2 — On-demand grounding (Bedrock Pegasus 1.5 · 3–15 s)
 
 1. **pegasus_analyze(target, prompt)** — single-clip generation. Reads `s3://CLIPS_BUCKET_NAME/clips/<asset_id>.mp4` directly with the runtime's IAM role. Use ONLY when cached `lookup_asset_profile` doesn't suffice — "what's visibly happening here", "is this shot bright enough", "what's being said".
+
+## Transcript / shot / audio context — single-asset deep inspection
+
+1. **get_transcript(asset_id, start_time?, end_time?)** — cached ASR output from the ingest pipeline (S3 GetObject). Use whenever you need "what's said" / dialogue text. Much cheaper than a `pegasus_analyze` with a transcription prompt. Window filter is HH:MM:SS.
+2. **get_shot_timeline(knowledge_store_id, asset_id)** — Rekognition SegmentDetection (SHOT). Cache-first; on miss returns `{pending, job_id}` — pass the job_id back on a later turn to poll. Use for "where are the cuts", "shot bounds for scene 2 clip 1", or when the brief needs timecode-precise segment boundaries that `vector_search`'s coarse windows don't give.
+3. **get_audio_context(asset_id, start_time?, end_time?)** — transcript-derived approximation (Transcribe items + Comprehend sentiment/entities). **No music/sfx classifier** — if the brief truly needs music or sound-event identification, prefer `pegasus_analyze` with an audio-focused prompt.
 
 ## Ancillary stores (DDB)
 
@@ -1381,6 +1751,8 @@ def build_agent(access_token: Optional[str] = None) -> tuple[Agent, str]:
             list_kb_events, lookup_event,
             # Tier 2 — On-demand grounding via Bedrock Pegasus
             pegasus_analyze,
+            # Transcript / shot / audio context (ASR + Rekognition SegmentDetection + Comprehend)
+            get_transcript, get_shot_timeline, get_audio_context,
             # Ancillary domain stores (rights + audience cohorts in DDB)
             lookup_rights, list_audiences, lookup_audience,
         ],
