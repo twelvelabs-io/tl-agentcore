@@ -866,6 +866,12 @@ def _pegasus_bedrock(
     analysis_mode: str = "general",
     segment_definitions: Optional[list] = None,
 ) -> str:
+    # TODO(bedrock-pegasus-1-5): add start_time / end_time sub-clip bounds
+    # once Bedrock exposes them. TL SaaS /analyze accepts those fields today;
+    # the Bedrock schema (as of 2026-10-15) does not — raw-invoke 400s with
+    # "extraneous key not permitted". Smoke the fields quarterly; when they
+    # start returning 200, thread them through this helper and pegasus_analyze.
+    # See memory/project_jockey_parity.md "Open Bedrock gaps" section.
     if not CLIPS_BUCKET_NAME or not CLIPS_BUCKET_OWNER:
         return "error: CLIPS_BUCKET_NAME / CLIPS_BUCKET_OWNER not configured"
     body: dict = {
