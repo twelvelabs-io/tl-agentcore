@@ -23,6 +23,10 @@ through Bedrock Marketplace under the customer's IAM.
 
   Tier 2 — On-demand grounding (Bedrock Pegasus 1.5)
     pegasus_analyze                — One clip → take-note via s3Location.
+                                     Supports JSON-schema structured output
+                                     and reference-image bindings.
+    pegasus_segments               — One clip → auto-segmented structured
+                                     metadata (time_based_metadata mode).
 
   Ancillary (domain DDB lookups)
     lookup_rights                  — DDB licensing record.
@@ -34,6 +38,7 @@ for the routing playbook.
 
 from __future__ import annotations
 
+import base64
 import json
 import math
 import os
@@ -726,6 +731,8 @@ def pegasus_analyze(
     target_type: str = "asset_id",
     max_tokens: int = 1024,
     temperature: float = 0.2,
+    response_schema: Optional[dict] = None,
+    reference_images: Optional[list] = None,
 ) -> str:
     """Generate a take-note about a specific clip using Bedrock Pegasus 1.5.
     Use when the producer asks what a clip visibly contains (subject, action,
@@ -739,11 +746,23 @@ def pegasus_analyze(
         target: asset_id (24-hex).
         prompt: instruction for Pegasus.
         target_type: kept for backward compat; only "asset_id" is supported.
-        max_tokens: response cap (unused on the Bedrock path).
+        max_tokens: response cap (512-98304). Bedrock Pegasus 1.5 raised the
+            ceiling from 1.2's 4096.
         temperature: sampling temperature.
+        response_schema: optional JSON Schema dict. When set, Pegasus returns
+            `message` as a JSON string conforming to the schema; parse it
+            yourself. Pass just the schema object (not {"type": "json_schema"}).
+        reference_images: optional list of image refs to attach as visual
+            context. Each entry may be a URL (s3:// or http(s)://), a
+            `data:image/<type>;base64,<...>` string, or raw base64. Images
+            get auto-named ref_0, ref_1, ... and Pegasus 1.5 requires the
+            prompt to reference each image via its `<@name>` placeholder
+            (e.g. "Does <@ref_0> appear in this clip?"). If the prompt
+            doesn't include placeholders, this tool prepends them.
 
     Returns:
-        Pegasus's grounded text response.
+        Pegasus's grounded text response. If the generation was cut off by
+        max_tokens, the string ends with "[truncated: hit max_tokens]".
     """
     if not target:
         return "error: target asset_id is required"
@@ -751,14 +770,106 @@ def pegasus_analyze(
         return "error: prompt is required"
     if target_type != "asset_id":
         return "error: only target_type='asset_id' is supported in the AWS-native build"
-    return _pegasus_bedrock(target, prompt, temperature)
+    return _pegasus_bedrock(
+        target, prompt, temperature,
+        max_output_tokens=max_tokens,
+        response_schema=response_schema,
+        reference_images=reference_images,
+    )
 
 
-def _pegasus_bedrock(asset_id: str, prompt: str, temperature: float) -> str:
+@tool
+def pegasus_segments(
+    target: str,
+    segment_definitions: list,
+    max_tokens: int = 4096,
+    temperature: float = 0.0,
+) -> str:
+    """Extract structured, timestamped segments from a clip using Pegasus 1.5
+    `time_based_metadata` mode. Pegasus auto-segments the video and populates
+    the fields you define for each segment — strictly more powerful than
+    manually bounding a sub-clip.
+
+    Use when the producer asks for a structured breakdown of a whole clip:
+    "chapterize this trailer", "list every shot with a speaking subject",
+    "mark the beats and label each one with mood + visible subjects".
+
+    Args:
+        target: asset_id (24-hex).
+        segment_definitions: list of segment-type definitions. Each dict must
+            carry `id` (slug), `description` (what qualifies as a segment of
+            this type), and `fields` (list of {name, type, description}). See
+            the Pegasus 1.5 Bedrock docs for the schema. Example:
+                [{"id": "shots",
+                  "description": "A single camera take.",
+                  "fields": [
+                    {"name": "summary", "type": "string",
+                     "description": "What happens in the shot."},
+                    {"name": "mood", "type": "string",
+                     "description": "Dominant mood (energetic|calm|tense|…)"}
+                  ]}]
+        max_tokens: response cap (512-98304).
+        temperature: sampling temperature (lower is more deterministic for
+            structured output; defaults to 0).
+
+    Returns:
+        JSON string: `{"segments": [...], "definition_errors": [...]}`.
+        Parse it to iterate segments; each carries `id`, `start_sec`,
+        `end_sec`, and the fields declared in its matching definition.
+    """
+    if not target:
+        return "error: target asset_id is required"
+    if not segment_definitions:
+        return "error: segment_definitions must contain at least one definition"
+    return _pegasus_bedrock(
+        target, prompt=None, temperature=temperature,
+        max_output_tokens=max_tokens,
+        analysis_mode="time_based_metadata",
+        segment_definitions=segment_definitions,
+    )
+
+
+def _resolve_image_to_media_source(ref: str, name: str) -> dict:
+    """Resolve a reference-image spec to a Pegasus 1.5 `mediaSources[*]` entry
+    `{name, mediaType, base64String}`.
+
+    Important: Bedrock Pegasus 1.5 requires `mediaType` to be the literal
+    string "image" (NOT a MIME type like "image/png" — that's rejected as
+    extraneous).
+
+    Accepts:
+        - `data:image/<type>;base64,<...>` — base64 payload extracted
+        - `s3://bucket/key` or `http(s)://...` — fetched then base64-encoded
+        - raw base64 — passed through
+    """
+    if ref.startswith("data:image/"):
+        _, _, b64 = ref.partition(",")
+        return {"name": name, "mediaType": "image", "base64String": b64}
+    if ref.startswith(("s3://", "http://", "https://")):
+        raw = _fetch_image_bytes(ref)
+        return {
+            "name": name,
+            "mediaType": "image",
+            "base64String": base64.b64encode(raw).decode(),
+        }
+    return {"name": name, "mediaType": "image", "base64String": ref}
+
+
+def _pegasus_bedrock(
+    asset_id: str,
+    prompt: Optional[str],
+    temperature: float,
+    *,
+    max_output_tokens: int = 1024,
+    response_schema: Optional[dict] = None,
+    reference_images: Optional[list] = None,
+    analysis_mode: str = "general",
+    segment_definitions: Optional[list] = None,
+) -> str:
     if not CLIPS_BUCKET_NAME or not CLIPS_BUCKET_OWNER:
-        return "error: CLIPS_BUCKET_NAME / CLIPS_BUCKET_OWNER not configured (falling back to tl_api)"
-    body = {
-        "inputPrompt": prompt,
+        return "error: CLIPS_BUCKET_NAME / CLIPS_BUCKET_OWNER not configured"
+    body: dict = {
+        "analysis_mode": analysis_mode,
         "mediaSource": {
             "s3Location": {
                 "uri": f"s3://{CLIPS_BUCKET_NAME}/clips/{asset_id}.mp4",
@@ -766,7 +877,35 @@ def _pegasus_bedrock(asset_id: str, prompt: str, temperature: float) -> str:
             }
         },
         "temperature": temperature,
+        "maxOutputTokens": max(512, min(98304, int(max_output_tokens))),
     }
+    if analysis_mode == "time_based_metadata":
+        if not segment_definitions:
+            return "error: segment_definitions required for time_based_metadata mode"
+        body["segment_definitions"] = segment_definitions
+    else:
+        if not prompt:
+            return "error: prompt is required for general analysis mode"
+        if reference_images:
+            # Pegasus 1.5 general mode routes reference images through
+            # inputPromptV2.mediaSources. Each entry needs {name, mediaType:
+            # "image", base64String}, and the prompt MUST reference each
+            # image via its <@name> placeholder — plain text or @name is
+            # silently dropped (verified via raw-invoke smoke 2026-10-15).
+            # If the caller didn't include the placeholders, prepend them.
+            sources = [
+                _resolve_image_to_media_source(r, f"ref_{i}")
+                for i, r in enumerate(reference_images)
+            ]
+            text = prompt
+            if not any(f"<@{s['name']}>" in text for s in sources):
+                refs = " ".join(f"<@{s['name']}>" for s in sources)
+                text = f"Reference images: {refs}. {text}"
+            body["inputPromptV2"] = {"input_text": text, "mediaSources": sources}
+        else:
+            body["inputPrompt"] = prompt
+        if response_schema is not None:
+            body["responseFormat"] = {"type": "json_schema", "jsonSchema": response_schema}
     try:
         resp = _bedrock_rt.invoke_model(
             modelId=PEGASUS_BEDROCK_MODEL_ID,
@@ -777,7 +916,16 @@ def _pegasus_bedrock(asset_id: str, prompt: str, temperature: float) -> str:
         payload = json.loads(resp["body"].read())
     except Exception as e:
         return f"pegasus (bedrock) failed: {e}"
-    return payload.get("message") or "(no text returned)"
+    if analysis_mode == "time_based_metadata":
+        return json.dumps({
+            "segments": payload.get("segments", []),
+            "definition_errors": payload.get("definition_errors", []),
+            "stopReason": payload.get("stopReason"),
+        })
+    text = payload.get("message") or "(no text returned)"
+    if payload.get("stopReason") == "length":
+        text = f"{text}\n\n[truncated: hit max_tokens]"
+    return text
 
 
 def _fetch_image_bytes(url: str) -> bytes:
@@ -1167,7 +1315,8 @@ If the cache returns `cached: False` or no matches, fall through to Tier 2.
 
 ## Tier 2 — On-demand grounding (Bedrock Pegasus 1.5 · 3–15 s)
 
-1. **pegasus_analyze(target, prompt)** — single-clip generation. Reads `s3://CLIPS_BUCKET_NAME/clips/<asset_id>.mp4` directly with the runtime's IAM role. Use ONLY when cached `lookup_asset_profile` doesn't suffice — "what's visibly happening here", "is this shot bright enough", "what's being said".
+1. **pegasus_analyze(target, prompt, response_schema?, reference_images?)** — single-clip generation. Reads `s3://CLIPS_BUCKET_NAME/clips/<asset_id>.mp4` directly with the runtime's IAM role. Use ONLY when cached `lookup_asset_profile` doesn't suffice — "what's visibly happening here", "is this shot bright enough", "what's being said". Pass `response_schema` (a JSON Schema dict) to force structured JSON output. Pass `reference_images` (list of URLs or data URIs) to ground the prompt against visual references — e.g. `pegasus_analyze(asset_id, "Does <@ref_0> appear in this clip?", reference_images=[url])`. Images are auto-named `ref_0, ref_1, ...`; the prompt must reference each one via its `<@name>` placeholder (the tool prepends them if you don't).
+2. **pegasus_segments(target, segment_definitions)** — chapterize a whole clip. Pegasus auto-segments the video and fills your fields per segment. Use for "list every shot/beat/chapter with …". Returns `{segments: [{id, start_sec, end_sec, …your fields}], definition_errors: []}`.
 
 ## Ancillary stores (DDB)
 
@@ -1380,7 +1529,7 @@ def build_agent(access_token: Optional[str] = None) -> tuple[Agent, str]:
             find_cached_entity_appearances, list_cached_entities,
             list_kb_events, lookup_event,
             # Tier 2 — On-demand grounding via Bedrock Pegasus
-            pegasus_analyze,
+            pegasus_analyze, pegasus_segments,
             # Ancillary domain stores (rights + audience cohorts in DDB)
             lookup_rights, list_audiences, lookup_audience,
         ],
