@@ -6,38 +6,99 @@
 // handshake. AgentCore Runtime is configured with a customJWTAuthorizer
 // (allowed_clients = SPA client id) that verifies the token at the gateway.
 //
-// Wire format on the WS:
+// Wire format on the WS (Open-Responses taxonomy, matches runtime.py):
 //   client → server: ONE JSON frame on connect = { knowledge_store_id, prompt, access_token? }
-//   server → client: many JSON frames = { type: "tool_call"|"tool_result"|
-//                    "text_delta"|"result"|"error"|"done", ... }
-//
-// The same JSON shapes the SSE path used before; the wrapper at the edge is
-// the only thing that changed. UI consumers (AgentCore.tsx, RoughCut.tsx)
-// don't need to know.
+//   server → client: many JSON frames = Open-Responses events, each carries
+//                    a monotonic `sequence_number` starting at 0. Event types:
+//                      response.created
+//                      response.output_item.added    (message | function_call | custom)
+//                      response.output_text.delta
+//                      response.output_text.done
+//                      response.output_item.done
+//                      response.keepalive            (every ~20s during idle)
+//                      response.completed
+//                      response.failed
+//                    EDL plans arrive as `custom` output items with
+//                    `custom_type: "edl.plan"` and parsed JSON in `data`.
+//                    The duration-enforcer rewrite emits a SECOND
+//                    output_item.done with the SAME item.id — the UI
+//                    replaces the previous plan in place.
 
 import { getAccessToken } from "./auth";
 
+// ─── Open-Responses event union ──────────────────────────────────────────────
+export type ResponseMessageItem = {
+  id: string;
+  type: "message";
+  status: "in_progress" | "completed";
+  role: "assistant";
+  content: Array<{ type: "output_text"; text: string }>;
+};
+
+export type ResponseFunctionCallItem = {
+  id: string;
+  type: "function_call";
+  status: "in_progress" | "completed";
+  name: string;
+  arguments?: string;
+  output?: string;
+};
+
+export type ResponseCustomItem = {
+  id: string;
+  type: "custom";
+  custom_type: string;              // e.g. "edl.plan"
+  status: "in_progress" | "completed";
+  data?: unknown;
+  correction_note?: string;
+};
+
+export type ResponseItem =
+  | ResponseMessageItem
+  | ResponseFunctionCallItem
+  | ResponseCustomItem;
+
+type ResponseErrorBody = {
+  message: string;
+  trace?: string;
+};
+
 export type AgentEvent =
-  | { type: "session"; session_id: string }
-  | { type: "text_delta"; delta: string }
-  | { type: "tool_call"; tool: string; api?: string; parameters?: unknown; request_body?: unknown }
-  | { type: "tool_result"; text?: string }
-  | { type: "rationale"; text: string }
-  | { type: "return_control"; payload: unknown }
-  | { type: "result"; text: string; session_id?: string; usage?: { input_tokens?: number; output_tokens?: number }; tool_path?: string }
-  // Runtime-side post-processor rewrote the model's <plan> block to satisfy
-  // the duration target. UI replaces its running buffer with this so the
-  // plan extraction sees the corrected JSON. See agent/duration_enforcer.py.
-  | { type: "plan_corrected"; text: string }
-  | { type: "done" }
-  | { type: "heartbeat"; t?: number }
-  | { type: "error"; message: string; trace?: string };
+  | { type: "response.created"; sequence_number: number;
+      response: { id: string; object: "response"; created_at?: number; status: string } }
+  | { type: "response.output_item.added"; sequence_number: number;
+      output_index: number; item: ResponseItem }
+  | { type: "response.output_text.delta"; sequence_number: number;
+      item_id: string; output_index: number; content_index: number; delta: string }
+  | { type: "response.output_text.done"; sequence_number: number;
+      item_id: string; output_index: number; content_index: number; text: string }
+  | { type: "response.output_item.done"; sequence_number: number;
+      output_index: number; item: ResponseItem }
+  | { type: "response.keepalive"; sequence_number: number }
+  | { type: "response.completed"; sequence_number: number;
+      response: { id: string; object: "response"; status: "completed"; tool_path?: string } }
+  | { type: "response.failed"; sequence_number: number;
+      response: { id: string; object: "response"; status: "failed";
+                  error: ResponseErrorBody; tool_path?: string } };
 
 export type AgentTurnInput = {
   knowledge_store_id: string;
   prompt: string;
   session_id?: string;
 };
+
+// ─── Normalized helpers for callers that don't want to switch on the raw
+// event taxonomy. extractToolName() / isTextDelta() / etc. keep component
+// code tidy without hiding the underlying events. ───────────────────────────
+export function toolNameFromAdded(ev: AgentEvent): string | null {
+  if (ev.type !== "response.output_item.added") return null;
+  if (ev.item.type !== "function_call") return null;
+  return ev.item.name;
+}
+
+export function isEdlPlanItem(item: ResponseItem): item is ResponseCustomItem {
+  return item.type === "custom" && item.custom_type === "edl.plan";
+}
 
 const RUNTIME_ARN  = (import.meta.env.VITE_AGENT_RUNTIME_ARN || "").trim();
 const RUNTIME_REGION = (import.meta.env.VITE_AGENT_RUNTIME_REGION || "us-east-1").trim();
@@ -46,8 +107,7 @@ const RUNTIME_QUALIFIER = (import.meta.env.VITE_AGENT_RUNTIME_QUALIFIER || "DEFA
 export const agentEnabled = () => Boolean(RUNTIME_ARN);
 
 // AgentCore session IDs must be ≥33 chars. Browsers may pass undefined for
-// the first turn — server picks one and returns it on the result frame, then
-// the UI threads it through for follow-ups.
+// the first turn — server picks one.
 function buildWsUrl(sessionId?: string): string {
   const encodedArn = encodeURIComponent(RUNTIME_ARN);
   const qs = new URLSearchParams();
@@ -56,13 +116,13 @@ function buildWsUrl(sessionId?: string): string {
   return `wss://bedrock-agentcore.${RUNTIME_REGION}.amazonaws.com/runtimes/${encodedArn}/ws?${qs.toString()}`;
 }
 
-// Browser-side base64url (no padding) for the JWT subprotocol trick.
 function base64url(s: string): string {
   return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
-/** Stream a turn over the native AgentCore WS. Yields events until the
- *  agent sends `done` or `error`, or the socket closes. */
+/** Stream a turn over the native AgentCore WS. Yields Open-Responses events
+ *  until the agent sends `response.completed` or `response.failed`, or the
+ *  socket closes. */
 export async function* streamAgentTurn(input: AgentTurnInput): AsyncGenerator<AgentEvent> {
   if (!RUNTIME_ARN) throw new Error("VITE_AGENT_RUNTIME_ARN not set");
 
@@ -70,10 +130,6 @@ export async function* streamAgentTurn(input: AgentTurnInput): AsyncGenerator<Ag
   if (!token) throw new Error("not authenticated — Cognito access token required");
 
   const url = buildWsUrl(input.session_id);
-  // Two subprotocols per the AgentCore browser-OAuth spec:
-  //   1. `base64UrlBearerAuthorization.<base64url(jwt)>` carries the token.
-  //   2. The sentinel `base64UrlBearerAuthorization` is what the runtime
-  //      negotiates back; without it the handshake is rejected.
   const ws = new WebSocket(url, [
     `base64UrlBearerAuthorization.${base64url(token)}`,
     "base64UrlBearerAuthorization",
@@ -85,9 +141,6 @@ export async function* streamAgentTurn(input: AgentTurnInput): AsyncGenerator<Ag
   let err: Error | null = null;
 
   ws.onmessage = (ev) => {
-    // AgentCore native WS sends one JSON object per text frame, but accept
-    // newline-separated for safety (matches what the previous chat-lambda
-    // path occasionally did under back-pressure).
     const lines = String(ev.data).split("\n").map((s) => s.trim()).filter(Boolean);
     for (const line of lines) {
       try {
@@ -103,7 +156,6 @@ export async function* streamAgentTurn(input: AgentTurnInput): AsyncGenerator<Ag
   };
   ws.onclose = (ev) => {
     done = true;
-    // 1008 = policy violated (auth fail or quota), 1011 = server error
     if (ev.code !== 1000 && !err) {
       err = new Error(`WS closed (code=${ev.code} reason=${ev.reason || "—"})`);
     }
@@ -115,28 +167,28 @@ export async function* streamAgentTurn(input: AgentTurnInput): AsyncGenerator<Ag
     setTimeout(() => rej(new Error("WS connect timeout")), 10_000);
   });
 
-  // First frame = the agent payload. The Strands agent in the runtime container
-  // reads it via `await websocket.receive_text()` in ws_handler.
   ws.send(JSON.stringify({
     knowledge_store_id: input.knowledge_store_id,
     prompt: input.prompt,
-    // access_token is forwarded so the agent can call the MCP Gateway as the
-    // user when MCP mode is enabled. The runtime ALREADY verified this token
-    // at the gateway, but the inner agent re-uses it for outbound auth.
     access_token: token,
   }));
 
   try {
     while (true) {
-      if (queue.length) { yield queue.shift()!; continue; }
+      if (queue.length) {
+        const next = queue.shift()!;
+        yield next;
+        if (next.type === "response.completed" || next.type === "response.failed") break;
+        continue;
+      }
       if (done) break;
       const next = await new Promise<AgentEvent | null>((r) => { resolveNext = r; });
       if (err) throw err;
       if (next === null) break;
       yield next;
-      if (next.type === "done" || next.type === "error") break;
+      if (next.type === "response.completed" || next.type === "response.failed") break;
     }
   } finally {
-    try { ws.close(); } catch {}
+    try { ws.close(); } catch { /* already closed */ }
   }
 }

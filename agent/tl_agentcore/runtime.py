@@ -1,30 +1,41 @@
-"""AgentCore Runtime entrypoint — exposes BOTH the legacy SSE endpoint AND
-the native WebSocket endpoint that lets the browser connect directly.
+"""AgentCore Runtime entrypoint — Open-Responses event taxonomy (v2).
 
-  POST /invocations  — JSON body in, SSE stream out. Kept for backward
-                       compatibility with the chat-lambda → SigV4 path.
-  WS   /ws           — JSON message in, JSON messages stream out. Native
-                       browser path; the chat lambda becomes optional.
+Exposes BOTH the SSE endpoint AND the native WebSocket endpoint. Both emit
+the SAME event stream, modeled on OpenAI's Open-Responses API.
+
+  POST /invocations  — JSON body in, SSE stream out (`data: {...}\\n\\n`).
+  WS   /ws           — JSON message in, JSON messages stream out.
   GET  /ping         — health check (provided by BedrockAgentCoreApp).
 
 Payload (both endpoints):
   {
     "knowledge_store_id": "ks_...",
     "prompt": "...",
-    "access_token": "<cognito jwt>"   # optional — when present, the agent
-                                      # authenticates to the MCP Gateway with
-                                      # this token. Absent → in-process tools.
+    "access_token": "<cognito jwt>"   # optional — forwarded to MCP Gateway
+                                      # when the agent is in MCP mode.
   }
 
-Wire format — same JSON event shapes flow over BOTH endpoints. SSE wraps each
-event in `data: {...}\\n\\n`; WS sends each event as a discrete text frame.
+Wire format — every event carries a monotonic `sequence_number` starting at
+0 for the connection. Event taxonomy:
 
-  {"type": "tool_call",   "tool": "vector_search", "parameters": {...}}
-  {"type": "tool_result", "tool": "vector_search", "text": "<truncated>"}
-  {"type": "text_delta",  "delta": "..."}
-  {"type": "result",      "text": "<full final answer>", "tool_path": "in-process"}
-  {"type": "done"}                                 # WS-only terminator
-  {"type": "error",       "message": "...", "trace": "..."}
+  {"type": "response.created",            "sequence_number": 0,  "response": {...}}
+  {"type": "response.output_item.added",  "sequence_number": 1,  "output_index": 0, "item": {...}}
+  {"type": "response.output_text.delta",  "sequence_number": 2,  "item_id": "...", "delta": "..."}
+  {"type": "response.output_text.done",   "sequence_number": N,  "item_id": "...", "text": "..."}
+  {"type": "response.output_item.done",   "sequence_number": N,  "output_index": 0, "item": {...}}
+  {"type": "response.keepalive",          "sequence_number": N}
+  {"type": "response.completed",          "sequence_number": N,  "response": {...}}
+  {"type": "response.failed",             "sequence_number": N,  "response": {...}}
+
+Output-item shapes we emit:
+  - `message` (assistant prose) — content: [{"type":"output_text","text":"..."}]
+  - `function_call` (one per tool call) — {id, name, arguments:string, output?}
+  - `custom` with `custom_type:"edl.plan"` — carries the parsed Edit Decision
+    List JSON in `data`. The duration_enforcer rewrite emits a SECOND
+    `output_item.done` with the same `item.id` — supersedes-in-place.
+
+Keepalives (`response.keepalive`) fire on every 20 s of upstream silence to
+keep ALB/CloudFront from idle-killing a WS during a slow `pegasus_analyze`.
 """
 
 from __future__ import annotations
@@ -32,23 +43,30 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 import traceback
-from typing import Any, AsyncIterator
+import uuid
+from typing import Any, AsyncIterator, Optional
 
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 from strands.hooks import HookProvider, HookRegistry
 from strands.hooks.events import AfterToolCallEvent, BeforeToolCallEvent
 
 from .agent import build_agent
-from .duration_enforcer import enforce_duration_target
+from .duration_enforcer import _extract_plan_block, enforce_duration_target
 
 app = BedrockAgentCoreApp()
 
+# ALB default idle is 60 s. 20 s gives us 2 keepalives before an idle cut
+# — plenty of headroom even if one keepalive is lost in-flight.
+KEEPALIVE_INTERVAL_S = 20.0
 
+
+# ─── Hook that captures Strands tool start/end into an asyncio queue ────────
 class WireEventCollector(HookProvider):
-    """Hook provider that captures tool start + end events into an asyncio
-    queue. Drained between Strands stream-async yields so each tool call
-    shows up in the UI right when it fires."""
+    """Captures tool start + end events for the main loop to drain. Emits
+    SEMANTIC `__kind__` markers; the envelope wrapper converts them to
+    Open-Responses events."""
 
     def __init__(self, queue: asyncio.Queue):
         self.queue = queue
@@ -60,18 +78,19 @@ class WireEventCollector(HookProvider):
     def _on_before(self, event: BeforeToolCallEvent) -> None:
         tool_use = event.tool_use or {}
         self.queue.put_nowait({
-            "type": "tool_call",
-            "tool": tool_use.get("name", "<unknown>"),
-            "parameters": tool_use.get("input") or {},
+            "__kind__": "tool_begin",
+            "tool_use_id": tool_use.get("toolUseId") or f"call_{uuid.uuid4().hex[:12]}",
+            "name": tool_use.get("name", "<unknown>"),
+            "arguments": tool_use.get("input") or {},
         })
 
     def _on_after(self, event: AfterToolCallEvent) -> None:
         tool_use = event.tool_use or {}
-        text = _summarize_tool_result(event.result)
         self.queue.put_nowait({
-            "type": "tool_result",
-            "tool": tool_use.get("name", "<unknown>"),
-            "text": text[:600],
+            "__kind__": "tool_end",
+            "tool_use_id": tool_use.get("toolUseId") or "",
+            "name": tool_use.get("name", "<unknown>"),
+            "output": _summarize_tool_result(event.result),
         })
 
 
@@ -94,47 +113,55 @@ def _summarize_tool_result(result: Any) -> str:
     return " | ".join(parts) if parts else json.dumps(result)[:600]
 
 
-# ─── Shared event-stream generator ──────────────────────────────────────────
-# One source of truth for the per-turn event sequence. Consumed by both the
-# SSE entrypoint (yields to the AgentCore framework's SSE encoder) and the
-# WS handler (sends each event as a discrete JSON frame).
-async def _stream_events(payload: dict) -> AsyncIterator[dict]:
+# ─── Semantic-event generator ───────────────────────────────────────────────
+# Yields raw `__kind__`-tagged dicts describing what happened. The envelope
+# wrapper below assigns sequence numbers and maps them to `response.*` events.
+async def _semantic_stream(payload: dict) -> AsyncIterator[dict]:
     ks = payload.get("knowledge_store_id")
     prompt = payload.get("prompt") or ""
     access_token = payload.get("access_token")
+    response_id = f"resp_{uuid.uuid4().hex[:12]}"
+
     if not prompt:
-        yield {"type": "error", "message": "missing prompt"}
+        yield {"__kind__": "failed", "response_id": response_id,
+               "error": {"message": "missing prompt"}}
         return
 
     user_text = prompt if not ks else f"[ks: {ks}]\n{prompt}"
 
+    yield {"__kind__": "created", "response_id": response_id}
+
     queue: asyncio.Queue = asyncio.Queue()
+    mode = "unknown"
     try:
         agent, mode = build_agent(access_token=access_token)
         agent.hooks.add_hook(WireEventCollector(queue))
     except Exception as e:
-        yield {
-            "type": "error",
-            "message": f"agent build failed: {e}",
-            "trace": traceback.format_exc(),
-        }
+        yield {"__kind__": "failed", "response_id": response_id,
+               "error": {"message": f"agent build failed: {e}",
+                         "trace": traceback.format_exc()}}
         return
 
+    text_item_id = f"msg_{uuid.uuid4().hex[:12]}"
+    text_started = False
     final_text = ""
+
     try:
         async for event in agent.stream_async(user_text):
-            # Drain tool events the hooks queued during this step first —
-            # keeps UI ordering close to wall-clock order.
             while not queue.empty():
                 yield queue.get_nowait()
 
             if not isinstance(event, dict):
                 continue
 
-            text_chunk = event.get("data")
-            if isinstance(text_chunk, str) and text_chunk:
-                final_text += text_chunk
-                yield {"type": "text_delta", "delta": text_chunk}
+            chunk = event.get("data")
+            if isinstance(chunk, str) and chunk:
+                if not text_started:
+                    text_started = True
+                    yield {"__kind__": "text_begin", "item_id": text_item_id}
+                final_text += chunk
+                yield {"__kind__": "text_delta",
+                       "item_id": text_item_id, "delta": chunk}
                 continue
 
             result = event.get("result")
@@ -143,61 +170,236 @@ async def _stream_events(payload: dict) -> AsyncIterator[dict]:
 
         while not queue.empty():
             yield queue.get_nowait()
-
     except Exception as e:
-        yield {
-            "type": "error",
-            "message": f"agent run failed: {e}",
-            "trace": traceback.format_exc(),
-            "tool_path": mode,
-        }
+        yield {"__kind__": "failed", "response_id": response_id,
+               "error": {"message": f"agent run failed: {e}",
+                         "trace": traceback.format_exc()},
+               "tool_path": mode}
         return
 
+    # EDL extraction. If the model's prose included a <plan>...</plan> block
+    # with parseable JSON, emit it as a `custom` output item so the UI
+    # doesn't have to regex-scan the text stream.
+    plan_match = _extract_plan_block(final_text)
+    plan_item_id: Optional[str] = None
+    if plan_match:
+        _, parsed_plan, _, _ = plan_match
+        plan_item_id = f"edl_{uuid.uuid4().hex[:12]}"
+        yield {"__kind__": "plan_item",
+               "item_id": plan_item_id, "data": parsed_plan}
+
     # Deterministic guardrail: if the brief stated a duration target and the
-    # emitted plan missed the band, post-process the plan (extend or trim
-    # primary clip end times within the cut-type cap) and stream both the
-    # note and the corrected text so the UI's running buffer ends with the
-    # rewritten <plan>. The model's prose stays as-is; the runtime appends a
-    # one-line annotation explaining what changed.
+    # emitted plan missed the band, post-process and emit a corrected plan
+    # item with the SAME item_id (supersedes-in-place).
     try:
         corrected_text, note = enforce_duration_target(final_text, prompt)
     except Exception as e:
-        # Don't crash the turn on a post-processor bug — log + pass through.
         print(f"runtime: duration_enforcer failed: {e}")
         corrected_text, note = final_text, None
 
-    if note:
-        # ORDER MATTERS:
-        # 1. `plan_corrected` carries the full corrected text — UI replaces
-        #    its accumulator wholesale so extractPlan() picks up the rewritten
-        #    <plan> JSON instead of the model's original.
-        # 2. Then a text_delta with the one-line note, so the prose ends with
-        #    a clear annotation of what the runtime did.
-        yield {"type": "plan_corrected", "text": corrected_text}
-        yield {"type": "text_delta", "delta": f"\n\n{note}"}
+    if note and plan_item_id:
+        new_match = _extract_plan_block(corrected_text)
+        if new_match:
+            _, parsed_corr, _, _ = new_match
+            yield {"__kind__": "plan_corrected",
+                   "item_id": plan_item_id, "data": parsed_corr, "note": note}
         final_text = corrected_text + f"\n\n{note}"
 
-    yield {"type": "result", "text": final_text, "tool_path": mode}
+    if text_started:
+        yield {"__kind__": "text_done",
+               "item_id": text_item_id, "text": final_text}
+
+    yield {"__kind__": "completed",
+           "response_id": response_id, "tool_path": mode}
 
 
-# ─── SSE entrypoint (legacy: chat λ → InvokeAgentRuntime → SSE) ─────────────
+# ─── Keepalive wrapper ──────────────────────────────────────────────────────
+async def _with_keepalive(
+    stream: AsyncIterator[dict],
+    interval: float = KEEPALIVE_INTERVAL_S,
+) -> AsyncIterator[dict]:
+    """Inject `__kind__: "keepalive"` on `interval` seconds of upstream silence.
+    Runs the upstream in a background task feeding an asyncio.Queue; the
+    outer loop times out on queue.get and yields a keepalive marker."""
+    queue: asyncio.Queue = asyncio.Queue()
+    _SENTINEL = object()
+
+    async def _pump() -> None:
+        try:
+            async for item in stream:
+                await queue.put(item)
+        except Exception as e:
+            await queue.put({"__kind__": "failed",
+                             "response_id": "",
+                             "error": {"message": f"stream pump failed: {e}",
+                                       "trace": traceback.format_exc()}})
+        finally:
+            await queue.put(_SENTINEL)
+
+    task = asyncio.create_task(_pump())
+    try:
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=interval)
+            except asyncio.TimeoutError:
+                yield {"__kind__": "keepalive"}
+                continue
+            if item is _SENTINEL:
+                return
+            yield item
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+
+# ─── Envelope: semantic kinds → Open-Responses events + sequence numbers ───
+async def _envelope(stream: AsyncIterator[dict]) -> AsyncIterator[dict]:
+    seq = 0
+    created_at = int(time.time())
+
+    def _emit(type_: str, **payload) -> dict:
+        nonlocal seq
+        e = {"type": type_, "sequence_number": seq, **payload}
+        seq += 1
+        return e
+
+    response_id = ""
+
+    async for raw in stream:
+        kind = raw.get("__kind__")
+
+        if kind == "created":
+            response_id = raw["response_id"]
+            yield _emit("response.created", response={
+                "id": response_id,
+                "object": "response",
+                "created_at": created_at,
+                "status": "in_progress",
+            })
+
+        elif kind == "text_begin":
+            yield _emit("response.output_item.added", output_index=0, item={
+                "id": raw["item_id"],
+                "type": "message",
+                "status": "in_progress",
+                "role": "assistant",
+                "content": [],
+            })
+
+        elif kind == "text_delta":
+            yield _emit("response.output_text.delta",
+                        item_id=raw["item_id"],
+                        output_index=0,
+                        content_index=0,
+                        delta=raw["delta"])
+
+        elif kind == "text_done":
+            yield _emit("response.output_text.done",
+                        item_id=raw["item_id"],
+                        output_index=0,
+                        content_index=0,
+                        text=raw["text"])
+            yield _emit("response.output_item.done", output_index=0, item={
+                "id": raw["item_id"],
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": raw["text"]}],
+            })
+
+        elif kind == "tool_begin":
+            yield _emit("response.output_item.added", output_index=0, item={
+                "id": raw["tool_use_id"],
+                "type": "function_call",
+                "status": "in_progress",
+                "name": raw["name"],
+                "arguments": json.dumps(raw["arguments"]),
+            })
+
+        elif kind == "tool_end":
+            yield _emit("response.output_item.done", output_index=0, item={
+                "id": raw["tool_use_id"],
+                "type": "function_call",
+                "status": "completed",
+                "name": raw["name"],
+                "output": raw["output"][:600],
+            })
+
+        elif kind == "plan_item":
+            yield _emit("response.output_item.added", output_index=0, item={
+                "id": raw["item_id"],
+                "type": "custom",
+                "custom_type": "edl.plan",
+                "status": "in_progress",
+            })
+            yield _emit("response.output_item.done", output_index=0, item={
+                "id": raw["item_id"],
+                "type": "custom",
+                "custom_type": "edl.plan",
+                "status": "completed",
+                "data": raw["data"],
+            })
+
+        elif kind == "plan_corrected":
+            # Re-emit output_item.done on the SAME item id: UI replaces the
+            # previously-rendered plan with the corrected one in place.
+            yield _emit("response.output_item.done", output_index=0, item={
+                "id": raw["item_id"],
+                "type": "custom",
+                "custom_type": "edl.plan",
+                "status": "completed",
+                "data": raw["data"],
+                "correction_note": raw["note"],
+            })
+
+        elif kind == "keepalive":
+            yield _emit("response.keepalive")
+
+        elif kind == "completed":
+            yield _emit("response.completed", response={
+                "id": raw["response_id"],
+                "object": "response",
+                "status": "completed",
+                "tool_path": raw.get("tool_path"),
+            })
+
+        elif kind == "failed":
+            yield _emit("response.failed", response={
+                "id": raw.get("response_id") or response_id,
+                "object": "response",
+                "status": "failed",
+                "error": raw["error"],
+                "tool_path": raw.get("tool_path"),
+            })
+
+
+# ─── Shared pipeline ────────────────────────────────────────────────────────
+def _event_pipeline(payload: dict) -> AsyncIterator[dict]:
+    return _envelope(_with_keepalive(_semantic_stream(payload)))
+
+
+# ─── SSE entrypoint ─────────────────────────────────────────────────────────
 @app.entrypoint
 async def invoke(payload: dict, _context: Any = None) -> AsyncIterator[dict]:
-    """One agent turn over the legacy POST /invocations path. Each yielded
-    dict becomes a `data: {...}\\n\\n` SSE frame courtesy of BedrockAgentCoreApp."""
-    async for event in _stream_events(payload):
+    """One agent turn, SSE-encoded by BedrockAgentCoreApp (each yielded dict
+    becomes `data: {...}\\n\\n`)."""
+    async for event in _event_pipeline(payload):
         yield event
 
 
-# ─── WebSocket entrypoint (native: browser → wss://...runtimes/<arn>/ws) ────
+# ─── WebSocket entrypoint ───────────────────────────────────────────────────
 @app.websocket
 async def ws_handler(websocket, _context: Any) -> None:
-    """One agent turn per WS connection. Read the first JSON frame as the
-    payload, stream events back as JSON frames, send a terminal {"type":"done"}
-    so the client can re-enable input, then close.
+    """One agent turn per WS connection. Reads the first JSON frame as
+    payload, streams Open-Responses events as JSON frames, closes 1000 on
+    `response.completed` or 1011 on unexpected failure.
 
-    AgentCore Runtime invokes this with the WS already authenticated (Cognito
-    JWT via the runtime's JWT authorizer config). We don't re-verify here.
+    AgentCore Runtime verifies the Cognito JWT at the gateway via its
+    customJWTAuthorizer config, so this handler doesn't re-verify.
     """
     await websocket.accept()
     try:
@@ -205,45 +407,48 @@ async def ws_handler(websocket, _context: Any) -> None:
         try:
             payload = json.loads(raw)
         except Exception:
-            await websocket.send_text(json.dumps({"type": "error", "message": "invalid JSON body"}))
+            await websocket.send_text(json.dumps({
+                "type": "response.failed",
+                "sequence_number": 0,
+                "response": {
+                    "status": "failed",
+                    "error": {"message": "invalid JSON body"},
+                },
+            }))
             await websocket.close(code=1003)  # 1003 = unsupported data
             return
 
-        async for event in _stream_events(payload):
+        async for event in _event_pipeline(payload):
             await websocket.send_text(json.dumps(event))
-
-        # Terminal frame so the UI knows the turn ended even if no `result`
-        # fired (e.g. error path). UI re-enables input on done.
-        await websocket.send_text(json.dumps({"type": "done"}))
 
     except Exception as e:
         try:
             await websocket.send_text(json.dumps({
-                "type": "error",
-                "message": f"ws handler failed: {e}",
-                "trace": traceback.format_exc(),
+                "type": "response.failed",
+                "sequence_number": 999,
+                "response": {
+                    "status": "failed",
+                    "error": {
+                        "message": f"ws handler failed: {e}",
+                        "trace": traceback.format_exc(),
+                    },
+                },
             }))
         except Exception:
             pass
         try:
-            await websocket.close(code=1011)  # 1011 = server error
+            await websocket.close(code=1011)
         except Exception:
             pass
         return
 
-    # Normal closure after one turn. The browser opens a fresh WS per turn,
-    # matching the chat-lambda behavior we're replacing. Session continuity
-    # (same runtime session across turns) comes from the session_id query
-    # param the browser passes on connect.
     await websocket.close(code=1000)
 
 
 if __name__ == "__main__":
     # The AgentCore Runtime container only listens for traffic from
-    # bedrock-agentcore's internal network — it's never publicly reachable.
-    # The 0.0.0.0 bind is the SDK-required contract. Semgrep flags
-    # top-level app.run() as ignored by flask, but bedrock-agentcore's
-    # runtime harness invokes this module directly via
-    # `python -m tl_agentcore.runtime`, so the module-level app.run IS
-    # what starts the server.
+    # bedrock-agentcore's internal network — never publicly reachable.
+    # The 0.0.0.0 bind is the SDK-required contract. nosemgrep because the
+    # SDK harness launches this module via `python -m tl_agentcore.runtime`
+    # and relies on module-level app.run to start the server.
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))  # nosemgrep

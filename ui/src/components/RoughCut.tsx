@@ -333,20 +333,38 @@ async function streamTurn(
     prompt,
     session_id: sessionId,
   })) {
-    onEvent?.(ev as { type: string; tool?: string });
-    if (ev.type === "text_delta") {
+    // Sniff the tool name from a function_call item for the arch diagram.
+    let toolName: string | undefined;
+    if ((ev.type === "response.output_item.added" || ev.type === "response.output_item.done")
+        && ev.item.type === "function_call") {
+      toolName = ev.item.name;
+    }
+    onEvent?.({ type: ev.type, tool: toolName });
+
+    if (ev.type === "response.output_text.delta") {
       acc += ev.delta;
       onDelta(stripPlanBlock(acc));
-    } else if (ev.type === "plan_corrected") {
-      // Runtime rewrote the <plan> JSON to satisfy the duration target.
-      // Replace the running buffer wholesale so extractPlan() picks up the
-      // corrected scenes. Any text_delta that follows (e.g. the enforcer's
-      // note) appends normally.
-      acc = ev.text;
+    } else if (ev.type === "response.output_item.done"
+               && ev.item.type === "custom"
+               && ev.item.custom_type === "edl.plan"
+               && ev.item.data != null) {
+      // Server-side EDL extraction. The text stream still carries the raw
+      // <plan>...</plan> block; this is the parsed authoritative copy. When
+      // the duration-enforcer rewrites the plan the server re-emits this
+      // item with the same id — splice the corrected JSON back into the
+      // text accumulator so extractPlan() picks up the right scenes.
+      const planJson = JSON.stringify(ev.item.data, null, 2);
+      const block = `<plan>\n${planJson}\n</plan>`;
+      acc = /<plan>[\s\S]*?<\/plan>/i.test(acc)
+          ? acc.replace(/<plan>[\s\S]*?<\/plan>/i, block)
+          : acc + "\n\n" + block;
+      if (ev.item.correction_note) acc += `\n\n${ev.item.correction_note}`;
       onDelta(stripPlanBlock(acc));
-    } else if (ev.type === "error") {
-      throw new Error(ev.message);
+    } else if (ev.type === "response.failed") {
+      throw new Error(ev.response.error.message);
     }
+    // response.keepalive, response.created, other item.added/done, text_done —
+    // not actionable here; the raw text stream carries everything we need.
   }
   if (!acc.trim()) throw new Error("Agent returned no text — likely the 5-min runtime cap was hit. Try a simpler request.");
   return acc;
@@ -424,12 +442,12 @@ export function RoughCut() {
     const node = nodeForEvent(ev);
     if (node) {
       recordNode(node);
-      if (ev.type === "tool_call") {
+      if (ev.type === "response.output_item.added" && ev.tool) {
         const downstream = downstreamFor(ev.tool);
         if (downstream) setTimeout(() => recordNode(downstream), 400);
       }
     }
-    if (ev.type === "done") setTimeout(() => setActiveNode(null), 1200);
+    if (ev.type === "response.completed") setTimeout(() => setActiveNode(null), 1200);
   };
 
   // Consume any pending restore the drawer leaves in the global store.
