@@ -6,7 +6,7 @@
 
 This paper describes an AWS-native pattern for building agentic video
 retrieval systems. All four heavyweight primitives — clip embeddings
-(Marengo 3.0), clip analysis (Pegasus 1.2), ANN retrieval (S3
+(Marengo 3.0), clip analysis (Pegasus 1.5), ANN retrieval (S3
 Vectors), and agent runtime (Bedrock AgentCore) — run as managed AWS
 services. The customer-deployed surface is small and stateless: one
 arm64 Strands agent container, a chat lambda that relays browser
@@ -98,7 +98,7 @@ flowchart TD
     Vectors[("<b>S3 Vectors</b><br/>multi-modal clip embeddings<br/>visual · audio · transcription")]
     Clips[("<b>S3 · clips bucket</b><br/>mirrored asset bytes<br/>clips/&lt;asset_id&gt;.mp4")]
     Marengo["<b>Bedrock · Marengo 3.0</b><br/>StartAsyncInvoke<br/>visual + audio + transcription embeddings"]
-    Pegasus["<b>Bedrock · Pegasus 1.2</b><br/>InvokeModel<br/>clip analysis"]
+    Pegasus["<b>Bedrock · Pegasus 1.5</b><br/>InvokeModel<br/>clip analysis"]
 
     Browser -- "wss + Cognito JWT" --> CF
     CF --> WS
@@ -530,7 +530,7 @@ Both models are available on Bedrock Marketplace:
 | Surface       | Bedrock model id                          | Invocation   |
 |---|---|---|
 | Embedding     | `twelvelabs.marengo-embed-3-0-v1:0`       | StartAsyncInvoke (S3 in, S3 out) |
-| Analysis      | `us.twelvelabs.pegasus-1-2-v1:0`          | InvokeModel (sync, S3 in)        |
+| Analysis      | `us.twelvelabs.pegasus-1-5-v1:0`          | InvokeModel (sync, S3 in)        |
 
 One operational requirement falls out of this choice. Bedrock's
 TwelveLabs models accept media only as `s3Location` or inline

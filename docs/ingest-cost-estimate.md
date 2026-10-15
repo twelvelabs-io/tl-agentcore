@@ -15,8 +15,8 @@ not invoice-exact.
 | Stage | Unit | Unit price (USD) | Notes |
 |---|---|---:|---|
 | Marengo Embed v3 (Bedrock) | per second of source video | $0.0006 | $0.036/min |
-| Pegasus 1.2 Analyze input | per second of source video | $0.0008 | $0.048/min |
-| Pegasus 1.2 Analyze output | per 1 k tokens | $0.015 | Profile ≈ 800–1,000 tokens / asset |
+| Pegasus 1.5 Analyze input | per second of source video | TBD | 1.2 rate was $0.0008/s ($0.048/min); refresh from Bedrock Marketplace listing |
+| Pegasus 1.5 Analyze output | per 1 k tokens | TBD | 1.2 rate was $0.015/1k; refresh from Bedrock Marketplace listing. Profile ≈ 800–1,000 tokens / asset |
 | Titan Multimodal Embed (image) | per image | $0.00006 | Thumbnail + entity-thumb |
 | MediaConvert HLS, AVC HD | per minute of source | $0.017 | One 720 p rendition |
 | MediaConvert HLS, AVC SD | per minute of source | $0.0075 | If downsampled |
@@ -189,8 +189,9 @@ dominated by Sonnet reasoning tokens.
 ## Methodology notes
 
 - Bedrock model rates pulled from the public Bedrock Marketplace listings
-  for TwelveLabs Marengo Embed v3 and Pegasus 1.2 (us-east-1 region).
-  Verify against the live console before billing planning.
+  for TwelveLabs Marengo Embed v3 (us-east-1 region). Pegasus 1.5 rows
+  are placeholders — refresh from the Pegasus v1.5 Bedrock Marketplace
+  listing (GA 2026-09-18) before billing planning.
 - Duration estimates derive from total bytes ÷ assumed 4 Mbps bitrate.
   Real corpora vary 1.5–8 Mbps depending on encode; ±25 % bracket
   reflects that.

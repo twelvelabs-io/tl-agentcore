@@ -33,7 +33,7 @@ end:
   admin role to the UI as a claim. The Cognito JWT flows end-to-end
   from browser through CloudFront to the HTTP API + AgentCore Runtime
   authorizer.
-- **Bedrock model access.** The runtime calls Marengo 3.0, Pegasus 1.2,
+- **Bedrock model access.** The runtime calls Marengo 3.0, Pegasus 1.5,
   and Claude Haiku 4.5 through the Bedrock Marketplace / Anthropic
   Bedrock catalog. Grant model access in the Bedrock console
   (Model access → Manage model access) before the first invoke.
@@ -295,9 +295,10 @@ Operational gotchas worth knowing before the first apply:
   Marengo nor Pegasus on Bedrock accepts a plain URL for media. The
   reference stack mirrors each ingested asset to `clips/<asset_id>.mp4`
   on the clips bucket; the runtime IAM role carries `s3:GetObject`
-  there. Sub-clip time ranges are not supported on the Pegasus 1.2
-  Bedrock API, so the whole S3 object is analyzed; deployments with
-  long source videos should consider segmenting at ingest time.
+  there. Pegasus 1.5 on Bedrock supports sub-clip time ranges
+  (`startTime`/`endTime` in the request body); the reference agent
+  does not yet pass them, so today the whole S3 object is analyzed
+  per invocation.
 - **Marengo on Bedrock is async-only for video.** Sync `InvokeModel`
   rejects `inputType=video`; use `StartAsyncInvoke` against the
   foundation-model ARN (not the inference profile). Output writes to

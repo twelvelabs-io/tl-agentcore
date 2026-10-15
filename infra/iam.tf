@@ -71,7 +71,7 @@ data "aws_iam_policy_document" "runtime_perms" {
   # Narrowed to just the three models the agent actually uses:
   #   - Claude Sonnet 4.6 (agent reasoner)
   #   - Marengo 3.0 (embeddings for vector_search / find_by_image)
-  #   - Pegasus 1.2 (per-clip video analysis)
+  #   - Pegasus 1.5 (per-clip video analysis; 1.2 kept allow-listed for rollback via pegasus_bedrock_model_id)
   # us.* inference profiles need permissions on BOTH the profile ARN
   # (the caller-facing id) AND every regional foundation-model ARN it
   # can route to (the actual model), so we grant both.
@@ -87,9 +87,11 @@ data "aws_iam_policy_document" "runtime_perms" {
       "arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6*",
       "arn:aws:bedrock:*::foundation-model/twelvelabs.marengo-embed-3-0-v1:0",
       "arn:aws:bedrock:*::foundation-model/twelvelabs.pegasus-1-2-v1:0",
+      "arn:aws:bedrock:*::foundation-model/twelvelabs.pegasus-1-5-v1:0",
       "arn:aws:bedrock:*:${data.aws_caller_identity.current.account_id}:inference-profile/us.anthropic.claude-sonnet-4-6*",
       "arn:aws:bedrock:*:${data.aws_caller_identity.current.account_id}:inference-profile/us.twelvelabs.marengo-embed-3-0-v1:0",
       "arn:aws:bedrock:*:${data.aws_caller_identity.current.account_id}:inference-profile/us.twelvelabs.pegasus-1-2-v1:0",
+      "arn:aws:bedrock:*:${data.aws_caller_identity.current.account_id}:inference-profile/us.twelvelabs.pegasus-1-5-v1:0",
     ]
   }
   # Query the S3 Vectors index. QueryVectors + GetVectors are required to
