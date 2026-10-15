@@ -21,7 +21,7 @@ through Bedrock Marketplace under the customer's IAM.
                                      entity graph (no model call).
     list_cached_entities           — All cross-asset entities (by kind, etc.).
 
-  Tier 2 — On-demand grounding (Bedrock Pegasus 1.2)
+  Tier 2 — On-demand grounding (Bedrock Pegasus 1.5)
     pegasus_analyze                — One clip → take-note via s3Location.
 
   Ancillary (domain DDB lookups)
@@ -77,7 +77,7 @@ _MODALITY_INDEX_MAP = {
 # involvement on the live path.
 PEGASUS_BEDROCK_MODEL_ID = os.environ.get(
     "PEGASUS_BEDROCK_MODEL_ID",
-    "us.twelvelabs.pegasus-1-2-v1:0",
+    "us.twelvelabs.pegasus-1-5-v1:0",
 )
 CLIPS_BUCKET_NAME = os.environ.get("CLIPS_BUCKET_NAME")
 CLIPS_BUCKET_OWNER = os.environ.get("CLIPS_BUCKET_OWNER")  # account id
@@ -727,7 +727,7 @@ def pegasus_analyze(
     max_tokens: int = 1024,
     temperature: float = 0.2,
 ) -> str:
-    """Generate a take-note about a specific clip using Bedrock Pegasus 1.2.
+    """Generate a take-note about a specific clip using Bedrock Pegasus 1.5.
     Use when the producer asks what a clip visibly contains (subject, action,
     framing, mood, dialogue) — questions a similarity score cannot answer.
     **Check lookup_asset_profile first** — the cached one_liner often suffices.
@@ -1165,7 +1165,7 @@ The active `knowledge_store_id` is provided in the user message metadata as `[ks
 
 If the cache returns `cached: False` or no matches, fall through to Tier 2.
 
-## Tier 2 — On-demand grounding (Bedrock Pegasus 1.2 · 3–15 s)
+## Tier 2 — On-demand grounding (Bedrock Pegasus 1.5 · 3–15 s)
 
 1. **pegasus_analyze(target, prompt)** — single-clip generation. Reads `s3://CLIPS_BUCKET_NAME/clips/<asset_id>.mp4` directly with the runtime's IAM role. Use ONLY when cached `lookup_asset_profile` doesn't suffice — "what's visibly happening here", "is this shot bright enough", "what's being said".
 

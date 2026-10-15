@@ -1,7 +1,7 @@
 # Auto-pipelines: the two lambdas that complete the "drop a file, walk
 # away, everything works" promise.
 #
-#   asset_profile  — S3-triggered per upload. Runs Bedrock Pegasus 1.2 on
+#   asset_profile  — S3-triggered per upload. Runs Bedrock Pegasus 1.5 on
 #                    clips/<asset_id>.mp4 and writes ASSET#<asset_id> into
 #                    kb_cache. Replaces the manual `ingest_kb_cache.py`
 #                    run for per-asset profiles.
@@ -84,7 +84,7 @@ resource "aws_lambda_function" "asset_profile" {
   handler          = "index.handler"
   filename         = data.archive_file.asset_profile.output_path
   source_code_hash = data.archive_file.asset_profile.output_base64sha256
-  # Pegasus 1.2 on Bedrock takes 30–90 s per asset; give it room.
+  # Pegasus 1.5 on Bedrock takes 30–90 s per asset; give it room.
   timeout     = 300
   memory_size = 512
 
