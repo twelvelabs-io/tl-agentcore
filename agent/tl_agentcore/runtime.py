@@ -36,10 +36,11 @@ import traceback
 from typing import Any, AsyncIterator
 
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
+from bedrock_agentcore.runtime.context import BedrockAgentCoreContext
 from strands.hooks import HookProvider, HookRegistry
 from strands.hooks.events import AfterToolCallEvent, BeforeToolCallEvent
 
-from .agent import build_agent
+from .agent import build_agent, persist_session_turn, set_user_id_from_token
 from .duration_enforcer import enforce_duration_target
 
 app = BedrockAgentCoreApp()
@@ -107,6 +108,12 @@ async def _stream_events(payload: dict) -> AsyncIterator[dict]:
         return
 
     user_text = prompt if not ks else f"[ks: {ks}]\n{prompt}"
+
+    # Seed the per-turn user_id ContextVar so manage_memory /
+    # save_tref_to_memory can namespace writes to this Cognito sub. Decoding
+    # here is safe — the AgentCore JWT authorizer already verified the token
+    # before the request reached us.
+    set_user_id_from_token(access_token)
 
     queue: asyncio.Queue = asyncio.Queue()
     try:
@@ -176,6 +183,25 @@ async def _stream_events(payload: dict) -> AsyncIterator[dict]:
         yield {"type": "plan_corrected", "text": corrected_text}
         yield {"type": "text_delta", "delta": f"\n\n{note}"}
         final_text = corrected_text + f"\n\n{note}"
+
+    # Write-only session persistence: stash this turn's prompt, final text,
+    # and extracted <plan> in the sessions table under the AgentCore session
+    # id. Read-for-resume lands in the follow-up to PR #15 (previous_response_id
+    # wire semantics). Fails soft; a DDB write hiccup must not break the turn.
+    try:
+        session_id = BedrockAgentCoreContext.get_session_id()
+    except Exception:
+        session_id = None
+    try:
+        persist_session_turn(
+            session_id=session_id,
+            knowledge_store_id=ks,
+            prompt=prompt,
+            response_text=final_text,
+            tool_path=mode,
+        )
+    except Exception as e:
+        print(f"runtime: session persistence failed: {e}")
 
     yield {"type": "result", "text": final_text, "tool_path": mode}
 

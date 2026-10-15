@@ -173,6 +173,23 @@ data "aws_iam_policy_document" "runtime_perms" {
       aws_dynamodb_table.audiences.arn,
     ]
   }
+  # Multi-turn session scratch + per-user long-term memory. The runtime
+  # both reads (list/get memories) and writes (persist session turn,
+  # save a memory, delete a memory via manage_memory).
+  statement {
+    sid = "SessionAndMemoryTables"
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:PutItem",
+      "dynamodb:UpdateItem",
+      "dynamodb:DeleteItem",
+      "dynamodb:Query",
+    ]
+    resources = [
+      aws_dynamodb_table.sessions.arn,
+      aws_dynamodb_table.memories.arn,
+    ]
+  }
 }
 
 resource "aws_iam_role_policy" "runtime" {
