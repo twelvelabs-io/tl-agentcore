@@ -91,6 +91,9 @@ CLIPS_BUCKET_OWNER = os.environ.get("CLIPS_BUCKET_OWNER")  # account id
 KB_CACHE_TABLE = os.environ.get("KB_CACHE_TABLE")
 RIGHTS_TABLE = os.environ.get("RIGHTS_TABLE")
 AUDIENCES_TABLE = os.environ.get("AUDIENCES_TABLE")
+# PR #4: multi-turn session scratch + per-user long-term memory.
+SESSIONS_TABLE = os.environ.get("SESSIONS_TABLE")
+MEMORIES_TABLE = os.environ.get("MEMORIES_TABLE")
 
 _s3v = boto3.client("s3vectors", region_name=AWS_REGION)
 _bedrock_rt = boto3.client("bedrock-runtime", region_name=AWS_REGION)
@@ -1603,6 +1606,322 @@ def get_audio_context(
     }
 
 
+# ═══ User-scoped long-term memory (manage_memory, save_tref_to_memory) ══════
+# Memories are keyed by Cognito `sub`. The runtime decodes the user's access
+# token once per turn and stores the resulting user_id in `_user_id_ctx` so
+# every tool call during the turn namespaces to the right person. Tools fail
+# soft if the token is absent (local smoke tests, legacy chat-lambda path).
+
+import base64 as _base64  # noqa: E402
+import contextvars as _contextvars  # noqa: E402
+from datetime import datetime as _dt, timezone as _tz  # noqa: E402
+
+_user_id_ctx: _contextvars.ContextVar[Optional[str]] = _contextvars.ContextVar(
+    "tl_agentcore_user_id", default=None
+)
+
+
+def _b64url_decode(seg: str) -> bytes:
+    """Pad and decode a base64url segment (JWT segments are unpadded)."""
+    pad = "=" * (-len(seg) % 4)
+    return _base64.urlsafe_b64decode(seg + pad)
+
+
+def decode_cognito_sub(access_token: Optional[str]) -> Optional[str]:
+    """Pull the `sub` claim out of a Cognito JWT without verifying the
+    signature. The AgentCore Runtime's customJWTAuthorizer already verified
+    the token before the request reached this process, so decoding here is
+    just claim extraction, not auth. Returns None on any parse failure —
+    callers fall through to a disabled-memory path."""
+    if not access_token or not isinstance(access_token, str):
+        return None
+    try:
+        _, payload_seg, _ = access_token.split(".")
+        claims = json.loads(_b64url_decode(payload_seg))
+    except Exception:
+        return None
+    sub = claims.get("sub") or claims.get("username")
+    return str(sub) if sub else None
+
+
+def set_user_id_from_token(access_token: Optional[str]) -> Optional[str]:
+    """Called once per turn by runtime._stream_events to seed `_user_id_ctx`.
+    Returns the decoded user_id (or None) so the caller can log it."""
+    user_id = decode_cognito_sub(access_token)
+    _user_id_ctx.set(user_id)
+    return user_id
+
+
+def _current_user_id() -> Optional[str]:
+    return _user_id_ctx.get()
+
+
+def _now_iso() -> str:
+    return _dt.now(_tz.utc).isoformat(timespec="seconds")
+
+
+def _ddb_memory_put(user_id: str, memory_id: str, item: dict) -> None:
+    """Low-level PutItem onto the memories table. Values are converted into
+    AttributeValue form; `data` and `tags` are serialized when present."""
+    av: dict = {
+        "user_id":    {"S": user_id},
+        "memory_id":  {"S": memory_id},
+        "kind":       {"S": str(item.get("kind") or "note")},
+        "created_at": {"S": str(item.get("created_at") or _now_iso())},
+        "updated_at": {"S": str(item.get("updated_at") or _now_iso())},
+    }
+    if item.get("name"):
+        av["name"] = {"S": str(item["name"])}
+    if item.get("content"):
+        av["content"] = {"S": str(item["content"])}
+    if item.get("tags"):
+        av["tags"] = {"SS": sorted({str(t) for t in item["tags"] if t})}
+    if item.get("data") is not None:
+        av["data"] = {"S": json.dumps(item["data"])}
+    _ddb.put_item(TableName=MEMORIES_TABLE, Item=av)
+
+
+def _ddb_memory_delete(user_id: str, memory_id: str) -> None:
+    _ddb.delete_item(TableName=MEMORIES_TABLE, Key={
+        "user_id":   {"S": user_id},
+        "memory_id": {"S": memory_id},
+    })
+
+
+def _ddb_memory_list(user_id: str, limit: int = 50) -> list[dict]:
+    out: list[dict] = []
+    page: dict | None = None
+    while True:
+        kwargs: dict = {
+            "TableName": MEMORIES_TABLE,
+            "KeyConditionExpression": "user_id = :u",
+            "ExpressionAttributeValues": {":u": {"S": user_id}},
+        }
+        if page:
+            kwargs["ExclusiveStartKey"] = page
+        r = _ddb.query(**kwargs)
+        for it in r.get("Items", []):
+            obj = _ddb_to_python(it) or {}
+            data_s = obj.get("data")
+            if isinstance(data_s, str):
+                try:
+                    obj["data"] = json.loads(data_s)
+                except Exception:
+                    pass
+            out.append(obj)
+            if len(out) >= limit:
+                return out
+        page = r.get("LastEvaluatedKey")
+        if not page:
+            break
+    return out
+
+
+@tool
+def manage_memory(
+    action: str,
+    content: Optional[str] = None,
+    name: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    memory_id: Optional[str] = None,
+    limit: int = 50,
+) -> dict:
+    """Create, list, or delete the user's long-term memories. Memories persist
+    across sessions and are the right place to stash things the producer tells
+    you to remember — stylistic preferences, named asset references, running
+    notes for a project. **Use whenever the user says "remember that…",
+    "save this as…", "forget the note about…", or asks what you have on
+    file.** Namespaced per Cognito user; one user's memories are never
+    visible to another.
+    For named clip references (asset_id + timecodes), prefer `save_tref_to_memory`
+    instead — it enforces the TRef shape.
+    Args:
+        action: "create" (new memory, requires `content`), "list" (returns the
+            user's memories, newest first), or "delete" (requires `memory_id`).
+        content: free-text body for a `create` action.
+        name: optional short handle so a memory can be referenced later
+            ("my favorite cold-open", "aspect-ratio preference").
+        tags: optional list of string tags for later filtering.
+        memory_id: required for `delete`; from a prior `list` result.
+        limit: cap on `list` size (default 50).
+    Returns:
+        {ok, action, memory_id?, memories?, message?}. `memories` is a list of
+        {memory_id, kind, name, content, tags, data, created_at, updated_at}.
+    """
+    if not MEMORIES_TABLE:
+        return {"ok": False, "error": "MEMORIES_TABLE not configured"}
+    user_id = _current_user_id()
+    if not user_id:
+        return {"ok": False, "error": "no authenticated user — memory requires a signed-in session"}
+
+    act = (action or "").lower().strip()
+    if act == "create":
+        if not content and not name:
+            return {"ok": False, "error": "create requires `content` or `name`"}
+        mid = f"mem_{_uuid.uuid4().hex[:16]}"
+        now = _now_iso()
+        item = {
+            "kind":       "note",
+            "name":       name,
+            "content":    content,
+            "tags":       list(tags) if tags else None,
+            "created_at": now,
+            "updated_at": now,
+        }
+        try:
+            _ddb_memory_put(user_id, mid, item)
+        except Exception as e:
+            return {"ok": False, "error": f"memory put failed: {e}"}
+        return {"ok": True, "action": "create", "memory_id": mid}
+
+    if act == "list":
+        try:
+            memories = _ddb_memory_list(user_id, limit=limit)
+        except Exception as e:
+            return {"ok": False, "error": f"memory list failed: {e}"}
+        memories.sort(key=lambda m: str(m.get("created_at") or ""), reverse=True)
+        return {"ok": True, "action": "list", "count": len(memories), "memories": memories}
+
+    if act == "delete":
+        if not memory_id:
+            return {"ok": False, "error": "delete requires `memory_id`"}
+        try:
+            _ddb_memory_delete(user_id, memory_id)
+        except Exception as e:
+            return {"ok": False, "error": f"memory delete failed: {e}"}
+        return {"ok": True, "action": "delete", "memory_id": memory_id}
+
+    return {"ok": False, "error": f"unknown action {action!r} — use create / list / delete"}
+
+
+@tool
+def save_tref_to_memory(
+    name: str,
+    asset_id: str,
+    start_time: str,
+    end_time: str,
+    knowledge_store_id: Optional[str] = None,
+    notes: Optional[str] = None,
+) -> dict:
+    """Save a named clip reference (TRef) to the user's long-term memory.
+    A TRef = (asset_id, start_time, end_time) — the smallest addressable
+    clip the agent emits. Use whenever the producer wants to park a clip
+    for later ("save this as 'intro shot'", "remember that cutaway as
+    'reaction B'"). The saved TRef can be recalled by `manage_memory(action="list")`.
+    Args:
+        name: short handle the producer will use to refer back ("intro shot").
+        asset_id: 24-char hex, from the current plan or a prior tool result.
+        start_time: HH:MM:SS, same format vector_search emits.
+        end_time:   HH:MM:SS.
+        knowledge_store_id: ks_xxx the clip belongs to (optional but recommended).
+        notes: optional one-line description — why this clip, framing cue, etc.
+    Returns:
+        {ok, memory_id, name, data} on success. The `data` field is the
+        saved TRef object.
+    """
+    if not MEMORIES_TABLE:
+        return {"ok": False, "error": "MEMORIES_TABLE not configured"}
+    user_id = _current_user_id()
+    if not user_id:
+        return {"ok": False, "error": "no authenticated user — memory requires a signed-in session"}
+    if not (name and asset_id and start_time and end_time):
+        return {"ok": False, "error": "name, asset_id, start_time, end_time are required"}
+
+    mid = f"tref_{_uuid.uuid4().hex[:16]}"
+    now = _now_iso()
+    data = {
+        "asset_id":           asset_id,
+        "start_time":         start_time,
+        "end_time":           end_time,
+        "knowledge_store_id": knowledge_store_id,
+        "notes":              notes,
+    }
+    item = {
+        "kind":       "tref",
+        "name":       name,
+        "content":    notes,
+        "data":       data,
+        "tags":       ["tref"],
+        "created_at": now,
+        "updated_at": now,
+    }
+    try:
+        _ddb_memory_put(user_id, mid, item)
+    except Exception as e:
+        return {"ok": False, "error": f"tref put failed: {e}"}
+    return {"ok": True, "memory_id": mid, "name": name, "data": data}
+
+
+# ═══ Session scratch — write-only in this release ══════════════════════════
+# runtime.py calls persist_session_turn() at the end of each turn with the
+# AgentCore session_id, the knowledge_store_id, the user's prompt, and the
+# final <plan>...</plan> text (if the response contained one). 7-day TTL via
+# `expires_at`. Read-for-resume (previous_response_id) is deferred to the
+# follow-up PR that lands after PR #15.
+
+import re as _re  # noqa: E402
+
+_PLAN_TAG_RE = _re.compile(r"<plan>(.*?)</plan>", _re.DOTALL)
+_SESSION_TTL_DAYS = 7
+
+
+def _extract_plan_text(response_text: str) -> Optional[str]:
+    if not response_text:
+        return None
+    m = _PLAN_TAG_RE.search(response_text)
+    return m.group(0) if m else None
+
+
+def persist_session_turn(
+    session_id: Optional[str],
+    knowledge_store_id: Optional[str],
+    prompt: str,
+    response_text: str,
+    tool_path: Optional[str] = None,
+) -> Optional[str]:
+    """UpdateItem on the sessions table — increment turn_count and overwrite
+    the per-session scratch fields. Returns the session_id on success, None
+    on skip (missing config or empty session_id). Fails soft — a session-write
+    failure must never break the turn."""
+    if not SESSIONS_TABLE or not session_id:
+        return None
+    now = _now_iso()
+    expires_at = int(_dt.now(_tz.utc).timestamp()) + _SESSION_TTL_DAYS * 86400
+    plan_text = _extract_plan_text(response_text) or ""
+    user_id = _current_user_id()
+    try:
+        expr = (
+            "SET last_updated_at = :u, expires_at = :e, last_prompt = :p, "
+            "last_response_text = :r, last_plan_text = :pl, tool_path = :tp"
+            + (", knowledge_store_id = :ks" if knowledge_store_id else "")
+            + (", user_id = :uid" if user_id else "")
+            + " ADD turn_count :one"
+        )
+        values: dict = {
+            ":u":   {"S": now},
+            ":e":   {"N": str(expires_at)},
+            ":p":   {"S": str(prompt)[:8000]},
+            ":r":   {"S": str(response_text)[:40000]},
+            ":pl":  {"S": plan_text[:40000]},
+            ":tp":  {"S": str(tool_path or "")},
+            ":one": {"N": "1"},
+        }
+        if knowledge_store_id:
+            values[":ks"] = {"S": knowledge_store_id}
+        if user_id:
+            values[":uid"] = {"S": user_id}
+        _ddb.update_item(
+            TableName=SESSIONS_TABLE,
+            Key={"session_id": {"S": session_id}},
+            UpdateExpression=expr,
+            ExpressionAttributeValues=values,
+        )
+        return session_id
+    except Exception as e:
+        print(f"persist_session_turn: write failed for {session_id}: {e}")
+        return None
+
+
 # ═══ Ancillary: Domain DDB lookups ════════════════════════════════════════════
 
 @tool
@@ -1728,6 +2047,11 @@ If the cache returns `cached: False` or no matches, fall through to Tier 2.
 1. **get_transcript(asset_id, start_time?, end_time?)** — cached ASR output from the ingest pipeline (S3 GetObject). Use whenever you need "what's said" / dialogue text. Much cheaper than a `pegasus_analyze` with a transcription prompt. Window filter is HH:MM:SS.
 2. **get_shot_timeline(knowledge_store_id, asset_id)** — Rekognition SegmentDetection (SHOT). Cache-first; on miss returns `{pending, job_id}` — pass the job_id back on a later turn to poll. Use for "where are the cuts", "shot bounds for scene 2 clip 1", or when the brief needs timecode-precise segment boundaries that `vector_search`'s coarse windows don't give.
 3. **get_audio_context(asset_id, start_time?, end_time?)** — transcript-derived approximation (Transcribe items + Comprehend sentiment/entities). **No music/sfx classifier** — if the brief truly needs music or sound-event identification, prefer `pegasus_analyze` with an audio-focused prompt.
+
+## Long-term memory (DDB · per-user, persists across sessions)
+
+1. **manage_memory(action, content?, name?, tags?, memory_id?, limit?)** — create/list/delete the user's long-term notes. Use whenever the producer says "remember that…", "save this as…", "forget the note about…", or asks what you have on file. One user's memories are never visible to another. Prefer `save_tref_to_memory` for named clip references.
+2. **save_tref_to_memory(name, asset_id, start_time, end_time, knowledge_store_id?, notes?)** — park a named clip (TRef) for later. Use when the producer says "save this clip as 'intro shot'" or similar. The saved TRef is callable from a future turn via `manage_memory(action="list")`.
 
 ## Ancillary stores (DDB)
 
@@ -1943,6 +2267,8 @@ def build_agent(access_token: Optional[str] = None) -> tuple[Agent, str]:
             pegasus_analyze, pegasus_segments,
             # Transcript / shot / audio context (ASR + Rekognition SegmentDetection + Comprehend)
             get_transcript, get_shot_timeline, get_audio_context,
+            # Per-user long-term memory (DDB, Cognito-sub namespaced)
+            manage_memory, save_tref_to_memory,
             # Ancillary domain stores (rights + audience cohorts in DDB)
             lookup_rights, list_audiences, lookup_audience,
         ],
