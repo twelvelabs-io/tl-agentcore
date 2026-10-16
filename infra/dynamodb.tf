@@ -190,3 +190,47 @@ resource "aws_dynamodb_table" "memories" {
     type = "S"
   }
 }
+
+# ─── Artifact store (PR #6) ──────────────────────────────────────────────
+#
+#   artifacts — Per-user, durable store for things the agent produces that
+#               the user may want to open, reference, or regenerate from
+#               later: saved EDL plans, generated html-1 apps, rendered
+#               videos, arbitrary blobs. Small payloads (<16 KiB) ride
+#               inline in the `inline_data` string attribute; larger
+#               payloads live under `artifacts/<user_id>/<artifact_id>/
+#               <name>` in the clips bucket and the row carries only the
+#               `s3_key`. Agent-driven writes only via save_artifact /
+#               open_artifact / list_artifacts. GSI `by-kind` lets a user
+#               filter their artifacts by kind (edl.plan, html.app,
+#               video.render, other) without a Scan.
+resource "aws_dynamodb_table" "artifacts" {
+  name         = "${local.fqname}-artifacts"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "user_id"
+  range_key    = "artifact_id"
+
+  point_in_time_recovery {
+    enabled = true
+  }
+
+  attribute {
+    name = "user_id"
+    type = "S"
+  }
+  attribute {
+    name = "artifact_id"
+    type = "S"
+  }
+  attribute {
+    name = "kind"
+    type = "S"
+  }
+
+  global_secondary_index {
+    name            = "by-kind"
+    hash_key        = "user_id"
+    range_key       = "kind"
+    projection_type = "ALL"
+  }
+}

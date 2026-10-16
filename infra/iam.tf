@@ -135,6 +135,11 @@ data "aws_iam_policy_document" "runtime_perms" {
       "${aws_s3_bucket.clips.arn}/async-in-eval/*",
       "${aws_s3_bucket.clips.arn}/async-out-eval/*",
       "${aws_s3_bucket.clips.arn}/embed-cache/*",
+      # PR #6: artifact store — large (>16 KiB) agent-produced artifacts
+      # land here as `artifacts/<user_id>/<artifact_id>/<name>`. The small
+      # path is DDB-inline so these S3 writes are the exception, not the
+      # norm. Reads come through the existing ReadClipBytes grant.
+      "${aws_s3_bucket.clips.arn}/artifacts/*",
     ]
   }
   statement {
@@ -188,6 +193,23 @@ data "aws_iam_policy_document" "runtime_perms" {
     resources = [
       aws_dynamodb_table.sessions.arn,
       aws_dynamodb_table.memories.arn,
+    ]
+  }
+  # PR #6: artifact store. The agent save_/open_/list_artifacts tools
+  # Get/Put/Delete rows on the table itself and Query the by-kind GSI
+  # for list-with-filter.
+  statement {
+    sid = "ArtifactsTable"
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:PutItem",
+      "dynamodb:UpdateItem",
+      "dynamodb:DeleteItem",
+      "dynamodb:Query",
+    ]
+    resources = [
+      aws_dynamodb_table.artifacts.arn,
+      "${aws_dynamodb_table.artifacts.arn}/index/by-kind",
     ]
   }
 }
