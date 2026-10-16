@@ -15,7 +15,8 @@ through Bedrock Marketplace under the customer's IAM.
   Tier 1 — Cache (DynamoDB · sub-10ms)
     get_kb_overview                — Per-KS digest.
     list_kb_assets                 — Cached per-asset profiles, mood/role filters.
-    lookup_asset_profile           — Single-asset cached digest.
+    lookup_asset_profile /         — Single-asset cached digest.
+      get_content_profile            (two names, same payload — Jockey alias.)
     list_kb_events / lookup_event  — Multi-clip event clusters.
     find_cached_entity_appearances — Entity → asset_ids from the cross-asset
                                      entity graph (no model call).
@@ -23,10 +24,15 @@ through Bedrock Marketplace under the customer's IAM.
 
   Tier 2 — On-demand grounding (Bedrock Pegasus 1.5)
     pegasus_analyze                — One clip → take-note via s3Location.
-                                     Supports JSON-schema structured output
-                                     and reference-image bindings.
+                                     Supports JSON-schema structured output,
+                                     reference-image bindings, and sub-clip
+                                     bounds (start_time / end_time).
     pegasus_segments               — One clip → auto-segmented structured
-                                     metadata (time_based_metadata mode).
+                                     metadata (time_based_metadata mode),
+                                     optionally scoped to a time window.
+    zoom_in_video                  — Thin wrapper for window-focused analysis;
+                                     structured dict output (start_sec,
+                                     end_sec, duration_sec, text).
 
   Ancillary (domain DDB lookups)
     lookup_rights                  — DDB licensing record.
@@ -691,20 +697,8 @@ def list_cached_entities(
     return rows[:limit]
 
 
-@tool
-def lookup_asset_profile(knowledge_store_id: str, asset_id: str) -> dict:
-    """Read the cached profile for one asset (title, one-liner, mood tags,
-    subjects, visual style, role). **Use before pegasus_analyze** — if the
-    cached one_liner answers your question, skip the Pegasus call.
-
-    Args:
-        knowledge_store_id: ks_xxxxxxxx.
-        asset_id: 24-char hex asset id.
-
-    Returns:
-        {cached, asset_id, title, one_liner, mood_tags, primary_subjects,
-        visual_style, role_hint}. cached=False → consider pegasus_analyze.
-    """
+def _asset_profile_dict(knowledge_store_id: str, asset_id: str) -> dict:
+    """Shared body for lookup_asset_profile / get_content_profile."""
     if not knowledge_store_id or not asset_id:
         return {"cached": False, "error": "knowledge_store_id and asset_id required"}
     item = _ddb_kb_get(f"ks#{knowledge_store_id}", f"ASSET#{asset_id}")
@@ -720,6 +714,46 @@ def lookup_asset_profile(knowledge_store_id: str, asset_id: str) -> dict:
         "visual_style":     item.get("visual_style"),
         "role_hint":        item.get("role_hint"),
     }
+
+
+@tool
+def lookup_asset_profile(knowledge_store_id: str, asset_id: str) -> dict:
+    """Read the cached profile for one asset (title, one-liner, mood tags,
+    subjects, visual style, role). **Use before pegasus_analyze** — if the
+    cached one_liner answers your question, skip the Pegasus call.
+
+    (Alias: `get_content_profile` — same payload, Jockey-canonical name.)
+
+    Args:
+        knowledge_store_id: ks_xxxxxxxx.
+        asset_id: 24-char hex asset id.
+
+    Returns:
+        {cached, asset_id, title, one_liner, mood_tags, primary_subjects,
+        visual_style, role_hint}. cached=False → consider pegasus_analyze.
+    """
+    return _asset_profile_dict(knowledge_store_id, asset_id)
+
+
+@tool
+def get_content_profile(knowledge_store_id: str, asset_id: str) -> dict:
+    """Per-asset content-profile lookup from kb_cache (Jockey-canonical name).
+
+    Same cached digest as `lookup_asset_profile`: pre-computed title, one-liner,
+    mood tags, primary subjects, visual style, and role hint. **Prefer this
+    over `pegasus_analyze` when a cached one-liner answers the question** —
+    single DynamoDB GetItem, sub-10ms when the KS has been ingested.
+
+    Args:
+        knowledge_store_id: ks_xxxxxxxx.
+        asset_id: 24-char hex asset id.
+
+    Returns:
+        {cached, asset_id, title, one_liner, mood_tags, primary_subjects,
+        visual_style, role_hint}. cached=False → the asset isn't in kb_cache
+        yet; fall back to `pegasus_analyze` or `vector_search`.
+    """
+    return _asset_profile_dict(knowledge_store_id, asset_id)
 
 
 # ═══ Tier 2: Live grounding via Bedrock Pegasus ═══════════════════════════════
@@ -967,6 +1001,72 @@ def _pegasus_bedrock(
     if payload.get("stopReason") == "length":
         text = f"{text}\n\n[truncated: hit max_tokens]"
     return text
+
+
+# ─── zoom_in_video: time-window-bounded Pegasus analysis ────────────────────
+# Jockey's "zoom in" affordance: let the agent say "look again at seconds
+# 15-30 of asset X" instead of re-analyzing the whole video. Uses Pegasus 1.5
+# Bedrock's native start_time / end_time sub-clip bounds (threaded through
+# _pegasus_bedrock), so the model actually scopes its attention to the window
+# rather than ingesting the whole file.
+_DEFAULT_ZOOM_PROMPT = (
+    "Describe what happens in this clip in detail — the main action, who/what "
+    "is on screen, and any notable audio or dialogue. Keep the answer focused "
+    "on what is visible and audible."
+)
+
+
+@tool
+def zoom_in_video(
+    asset_id: str,
+    start_sec: float,
+    end_sec: float,
+    question: Optional[str] = None,
+    temperature: float = 0.1,
+) -> dict:
+    """Deep-dive Pegasus analysis bounded to a specific time window of a clip.
+
+    Prefer this over `pegasus_analyze` when the question is about a specific
+    moment ("what happens at 15-30s", "describe the chase at 1:02-1:18"). The
+    tool delegates to `_pegasus_bedrock` with the sub-clip `start_time` /
+    `end_time` kwargs set, so Pegasus 1.5 scopes its attention to the window
+    at the model level — not via prompt wording.
+
+    Args:
+        asset_id: 24-char hex asset id (same bytes `pegasus_analyze` reads).
+        start_sec: window start in seconds (clamped to 0 by `_pegasus_bedrock`).
+        end_sec: window end in seconds; must be > start_sec.
+        question: optional focused question ("what is the ref signaling?").
+            Falls back to a generic "describe the window" prompt when omitted.
+        temperature: sampling temperature; defaults lower than pegasus_analyze.
+
+    Returns:
+        {asset_id, start_sec, end_sec, duration_sec, question, text}. `text`
+        is Pegasus's grounded response.
+    """
+    if not asset_id:
+        return {"error": "asset_id is required"}
+    try:
+        start_sec = max(0.0, float(start_sec))
+        end_sec = float(end_sec)
+    except (TypeError, ValueError):
+        return {"error": "start_sec and end_sec must be numbers"}
+    if end_sec <= start_sec:
+        return {"error": f"end_sec ({end_sec}) must be > start_sec ({start_sec})"}
+    prompt = (question or "").strip() or _DEFAULT_ZOOM_PROMPT
+    text = _pegasus_bedrock(
+        asset_id, prompt, temperature,
+        start_time=start_sec,
+        end_time=end_sec,
+    )
+    return {
+        "asset_id":     asset_id,
+        "start_sec":    start_sec,
+        "end_sec":      end_sec,
+        "duration_sec": round(end_sec - start_sec, 3),
+        "question":     question,
+        "text":         text,
+    }
 
 
 def _fetch_image_bytes(url: str) -> bytes:
@@ -1346,7 +1446,7 @@ The active `knowledge_store_id` is provided in the user message metadata as `[ks
 
 1. **get_kb_overview(knowledge_store_id)** — corpus summary: asset count, dominant moods, visual styles, role distribution, sample titles, entity count. Call this FIRST on any new KS.
 2. **list_kb_assets(knowledge_store_id, mood?, role?)** — filtered list of pre-profiled assets with title, one-liner, mood tags, subjects. The right tool for "find me clips that fit a tone/role".
-3. **lookup_asset_profile(knowledge_store_id, asset_id)** — single-asset cached digest. Often replaces a pegasus_analyze.
+3. **lookup_asset_profile(knowledge_store_id, asset_id)** — single-asset cached digest. Often replaces a pegasus_analyze. (Also exposed as **get_content_profile** — identical payload, Jockey-canonical name.)
 4. **find_cached_entity_appearances(knowledge_store_id, entity_name)** — returns asset_ids where a named entity appears, from the kb_cache cross-asset entity graph. Use whenever the user names a person/object/place. Single DDB GetItem.
 5. **list_cached_entities(knowledge_store_id, kind?)** — top entities extracted at ingest, sorted by appearance count.
 6. **list_kb_events(knowledge_store_id)** — multi-clip events clustered by Claude at ingest. Use for "what storyline spans these clips".
@@ -1358,6 +1458,7 @@ If the cache returns `cached: False` or no matches, fall through to Tier 2.
 
 1. **pegasus_analyze(target, prompt, response_schema?, reference_images?, start_time?, end_time?)** — single-clip generation. Reads `s3://CLIPS_BUCKET_NAME/clips/<asset_id>.mp4` directly with the runtime's IAM role. Use ONLY when cached `lookup_asset_profile` doesn't suffice — "what's visibly happening here", "is this shot bright enough", "what's being said". Pass `response_schema` (a JSON Schema dict) to force structured JSON output. Pass `reference_images` (list of URLs or data URIs) to ground the prompt against visual references — e.g. `pegasus_analyze(asset_id, "Does <@ref_0> appear in this clip?", reference_images=[url])`. Images are auto-named `ref_0, ref_1, ...`; the prompt must reference each one via its `<@name>` placeholder (the tool prepends them if you don't). Pass `start_time` / `end_time` (seconds) to bound analysis to a specific window of a long clip instead of ingesting the whole file.
 2. **pegasus_segments(target, segment_definitions, start_time?, end_time?)** — chapterize a clip (or a window of a clip). Pegasus auto-segments and fills your fields per segment. Use for "list every shot/beat/chapter with …". Returns `{segments: [{id, start_sec, end_sec, …your fields}], definition_errors: []}`. Pass `start_time`/`end_time` (seconds) to scope segmentation to a window.
+3. **zoom_in_video(asset_id, start_sec, end_sec, question?)** — focused wrapper around `pegasus_analyze` that bounds Pegasus to a specific moment of a clip ("what happens at 15–30s", "describe the chase at 1:02–1:18") and returns a structured dict `{asset_id, start_sec, end_sec, duration_sec, text, question}`. Prefer this over a bare `pegasus_analyze(start_time=..., end_time=...)` when the question is about a specific sub-clip window — the dict shape is friendlier for the agent to reason about and the signature is self-documenting.
 
 ## Ancillary stores (DDB)
 
@@ -1566,11 +1667,11 @@ def build_agent(access_token: Optional[str] = None) -> tuple[Agent, str]:
             vector_search,
             find_by_image,
             # Tier 1 — Cache (kb_cache: per-asset profiles + cross-asset entity graph + event clusters)
-            get_kb_overview, list_kb_assets, lookup_asset_profile,
+            get_kb_overview, list_kb_assets, lookup_asset_profile, get_content_profile,
             find_cached_entity_appearances, list_cached_entities,
             list_kb_events, lookup_event,
             # Tier 2 — On-demand grounding via Bedrock Pegasus
-            pegasus_analyze, pegasus_segments,
+            pegasus_analyze, pegasus_segments, zoom_in_video,
             # Ancillary domain stores (rights + audience cohorts in DDB)
             lookup_rights, list_audiences, lookup_audience,
         ],
