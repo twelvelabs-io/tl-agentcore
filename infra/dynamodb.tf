@@ -126,3 +126,69 @@ resource "aws_dynamodb_table" "assets" {
     projection_type = "ALL"
   }
 }
+
+# ─── Mining plans (PR #10 of Jockey parity) ──────────────────────────────
+#
+#   jockey_plans — Saved agent prompts that run on an EventBridge schedule.
+#                  PK=plan_id (24-hex uuid4). GSI `by-ks` lets `jockey_list`
+#                  filter by knowledge_store_id without a Scan. One row holds
+#                  `prompt`, `schedule_expression` (EventBridge format), the
+#                  `schedule_arn` the agent created, and `enabled` for pause.
+#                  Scoped by KS, not by user_id (user-id ownership adds in a
+#                  follow-up when PR #16 lands and ships the user_id ContextVar).
+#
+#   jockey_runs  — Append-only history of plan executions. PK=plan_id, SK=run_id
+#                  (ISO-prefixed ULID so range queries sort newest-last). 30-day
+#                  TTL via `expires_at` keeps the table small; status + result_text
+#                  + error are populated by the mining-run Lambda.
+
+resource "aws_dynamodb_table" "jockey_plans" {
+  name         = "${local.fqname}-jockey-plans"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "plan_id"
+
+  point_in_time_recovery { enabled = true }
+
+  attribute {
+    name = "plan_id"
+    type = "S"
+  }
+  attribute {
+    name = "knowledge_store_id"
+    type = "S"
+  }
+  attribute {
+    name = "created_at"
+    type = "S"
+  }
+
+  global_secondary_index {
+    name            = "by-ks"
+    hash_key        = "knowledge_store_id"
+    range_key       = "created_at"
+    projection_type = "ALL"
+  }
+}
+
+resource "aws_dynamodb_table" "jockey_runs" {
+  name         = "${local.fqname}-jockey-runs"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "plan_id"
+  range_key    = "run_id"
+
+  point_in_time_recovery { enabled = true }
+
+  attribute {
+    name = "plan_id"
+    type = "S"
+  }
+  attribute {
+    name = "run_id"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+}

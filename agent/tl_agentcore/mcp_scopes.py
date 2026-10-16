@@ -45,8 +45,7 @@ ALL_SCOPES: frozenset[str] = frozenset({
 # Only tools that exist on this branch are listed. Follow-on PRs add their
 # tools here as they land (manage_memory + save_tref_to_memory in PR #16;
 # get_transcript / get_shot_timeline / get_audio_context in PR #17;
-# save_artifact / open_artifact / list_artifacts in PR #18;
-# mining tools in PR #10).
+# save_artifact / open_artifact / list_artifacts in PR #18).
 TOOL_SCOPES: dict[str, str] = {
     # Tier 0 — AWS-native retrieval
     "vector_search":                   SCOPE_READ,
@@ -62,6 +61,13 @@ TOOL_SCOPES: dict[str, str] = {
     "lookup_event":                    SCOPE_READ,
     # On-demand asset registration (PR #8)
     "add_media":                       SCOPE_INGEST,
+    # Mining plans (PR #10): save/list/run/list_runs. list + list_runs are
+    # read-only but still gate behind jockey.mining — Jockey models mining
+    # as a separate capability from general reads, and we honor that split.
+    "jockey_save":                     SCOPE_MINING,
+    "jockey_list":                     SCOPE_MINING,
+    "jockey_run":                      SCOPE_MINING,
+    "jockey_list_runs":                SCOPE_MINING,
     # Tier 2 — Bedrock Pegasus grounding
     "pegasus_analyze":                 SCOPE_READ,
     "pegasus_segments":                SCOPE_READ,
