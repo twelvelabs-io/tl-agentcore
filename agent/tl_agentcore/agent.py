@@ -22,6 +22,11 @@ through Bedrock Marketplace under the customer's IAM.
                                      entity graph (no model call).
     list_cached_entities           — All cross-asset entities (by kind, etc.).
 
+  On-demand asset registration
+    add_media                      — Register a new S3-hosted asset into a KS
+                                     mid-conversation (DDB only; batch ingest
+                                     still needed to make it searchable).
+
   Tier 2 — On-demand grounding (Bedrock Pegasus 1.5)
     pegasus_analyze                — One clip → take-note via s3Location.
                                      Supports JSON-schema structured output,
@@ -48,7 +53,10 @@ import base64
 import json
 import math
 import os
+import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
+from datetime import datetime, timezone
 from typing import Optional
 
 import boto3
@@ -97,6 +105,7 @@ CLIPS_BUCKET_OWNER = os.environ.get("CLIPS_BUCKET_OWNER")  # account id
 KB_CACHE_TABLE = os.environ.get("KB_CACHE_TABLE")
 RIGHTS_TABLE = os.environ.get("RIGHTS_TABLE")
 AUDIENCES_TABLE = os.environ.get("AUDIENCES_TABLE")
+ASSETS_TABLE = os.environ.get("ASSETS_TABLE")  # PR #8: add_media writes here
 
 _s3v = boto3.client("s3vectors", region_name=AWS_REGION)
 _bedrock_rt = boto3.client("bedrock-runtime", region_name=AWS_REGION)
@@ -114,6 +123,73 @@ def _secs_to_hhmmss(s) -> str:
     h, rem = divmod(total, 3600)
     m, sec = divmod(rem, 60)
     return f"{h:02d}:{m:02d}:{sec:02d}"
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ═══ Selections: per-turn working set (Jockey parity, PR #8) ═════════════════
+# The browser can attach a `selections` list to each WS turn: the clips (and
+# optional time windows) the user is currently focused on in the UI. The
+# runtime calls set_selections_from_payload() at turn start to stash the
+# normalized list on this ContextVar; content-domain tools (pegasus_analyze,
+# zoom_in_video, lookup_asset_profile, etc.) read it via _current_selections()
+# to default their asset_id / start / end / knowledge_store_id args when the
+# caller didn't pass them. Explicit tool-call args always win over selections.
+#
+# Shape (normalized, after set_selections_from_payload):
+#   [{"asset_id": "<24-hex>",
+#     "start_sec": 15.0?,
+#     "end_sec":   30.0?,
+#     "knowledge_store_id": "ks_..."?}]
+#
+# Entries missing asset_id are dropped. All numeric fields are coerced to
+# float. Called with None or [] clears the ContextVar for this turn.
+
+_selections_var: ContextVar[Optional[list]] = ContextVar(
+    "tl_agentcore_selections", default=None,
+)
+
+
+def set_selections_from_payload(selections) -> list:
+    normalized: list = []
+    if isinstance(selections, list):
+        for s in selections:
+            if not isinstance(s, dict):
+                continue
+            aid = s.get("asset_id")
+            if not aid:
+                continue
+            entry: dict = {"asset_id": str(aid)}
+            for k in ("start_sec", "end_sec"):
+                v = s.get(k)
+                if v is None:
+                    continue
+                try:
+                    entry[k] = float(v)
+                except (TypeError, ValueError):
+                    pass
+            ks = s.get("knowledge_store_id")
+            if ks:
+                entry["knowledge_store_id"] = str(ks)
+            normalized.append(entry)
+    _selections_var.set(normalized)
+    return normalized
+
+
+def _current_selections() -> list:
+    return _selections_var.get() or []
+
+
+def _sel_default(key: str, current):
+    """If `current` is None/empty, pull the same key from selections[0]."""
+    if current is not None and current != "":
+        return current
+    sel = _current_selections()
+    if not sel:
+        return current
+    return sel[0].get(key, current)
 
 
 # ═══ DDB helpers (kb_cache, rights, audiences) ═══════════════════════════════
@@ -387,6 +463,9 @@ def vector_search(
     """
     if not query_text:
         return {"error": "query_text is required"}
+    # Default ks scope from the user's current selection when the agent
+    # didn't explicitly pass one (Jockey "selections" semantics, PR #8).
+    knowledge_store_id = _sel_default("knowledge_store_id", knowledge_store_id)
     if not VECTOR_BUCKET_NAME:
         return {"error": "VECTOR_BUCKET_NAME not configured"}
     if not VECTOR_INDEX_NAME and not all(_MODALITY_INDEX_MAP.values()):
@@ -699,6 +778,8 @@ def list_cached_entities(
 
 def _asset_profile_dict(knowledge_store_id: str, asset_id: str) -> dict:
     """Shared body for lookup_asset_profile / get_content_profile."""
+    knowledge_store_id = _sel_default("knowledge_store_id", knowledge_store_id)
+    asset_id = _sel_default("asset_id", asset_id)
     if not knowledge_store_id or not asset_id:
         return {"cached": False, "error": "knowledge_store_id and asset_id required"}
     item = _ddb_kb_get(f"ks#{knowledge_store_id}", f"ASSET#{asset_id}")
@@ -756,6 +837,92 @@ def get_content_profile(knowledge_store_id: str, asset_id: str) -> dict:
     return _asset_profile_dict(knowledge_store_id, asset_id)
 
 
+# ═══ add_media: on-demand asset registration (PR #8) ═════════════════════════
+
+def _parse_s3_uri(uri: str) -> tuple[str, str]:
+    """Return (bucket, key) for an s3:// URI, or ("", "") if malformed."""
+    if not uri.startswith("s3://"):
+        return "", ""
+    rest = uri[len("s3://"):]
+    bucket, _, key = rest.partition("/")
+    return (bucket, key) if (bucket and key) else ("", "")
+
+
+@tool
+def add_media(
+    source: str,
+    knowledge_store_id: str,
+    title: Optional[str] = None,
+) -> dict:
+    """Register a new asset into a knowledge store, mid-conversation.
+
+    Writes a row to the `assets` DDB table so the asset_id becomes a
+    first-class citizen of this KS. **This is register-only** — vectors are
+    not embedded and the kb_cache per-asset profile is not built. For the
+    asset to become searchable through `vector_search` and
+    `lookup_asset_profile`, the operator still runs the offline batch:
+    `scripts/ingest_vectors.py <ks_id>` + `scripts/ingest-kb-cache.py <ks_id>`.
+    Pegasus tools (`pegasus_analyze`, `zoom_in_video`, `pegasus_segments`)
+    work immediately against the asset_id because they read bytes from
+    `s3://CLIPS_BUCKET_NAME/clips/<asset_id>.mp4` directly — but that path
+    must already exist (either the operator uploaded the mp4 at that key, or
+    `source` points to it).
+
+    Args:
+        source: `s3://<bucket>/<key>` URI of the video object. The runtime
+            must be able to `s3:GetObject` on this URI (same clips bucket, or
+            a cross-account bucket whose policy allows this account to read).
+            Non-S3 schemes are deferred.
+        knowledge_store_id: the KS this asset joins (ks_...).
+        title: optional human-readable name shown in the UI.
+
+    Returns:
+        {asset_id, knowledge_store_id, source, title, status, created_at, note}
+        on success, or {"error": "..."} on failure.
+    """
+    if not source:
+        return {"error": "source is required (s3://bucket/key)"}
+    if not knowledge_store_id:
+        return {"error": "knowledge_store_id is required"}
+    if not ASSETS_TABLE:
+        return {"error": "ASSETS_TABLE env var not set on the runtime"}
+    bucket, key = _parse_s3_uri(source)
+    if not bucket:
+        return {"error": f"source must be an s3:// URI (got {source!r})"}
+    try:
+        _s3.head_object(Bucket=bucket, Key=key)
+    except Exception as e:
+        return {"error": f"cannot read {source}: {e}"}
+    asset_id = uuid.uuid4().hex[:24]
+    created_at = _utcnow_iso()
+    item: dict = {
+        "asset_id":           {"S": asset_id},
+        "knowledge_store_id": {"S": knowledge_store_id},
+        "created_at":         {"S": created_at},
+        "source":             {"S": source},
+        "status":             {"S": "registered"},
+    }
+    if title:
+        item["title"] = {"S": title}
+    try:
+        _ddb.put_item(TableName=ASSETS_TABLE, Item=item)
+    except Exception as e:
+        return {"error": f"ddb put_item failed: {e}"}
+    return {
+        "asset_id":           asset_id,
+        "knowledge_store_id": knowledge_store_id,
+        "source":             source,
+        "title":              title,
+        "status":             "registered",
+        "created_at":         created_at,
+        "note": (
+            "Registered. Pegasus tools work immediately against "
+            "s3://CLIPS_BUCKET/clips/<asset_id>.mp4; vector_search and "
+            "lookup_asset_profile require the offline batch ingest to run."
+        ),
+    }
+
+
 # ═══ Tier 2: Live grounding via Bedrock Pegasus ═══════════════════════════════
 
 @tool
@@ -805,6 +972,11 @@ def pegasus_analyze(
         Pegasus's grounded text response. If the generation was cut off by
         max_tokens, the string ends with "[truncated: hit max_tokens]".
     """
+    # Selections defaulting (PR #8): if the agent didn't pass target /
+    # bounds, fall back to the first selection in the user's working set.
+    target = _sel_default("asset_id", target)
+    start_time = _sel_default("start_sec", start_time)
+    end_time = _sel_default("end_sec", end_time)
     if not target:
         return "error: target asset_id is required"
     if not prompt:
@@ -866,6 +1038,11 @@ def pegasus_segments(
         Parse it to iterate segments; each carries `id`, `start_sec`,
         `end_sec`, and the fields declared in its matching definition.
     """
+    # Selections defaulting (PR #8): if the agent didn't pass target /
+    # bounds, fall back to the first selection in the user's working set.
+    target = _sel_default("asset_id", target)
+    start_time = _sel_default("start_sec", start_time)
+    end_time = _sel_default("end_sec", end_time)
     if not target:
         return "error: target asset_id is required"
     if not segment_definitions:
@@ -1044,8 +1221,15 @@ def zoom_in_video(
         {asset_id, start_sec, end_sec, duration_sec, question, text}. `text`
         is Pegasus's grounded response.
     """
+    # Selections defaulting (PR #8): if the agent didn't pass asset_id or
+    # bounds, fall back to the first selection in the user's working set.
+    asset_id = _sel_default("asset_id", asset_id)
+    start_sec = _sel_default("start_sec", start_sec)
+    end_sec = _sel_default("end_sec", end_sec)
     if not asset_id:
         return {"error": "asset_id is required"}
+    if start_sec is None or end_sec is None:
+        return {"error": "start_sec and end_sec required (pass directly or via selections[0])"}
     try:
         start_sec = max(0.0, float(start_sec))
         end_sec = float(end_sec)
@@ -1454,6 +1638,14 @@ The active `knowledge_store_id` is provided in the user message metadata as `[ks
 
 If the cache returns `cached: False` or no matches, fall through to Tier 2.
 
+## Working set / selections
+
+When the user picks clips in the UI, the runtime attaches them as a `selections` array and prepends a one-line `[selections: ...]` marker to the message. Each entry is `{asset_id, start_sec?, end_sec?, knowledge_store_id?}`. The user usually means *these* when they say "this clip", "that moment", "those three". **Tool calls default any missing `asset_id` / `start` / `end` / `knowledge_store_id` from `selections[0]`**, so a bare `zoom_in_video()` or `pegasus_analyze(prompt="…")` works when a selection is active. Pass explicit args to override — they always win.
+
+## On-demand asset registration
+
+**add_media(source, knowledge_store_id, title?)** — register an S3-hosted video object as a new asset in a KS, mid-conversation. Writes an assets DDB row only; this is **register-only**, so `pegasus_analyze` / `zoom_in_video` / `pegasus_segments` work against the new `asset_id` immediately (they read bytes from the S3 key directly) but `vector_search` and `lookup_asset_profile` won't find it until the operator runs the offline ingest batch. Returns `{asset_id, status, note, …}`. Use when the user says "pull in that clip at s3://…".
+
 ## Tier 2 — On-demand grounding (Bedrock Pegasus 1.5 · 3–15 s)
 
 1. **pegasus_analyze(target, prompt, response_schema?, reference_images?, start_time?, end_time?)** — single-clip generation. Reads `s3://CLIPS_BUCKET_NAME/clips/<asset_id>.mp4` directly with the runtime's IAM role. Use ONLY when cached `lookup_asset_profile` doesn't suffice — "what's visibly happening here", "is this shot bright enough", "what's being said". Pass `response_schema` (a JSON Schema dict) to force structured JSON output. Pass `reference_images` (list of URLs or data URIs) to ground the prompt against visual references — e.g. `pegasus_analyze(asset_id, "Does <@ref_0> appear in this clip?", reference_images=[url])`. Images are auto-named `ref_0, ref_1, ...`; the prompt must reference each one via its `<@name>` placeholder (the tool prepends them if you don't). Pass `start_time` / `end_time` (seconds) to bound analysis to a specific window of a long clip instead of ingesting the whole file.
@@ -1670,6 +1862,8 @@ def build_agent(access_token: Optional[str] = None) -> tuple[Agent, str]:
             get_kb_overview, list_kb_assets, lookup_asset_profile, get_content_profile,
             find_cached_entity_appearances, list_cached_entities,
             list_kb_events, lookup_event,
+            # On-demand asset registration (brings new media into a KS mid-turn)
+            add_media,
             # Tier 2 — On-demand grounding via Bedrock Pegasus
             pegasus_analyze, pegasus_segments, zoom_in_video,
             # Ancillary domain stores (rights + audience cohorts in DDB)
