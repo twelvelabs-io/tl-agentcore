@@ -97,6 +97,12 @@ resource "aws_bedrockagentcore_agent_runtime" "this" {
     MINING_RUN_LAMBDA_ARN            = aws_lambda_function.mining_run.arn
     MINING_SCHEDULER_GROUP           = aws_scheduler_schedule_group.mining.name
     MINING_SCHEDULER_TARGET_ROLE_ARN = aws_iam_role.mining_scheduler_target.arn
+    # PR #11: generate_video delegates to the existing stitch MediaConvert
+    # lambda via direct lambda:Invoke (HTTP-API-shaped payload), reusing the
+    # same job-building code the UI's "Render preview" button hits. generate_html_app
+    # uses the Claude Sonnet model already configured via MODEL_ID. execute_code
+    # has no external deps.
+    STITCH_LAMBDA_ARN = aws_lambda_function.stitch.arn
     # v0.4 hybrid entity-reID: per-KS Rekognition collection id is
     # derived as `<STACK_FQNAME>-ks-<ks_id>`. Marengo image-embed
     # async-invoke needs the bucket owner for s3Location.bucketOwner.

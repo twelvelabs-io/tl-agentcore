@@ -72,6 +72,14 @@ TOOL_SCOPES: dict[str, str] = {
     "pegasus_analyze":                 SCOPE_READ,
     "pegasus_segments":                SCOPE_READ,
     "zoom_in_video":                   SCOPE_READ,
+    # Generation (PR #11). All read-equivalent: Claude Sonnet draft, a
+    # MediaConvert render that writes to the already-controlled clips bucket,
+    # and a sandboxed Python eval. No new auth surface — grouped under
+    # jockey.read so an MCP client with read scope sees the full generation
+    # tier.
+    "generate_html_app":               SCOPE_READ,
+    "generate_video":                  SCOPE_READ,
+    "execute_code":                    SCOPE_READ,
     # Ancillary DDB lookups
     "lookup_rights":                   SCOPE_READ,
     "list_audiences":                  SCOPE_READ,
