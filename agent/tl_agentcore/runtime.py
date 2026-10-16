@@ -53,7 +53,12 @@ from bedrock_agentcore.runtime.context import BedrockAgentCoreContext
 from strands.hooks import HookProvider, HookRegistry
 from strands.hooks.events import AfterToolCallEvent, BeforeToolCallEvent
 
-from .agent import build_agent, persist_session_turn, set_user_id_from_token
+from .agent import (
+    build_agent,
+    persist_session_turn,
+    set_selections_from_payload,
+    set_user_id_from_token,
+)
 from .duration_enforcer import _extract_plan_block, enforce_duration_target
 
 app = BedrockAgentCoreApp()
@@ -128,7 +133,24 @@ async def _semantic_stream(payload: dict) -> AsyncIterator[dict]:
                "error": {"message": "missing prompt"}}
         return
 
+    # PR #8: pull the per-turn working set and stash it on the agent's
+    # selections ContextVar. Content-domain tools default their asset_id /
+    # bounds / knowledge_store_id args from selections[0] when the agent
+    # didn't pass them explicitly. We also prepend a one-line [selections:
+    # ...] marker to the user text so the agent SEES the working set and can
+    # reason about it ("that clip", "the second one").
+    selections = set_selections_from_payload(payload.get("selections"))
+
     user_text = prompt if not ks else f"[ks: {ks}]\n{prompt}"
+    if selections:
+        parts = []
+        for s in selections[:8]:
+            bits = [s["asset_id"]]
+            if s.get("start_sec") is not None and s.get("end_sec") is not None:
+                bits.append(f"{s['start_sec']:.1f}-{s['end_sec']:.1f}s")
+            parts.append("/".join(bits))
+        more = "" if len(selections) <= 8 else f" (+{len(selections)-8} more)"
+        user_text = f"[selections: {', '.join(parts)}{more}]\n{user_text}"
 
     yield {"__kind__": "created", "response_id": response_id}
 
