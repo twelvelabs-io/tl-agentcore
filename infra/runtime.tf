@@ -87,6 +87,16 @@ resource "aws_bedrockagentcore_agent_runtime" "this" {
     # the runtime now gets PutItem on it. Read-side (list_kb_assets, etc.)
     # still goes through kb_cache ASSET# rows, which the batch ingest builds.
     ASSETS_TABLE = aws_dynamodb_table.assets.name
+    # PR #10: mining plans. The jockey_save tool writes to JOCKEY_PLANS_TABLE
+    # AND creates an EventBridge Schedule in MINING_SCHEDULER_GROUP whose
+    # target is MINING_RUN_LAMBDA_ARN, assumed via MINING_SCHEDULER_TARGET_ROLE_ARN.
+    # jockey_run invokes the Lambda synchronously; jockey_list_runs reads
+    # JOCKEY_RUNS_TABLE.
+    JOCKEY_PLANS_TABLE               = aws_dynamodb_table.jockey_plans.name
+    JOCKEY_RUNS_TABLE                = aws_dynamodb_table.jockey_runs.name
+    MINING_RUN_LAMBDA_ARN            = aws_lambda_function.mining_run.arn
+    MINING_SCHEDULER_GROUP           = aws_scheduler_schedule_group.mining.name
+    MINING_SCHEDULER_TARGET_ROLE_ARN = aws_iam_role.mining_scheduler_target.arn
     # v0.4 hybrid entity-reID: per-KS Rekognition collection id is
     # derived as `<STACK_FQNAME>-ks-<ks_id>`. Marengo image-embed
     # async-invoke needs the bucket owner for s3Location.bucketOwner.

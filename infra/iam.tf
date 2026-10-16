@@ -183,6 +183,57 @@ data "aws_iam_policy_document" "runtime_perms" {
     actions = ["dynamodb:PutItem", "dynamodb:GetItem"]
     resources = [aws_dynamodb_table.assets.arn]
   }
+  # PR #10: mining plans. The jockey_save / jockey_list / jockey_run /
+  # jockey_list_runs agent tools need:
+  #   - full RW on the plans table (save creates, delete pauses, list queries)
+  #   - Query on the plans by-ks GSI (list filtered by knowledge_store_id)
+  #   - Read on the runs table (jockey_list_runs is a per-plan Query)
+  #   - EventBridge Scheduler C/U/D scoped to our mining group
+  #   - lambda:InvokeFunction on the mining-run Lambda (jockey_run sync path)
+  #   - iam:PassRole on the scheduler-target role, so scheduler:CreateSchedule
+  #     can hand that role to EventBridge when it creates a per-plan Schedule
+  statement {
+    sid = "MiningPlansDdb"
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:PutItem",
+      "dynamodb:UpdateItem",
+      "dynamodb:DeleteItem",
+      "dynamodb:Query",
+    ]
+    resources = [
+      aws_dynamodb_table.jockey_plans.arn,
+      "${aws_dynamodb_table.jockey_plans.arn}/index/by-ks",
+      aws_dynamodb_table.jockey_runs.arn,
+    ]
+  }
+  statement {
+    sid = "MiningScheduler"
+    actions = [
+      "scheduler:CreateSchedule",
+      "scheduler:UpdateSchedule",
+      "scheduler:DeleteSchedule",
+      "scheduler:GetSchedule",
+    ]
+    resources = [
+      "arn:aws:scheduler:${var.region}:${data.aws_caller_identity.current.account_id}:schedule/${aws_scheduler_schedule_group.mining.name}/*",
+    ]
+  }
+  statement {
+    sid     = "MiningRunInvoke"
+    actions = ["lambda:InvokeFunction"]
+    resources = [aws_lambda_function.mining_run.arn]
+  }
+  statement {
+    sid     = "MiningSchedulerPassRole"
+    actions = ["iam:PassRole"]
+    resources = [aws_iam_role.mining_scheduler_target.arn]
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["scheduler.amazonaws.com"]
+    }
+  }
 }
 
 resource "aws_iam_role_policy" "runtime" {

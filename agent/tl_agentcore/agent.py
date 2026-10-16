@@ -27,6 +27,13 @@ through Bedrock Marketplace under the customer's IAM.
                                      mid-conversation (DDB only; batch ingest
                                      still needed to make it searchable).
 
+  Mining plans (EventBridge schedule + mining-run Lambda)
+    jockey_save                    — Save prompt+ks+schedule; creates DDB row
+                                     and an EventBridge Schedule in one call.
+    jockey_list                    — List saved plans (optionally by KS).
+    jockey_run                     — Fire a plan now (sync Lambda invoke).
+    jockey_list_runs               — Per-plan run history (newest first).
+
   Tier 2 — On-demand grounding (Bedrock Pegasus 1.5)
     pegasus_analyze                — One clip → take-note via s3Location.
                                      Supports JSON-schema structured output,
@@ -107,11 +114,23 @@ RIGHTS_TABLE = os.environ.get("RIGHTS_TABLE")
 AUDIENCES_TABLE = os.environ.get("AUDIENCES_TABLE")
 ASSETS_TABLE = os.environ.get("ASSETS_TABLE")  # PR #8: add_media writes here
 
+# PR #10: mining plans — jockey_save / jockey_list / jockey_run /
+# jockey_list_runs. All five env vars are set by infra/runtime.tf; empty
+# strings cause the matching tool to short-circuit with a clear error
+# instead of attempting a doomed boto call.
+JOCKEY_PLANS_TABLE               = os.environ.get("JOCKEY_PLANS_TABLE")
+JOCKEY_RUNS_TABLE                = os.environ.get("JOCKEY_RUNS_TABLE")
+MINING_RUN_LAMBDA_ARN            = os.environ.get("MINING_RUN_LAMBDA_ARN")
+MINING_SCHEDULER_GROUP           = os.environ.get("MINING_SCHEDULER_GROUP")
+MINING_SCHEDULER_TARGET_ROLE_ARN = os.environ.get("MINING_SCHEDULER_TARGET_ROLE_ARN")
+
 _s3v = boto3.client("s3vectors", region_name=AWS_REGION)
 _bedrock_rt = boto3.client("bedrock-runtime", region_name=AWS_REGION)
 _ddb = boto3.client("dynamodb", region_name=AWS_REGION)
 _rek = boto3.client("rekognition", region_name=AWS_REGION)
 _s3 = boto3.client("s3", region_name=AWS_REGION)
+_scheduler = boto3.client("scheduler", region_name=AWS_REGION)
+_lambda = boto3.client("lambda", region_name=AWS_REGION)
 
 
 def _secs_to_hhmmss(s) -> str:
@@ -923,6 +942,265 @@ def add_media(
     }
 
 
+# ═══ Mining plans (PR #10): jockey_save / list / run / list_runs ═════════════
+#
+# A "plan" is a saved prompt + ks that runs on an EventBridge schedule. The
+# mining-run Lambda does the actual work; these tools own the plan rows,
+# the EventBridge Schedules, and the Lambda invoke.
+#
+# Plans are KS-scoped, NOT user-scoped (user_id ContextVar lands with PR
+# #16; follow-up adds a by-user GSI + filtering).
+#
+# Schedule-expression validation is deliberately lenient: EventBridge
+# accepts `rate(N unit)` and `cron(...)` syntaxes with distinct rules. We
+# reject only empty/missing values here and let CreateSchedule produce the
+# authoritative error on malformed inputs.
+
+_JOCKEY_MAX_LIST = 100
+_JOCKEY_RUN_WAIT_SECS = 180  # cap jockey_run(wait=True) at 3 min of poll
+
+
+def _jockey_schedule_name(plan_id: str) -> str:
+    """Deterministic Schedule name derived from plan_id, so delete/update
+    don't need an extra Query round-trip."""
+    return f"jockey-{plan_id}"
+
+
+def _jockey_ddb_plan_item(row: dict) -> dict:
+    return {k: _ddb_value(v) for k, v in row.items() if v is not None}
+
+
+def _jockey_validate_schedule(expr: str) -> Optional[str]:
+    expr = (expr or "").strip()
+    if not expr:
+        return "schedule_expression is required (e.g. 'rate(1 day)' or 'cron(0 9 * * ? *)')"
+    if not (expr.startswith("rate(") or expr.startswith("cron(") or expr.startswith("at(")):
+        return (
+            f"schedule_expression must start with rate(…), cron(…), or at(…); "
+            f"got {expr!r}"
+        )
+    return None
+
+
+@tool
+def jockey_save(
+    prompt: str,
+    knowledge_store_id: str,
+    schedule_expression: str,
+    description: Optional[str] = None,
+) -> dict:
+    """Save a mining plan: a prompt the agent should re-run on a schedule.
+
+    Creates both the plan row (in `JOCKEY_PLANS_TABLE`) AND the matching
+    EventBridge Schedule in the mining group. The Schedule's target is the
+    mining-run Lambda; each fire invokes the Lambda with
+    `{"plan_id": "..."}`, the Lambda loads the plan, invokes the AgentCore
+    runtime with the saved prompt, and writes a `jockey_runs` row.
+
+    Args:
+        prompt: the agent instruction to run each fire (e.g. "find any new
+            tense sports highlights added to this KS in the last 24h and
+            draft a 30s rough cut").
+        knowledge_store_id: the KS the plan runs against (ks_...).
+        schedule_expression: EventBridge expression — `rate(N unit)` or
+            `cron(fields)` or `at(ISO-time)` for a one-shot. See
+            docs.aws.amazon.com/scheduler/latest/UserGuide/schedule-types.html.
+        description: optional human-readable name shown in list / history.
+
+    Returns:
+        {plan_id, schedule_arn, status: "saved"} on success, or
+        {"error": "..."} on failure.
+    """
+    if not prompt:
+        return {"error": "prompt is required"}
+    if not knowledge_store_id:
+        return {"error": "knowledge_store_id is required"}
+    if not JOCKEY_PLANS_TABLE:
+        return {"error": "JOCKEY_PLANS_TABLE env var not set"}
+    if not MINING_SCHEDULER_GROUP or not MINING_RUN_LAMBDA_ARN or not MINING_SCHEDULER_TARGET_ROLE_ARN:
+        return {"error": "mining scheduler env vars not set (MINING_SCHEDULER_GROUP / MINING_RUN_LAMBDA_ARN / MINING_SCHEDULER_TARGET_ROLE_ARN)"}
+    schedule_err = _jockey_validate_schedule(schedule_expression)
+    if schedule_err:
+        return {"error": schedule_err}
+
+    plan_id = uuid.uuid4().hex[:24]
+    created_at = _utcnow_iso()
+    sched_name = _jockey_schedule_name(plan_id)
+
+    item: dict = {
+        "plan_id":             {"S": plan_id},
+        "knowledge_store_id":  {"S": knowledge_store_id},
+        "prompt":              {"S": prompt},
+        "schedule_expression": {"S": schedule_expression},
+        "schedule_name":       {"S": sched_name},
+        "created_at":          {"S": created_at},
+        "enabled":             {"BOOL": True},
+    }
+    if description:
+        item["description"] = {"S": description}
+    try:
+        _ddb.put_item(TableName=JOCKEY_PLANS_TABLE, Item=item)
+    except Exception as e:
+        return {"error": f"ddb put_item failed: {e}"}
+
+    try:
+        resp = _scheduler.create_schedule(
+            Name=sched_name,
+            GroupName=MINING_SCHEDULER_GROUP,
+            ScheduleExpression=schedule_expression,
+            FlexibleTimeWindow={"Mode": "OFF"},
+            Target={
+                "Arn":     MINING_RUN_LAMBDA_ARN,
+                "RoleArn": MINING_SCHEDULER_TARGET_ROLE_ARN,
+                "Input":   json.dumps({"plan_id": plan_id}),
+            },
+            Description=description or f"Mining plan {plan_id} for {knowledge_store_id}",
+        )
+    except Exception as e:
+        # Try to roll back the plan row to avoid orphaning. Best-effort.
+        try:
+            _ddb.delete_item(TableName=JOCKEY_PLANS_TABLE, Key={"plan_id": {"S": plan_id}})
+        except Exception:
+            pass
+        return {"error": f"scheduler create_schedule failed: {e}"}
+
+    sched_arn = resp.get("ScheduleArn", "")
+    try:
+        _ddb.update_item(
+            TableName=JOCKEY_PLANS_TABLE,
+            Key={"plan_id": {"S": plan_id}},
+            UpdateExpression="SET schedule_arn = :a",
+            ExpressionAttributeValues={":a": {"S": sched_arn}},
+        )
+    except Exception:
+        pass
+
+    return {
+        "plan_id":             plan_id,
+        "schedule_arn":        sched_arn,
+        "schedule_expression": schedule_expression,
+        "knowledge_store_id":  knowledge_store_id,
+        "created_at":          created_at,
+        "status":              "saved",
+    }
+
+
+@tool
+def jockey_list(
+    knowledge_store_id: Optional[str] = None,
+    limit: int = 25,
+) -> dict:
+    """List mining plans, optionally filtered to one knowledge store.
+
+    Args:
+        knowledge_store_id: optional ks_... filter. When omitted, scans the
+            whole table (bounded by `limit`).
+        limit: how many plans to return (hard cap 100).
+
+    Returns:
+        {plans: [{plan_id, knowledge_store_id, prompt, schedule_expression,
+         description, created_at, enabled}, ...]}.
+    """
+    if not JOCKEY_PLANS_TABLE:
+        return {"error": "JOCKEY_PLANS_TABLE env var not set"}
+    limit = max(1, min(_JOCKEY_MAX_LIST, int(limit)))
+    knowledge_store_id = _sel_default("knowledge_store_id", knowledge_store_id)
+    try:
+        if knowledge_store_id:
+            r = _ddb.query(
+                TableName=JOCKEY_PLANS_TABLE,
+                IndexName="by-ks",
+                KeyConditionExpression="knowledge_store_id = :k",
+                ExpressionAttributeValues={":k": {"S": knowledge_store_id}},
+                ScanIndexForward=False,  # newest first
+                Limit=limit,
+            )
+        else:
+            r = _ddb.scan(TableName=JOCKEY_PLANS_TABLE, Limit=limit)
+    except Exception as e:
+        return {"error": f"ddb query failed: {e}"}
+    rows = r.get("Items") or []
+    return {"plans": [_jockey_ddb_plan_item(row) for row in rows]}
+
+
+@tool
+def jockey_run(
+    plan_id: str,
+    wait: bool = True,
+) -> dict:
+    """Run a saved mining plan on demand (synchronously invokes the
+    mining-run Lambda). Returns the Lambda's response: {plan_id, run_id,
+    status, result_preview, tool_path} on success.
+
+    Args:
+        plan_id: the id returned by jockey_save.
+        wait: True (default) runs synchronously (lambda:Invoke with
+            RequestResponse); False fires the Lambda async and returns
+            {status: "triggered"}.
+
+    Returns:
+        Lambda response dict on sync, or {"status": "triggered", "plan_id":...}
+        on async, or {"error": "..."} on failure.
+    """
+    if not plan_id:
+        return {"error": "plan_id is required"}
+    if not MINING_RUN_LAMBDA_ARN:
+        return {"error": "MINING_RUN_LAMBDA_ARN env var not set"}
+    payload = json.dumps({"plan_id": plan_id}).encode()
+    try:
+        resp = _lambda.invoke(
+            FunctionName=MINING_RUN_LAMBDA_ARN,
+            InvocationType="RequestResponse" if wait else "Event",
+            Payload=payload,
+        )
+    except Exception as e:
+        return {"error": f"lambda invoke failed: {e}"}
+    if not wait:
+        return {"status": "triggered", "plan_id": plan_id}
+    body_bytes = resp.get("Payload").read() if resp.get("Payload") else b""
+    try:
+        body = json.loads(body_bytes)
+    except Exception:
+        body = {"raw": body_bytes.decode("utf-8", errors="replace")[:400]}
+    if resp.get("FunctionError"):
+        return {"error": f"lambda function error: {body}"}
+    return body
+
+
+@tool
+def jockey_list_runs(
+    plan_id: str,
+    limit: int = 20,
+) -> dict:
+    """List recent runs of a mining plan, newest first.
+
+    Args:
+        plan_id: the plan to list runs for.
+        limit: how many runs to return (hard cap 100).
+
+    Returns:
+        {plan_id, runs: [{run_id, status, started_at, completed_at,
+         result_text, error, tool_path}, ...]}.
+    """
+    if not plan_id:
+        return {"error": "plan_id is required"}
+    if not JOCKEY_RUNS_TABLE:
+        return {"error": "JOCKEY_RUNS_TABLE env var not set"}
+    limit = max(1, min(_JOCKEY_MAX_LIST, int(limit)))
+    try:
+        r = _ddb.query(
+            TableName=JOCKEY_RUNS_TABLE,
+            KeyConditionExpression="plan_id = :p",
+            ExpressionAttributeValues={":p": {"S": plan_id}},
+            ScanIndexForward=False,
+            Limit=limit,
+        )
+    except Exception as e:
+        return {"error": f"ddb query failed: {e}"}
+    rows = r.get("Items") or []
+    return {"plan_id": plan_id, "runs": [_jockey_ddb_plan_item(row) for row in rows]}
+
+
 # ═══ Tier 2: Live grounding via Bedrock Pegasus ═══════════════════════════════
 
 @tool
@@ -1646,6 +1924,15 @@ When the user picks clips in the UI, the runtime attaches them as a `selections`
 
 **add_media(source, knowledge_store_id, title?)** — register an S3-hosted video object as a new asset in a KS, mid-conversation. Writes an assets DDB row only; this is **register-only**, so `pegasus_analyze` / `zoom_in_video` / `pegasus_segments` work against the new `asset_id` immediately (they read bytes from the S3 key directly) but `vector_search` and `lookup_asset_profile` won't find it until the operator runs the offline ingest batch. Returns `{asset_id, status, note, …}`. Use when the user says "pull in that clip at s3://…".
 
+## Mining plans (saved prompts on a schedule)
+
+A **mining plan** is a saved agent prompt that re-runs on a schedule — for recurring work like "every Monday 9am, find any new tense sports clips added to this KS in the last 24h and draft a 30s rough cut". Four tools:
+
+1. **jockey_save(prompt, knowledge_store_id, schedule_expression, description?)** — writes the plan AND creates its EventBridge Schedule. `schedule_expression` is EventBridge syntax: `rate(1 day)`, `rate(6 hours)`, `cron(0 9 * * ? *)` (every day at 09:00 UTC), or `at(2026-11-01T15:00:00)` for a one-shot. Returns `{plan_id, schedule_arn, status}`.
+2. **jockey_list(knowledge_store_id?, limit?)** — list plans, optionally filtered to one KS. Returns `{plans: […]}`. Plans are **KS-scoped** today, not user-scoped — user-level ownership is a follow-up when PR #16's user_id ContextVar lands.
+3. **jockey_run(plan_id, wait=True)** — execute a plan immediately (synchronously invokes the mining-run Lambda). Use for ad-hoc re-runs or testing a plan you just saved. Returns `{plan_id, run_id, status, result_preview, tool_path}`.
+4. **jockey_list_runs(plan_id, limit?)** — history of a plan's executions, newest first. Returns `{plan_id, runs: […]}` where each run carries `status, started_at, completed_at, result_text, tool_path`. Runs are TTL'd to 30 days.
+
 ## Tier 2 — On-demand grounding (Bedrock Pegasus 1.5 · 3–15 s)
 
 1. **pegasus_analyze(target, prompt, response_schema?, reference_images?, start_time?, end_time?)** — single-clip generation. Reads `s3://CLIPS_BUCKET_NAME/clips/<asset_id>.mp4` directly with the runtime's IAM role. Use ONLY when cached `lookup_asset_profile` doesn't suffice — "what's visibly happening here", "is this shot bright enough", "what's being said". Pass `response_schema` (a JSON Schema dict) to force structured JSON output. Pass `reference_images` (list of URLs or data URIs) to ground the prompt against visual references — e.g. `pegasus_analyze(asset_id, "Does <@ref_0> appear in this clip?", reference_images=[url])`. Images are auto-named `ref_0, ref_1, ...`; the prompt must reference each one via its `<@name>` placeholder (the tool prepends them if you don't). Pass `start_time` / `end_time` (seconds) to bound analysis to a specific window of a long clip instead of ingesting the whole file.
@@ -1864,6 +2151,8 @@ def build_agent(access_token: Optional[str] = None) -> tuple[Agent, str]:
             list_kb_events, lookup_event,
             # On-demand asset registration (brings new media into a KS mid-turn)
             add_media,
+            # Mining plans (saved prompts on an EventBridge schedule)
+            jockey_save, jockey_list, jockey_run, jockey_list_runs,
             # Tier 2 — On-demand grounding via Bedrock Pegasus
             pegasus_analyze, pegasus_segments, zoom_in_video,
             # Ancillary domain stores (rights + audience cohorts in DDB)
