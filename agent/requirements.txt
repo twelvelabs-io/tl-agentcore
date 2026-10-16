@@ -12,3 +12,9 @@ Pillow>=12.2.0
 # come in via strands-agents / bedrock-agentcore.
 idna>=3.15
 python-multipart>=0.0.31
+# PR #9: FastMCP server for OAuth-scope-projected tool exposure to
+# external MCP clients (Claude Desktop, etc.). The MCP SDK ships
+# FastMCP under mcp.server.fastmcp; it is imported lazily so the
+# AgentCore Runtime path does not pay the import cost unless the
+# `python -m tl_agentcore.mcp_server` entrypoint is actually invoked.
+mcp>=1.0
