@@ -733,6 +733,8 @@ def pegasus_analyze(
     temperature: float = 0.2,
     response_schema: Optional[dict] = None,
     reference_images: Optional[list] = None,
+    start_time: Optional[float] = None,
+    end_time: Optional[float] = None,
 ) -> str:
     """Generate a take-note about a specific clip using Bedrock Pegasus 1.5.
     Use when the producer asks what a clip visibly contains (subject, action,
@@ -759,6 +761,11 @@ def pegasus_analyze(
             prompt to reference each image via its `<@name>` placeholder
             (e.g. "Does <@ref_0> appear in this clip?"). If the prompt
             doesn't include placeholders, this tool prepends them.
+        start_time: optional sub-clip window start in seconds. When set,
+            Pegasus bounds analysis to the window instead of ingesting the
+            whole file. Pass without end_time for an open-ended tail.
+        end_time: optional sub-clip window end in seconds. Pass without
+            start_time for an open-ended head.
 
     Returns:
         Pegasus's grounded text response. If the generation was cut off by
@@ -775,6 +782,8 @@ def pegasus_analyze(
         max_output_tokens=max_tokens,
         response_schema=response_schema,
         reference_images=reference_images,
+        start_time=start_time,
+        end_time=end_time,
     )
 
 
@@ -784,15 +793,18 @@ def pegasus_segments(
     segment_definitions: list,
     max_tokens: int = 4096,
     temperature: float = 0.0,
+    start_time: Optional[float] = None,
+    end_time: Optional[float] = None,
 ) -> str:
     """Extract structured, timestamped segments from a clip using Pegasus 1.5
     `time_based_metadata` mode. Pegasus auto-segments the video and populates
-    the fields you define for each segment — strictly more powerful than
-    manually bounding a sub-clip.
+    the fields you define for each segment.
 
-    Use when the producer asks for a structured breakdown of a whole clip:
-    "chapterize this trailer", "list every shot with a speaking subject",
-    "mark the beats and label each one with mood + visible subjects".
+    Use when the producer asks for a structured breakdown: "chapterize this
+    trailer", "list every shot with a speaking subject", "mark the beats
+    and label each one with mood + visible subjects". Combine with
+    `start_time`/`end_time` to segment only a window of a long clip (e.g.
+    chapterize minute 10-15 of a broadcast) instead of the whole file.
 
     Args:
         target: asset_id (24-hex).
@@ -811,6 +823,9 @@ def pegasus_segments(
         max_tokens: response cap (512-98304).
         temperature: sampling temperature (lower is more deterministic for
             structured output; defaults to 0).
+        start_time: optional window start in seconds; segmentation is
+            constrained to the window.
+        end_time: optional window end in seconds.
 
     Returns:
         JSON string: `{"segments": [...], "definition_errors": [...]}`.
@@ -826,6 +841,8 @@ def pegasus_segments(
         max_output_tokens=max_tokens,
         analysis_mode="time_based_metadata",
         segment_definitions=segment_definitions,
+        start_time=start_time,
+        end_time=end_time,
     )
 
 
@@ -865,13 +882,15 @@ def _pegasus_bedrock(
     reference_images: Optional[list] = None,
     analysis_mode: str = "general",
     segment_definitions: Optional[list] = None,
+    start_time: Optional[float] = None,
+    end_time: Optional[float] = None,
 ) -> str:
-    # TODO(bedrock-pegasus-1-5): add start_time / end_time sub-clip bounds
-    # once Bedrock exposes them. TL SaaS /analyze accepts those fields today;
-    # the Bedrock schema (as of 2026-10-15) does not — raw-invoke 400s with
-    # "extraneous key not permitted". Smoke the fields quarterly; when they
-    # start returning 200, thread them through this helper and pegasus_analyze.
-    # See memory/project_jockey_parity.md "Open Bedrock gaps" section.
+    # Sub-clip bounds (start_time / end_time, seconds, top-level, snake_case)
+    # went live on Bedrock Pegasus 1.5 ~2026-10-16 — raw-invoke smoke confirmed
+    # both acceptance (200 instead of the previous 400 "extraneous key not
+    # permitted") and that the window is honored, not silently ignored (HEAD
+    # 0-5s on a trailer returned "black screen" while TAIL 55-60s returned
+    # "two moose in a forest"). The AWS docs page hasn't caught up yet.
     if not CLIPS_BUCKET_NAME or not CLIPS_BUCKET_OWNER:
         return "error: CLIPS_BUCKET_NAME / CLIPS_BUCKET_OWNER not configured"
     body: dict = {
@@ -885,6 +904,22 @@ def _pegasus_bedrock(
         "temperature": temperature,
         "maxOutputTokens": max(512, min(98304, int(max_output_tokens))),
     }
+    # Sub-clip bounds: pass as top-level `start_time` / `end_time` seconds.
+    # Either may be set independently (open-ended range on the unset side).
+    if start_time is not None:
+        try:
+            st = max(0.0, float(start_time))
+        except (TypeError, ValueError):
+            return f"error: start_time must be numeric (got {start_time!r})"
+        body["start_time"] = st
+    if end_time is not None:
+        try:
+            et = float(end_time)
+        except (TypeError, ValueError):
+            return f"error: end_time must be numeric (got {end_time!r})"
+        if start_time is not None and et <= body.get("start_time", 0.0):
+            return f"error: end_time ({et}) must be > start_time ({body['start_time']})"
+        body["end_time"] = et
     if analysis_mode == "time_based_metadata":
         if not segment_definitions:
             return "error: segment_definitions required for time_based_metadata mode"
@@ -1321,8 +1356,8 @@ If the cache returns `cached: False` or no matches, fall through to Tier 2.
 
 ## Tier 2 — On-demand grounding (Bedrock Pegasus 1.5 · 3–15 s)
 
-1. **pegasus_analyze(target, prompt, response_schema?, reference_images?)** — single-clip generation. Reads `s3://CLIPS_BUCKET_NAME/clips/<asset_id>.mp4` directly with the runtime's IAM role. Use ONLY when cached `lookup_asset_profile` doesn't suffice — "what's visibly happening here", "is this shot bright enough", "what's being said". Pass `response_schema` (a JSON Schema dict) to force structured JSON output. Pass `reference_images` (list of URLs or data URIs) to ground the prompt against visual references — e.g. `pegasus_analyze(asset_id, "Does <@ref_0> appear in this clip?", reference_images=[url])`. Images are auto-named `ref_0, ref_1, ...`; the prompt must reference each one via its `<@name>` placeholder (the tool prepends them if you don't).
-2. **pegasus_segments(target, segment_definitions)** — chapterize a whole clip. Pegasus auto-segments the video and fills your fields per segment. Use for "list every shot/beat/chapter with …". Returns `{segments: [{id, start_sec, end_sec, …your fields}], definition_errors: []}`.
+1. **pegasus_analyze(target, prompt, response_schema?, reference_images?, start_time?, end_time?)** — single-clip generation. Reads `s3://CLIPS_BUCKET_NAME/clips/<asset_id>.mp4` directly with the runtime's IAM role. Use ONLY when cached `lookup_asset_profile` doesn't suffice — "what's visibly happening here", "is this shot bright enough", "what's being said". Pass `response_schema` (a JSON Schema dict) to force structured JSON output. Pass `reference_images` (list of URLs or data URIs) to ground the prompt against visual references — e.g. `pegasus_analyze(asset_id, "Does <@ref_0> appear in this clip?", reference_images=[url])`. Images are auto-named `ref_0, ref_1, ...`; the prompt must reference each one via its `<@name>` placeholder (the tool prepends them if you don't). Pass `start_time` / `end_time` (seconds) to bound analysis to a specific window of a long clip instead of ingesting the whole file.
+2. **pegasus_segments(target, segment_definitions, start_time?, end_time?)** — chapterize a clip (or a window of a clip). Pegasus auto-segments and fills your fields per segment. Use for "list every shot/beat/chapter with …". Returns `{segments: [{id, start_sec, end_sec, …your fields}], definition_errors: []}`. Pass `start_time`/`end_time` (seconds) to scope segmentation to a window.
 
 ## Ancillary stores (DDB)
 
