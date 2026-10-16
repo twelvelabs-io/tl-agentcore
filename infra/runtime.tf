@@ -81,6 +81,12 @@ resource "aws_bedrockagentcore_agent_runtime" "this" {
     KB_CACHE_TABLE  = aws_dynamodb_table.kb_cache.name
     RIGHTS_TABLE    = aws_dynamodb_table.rights.name
     AUDIENCES_TABLE = aws_dynamodb_table.audiences.name
+    # PR #8: add_media writes a registration row to the assets table so the
+    # agent can bring a new asset into the current KS mid-conversation. The
+    # table + its by-ks GSI already exist (kb_admin / enrich lambdas own them);
+    # the runtime now gets PutItem on it. Read-side (list_kb_assets, etc.)
+    # still goes through kb_cache ASSET# rows, which the batch ingest builds.
+    ASSETS_TABLE = aws_dynamodb_table.assets.name
     # v0.4 hybrid entity-reID: per-KS Rekognition collection id is
     # derived as `<STACK_FQNAME>-ks-<ks_id>`. Marengo image-embed
     # async-invoke needs the bucket owner for s3Location.bucketOwner.
