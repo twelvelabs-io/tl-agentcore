@@ -9,7 +9,7 @@ Jockey scopes.
 
 | Scope                     | Tools (as of this branch)                                                                                                                                           |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `jockey.read`             | `vector_search`, `find_by_image`, `get_kb_overview`, `list_kb_assets`, `lookup_asset_profile`, `get_content_profile`, `find_cached_entity_appearances`, `list_cached_entities`, `list_kb_events`, `lookup_event`, `pegasus_analyze`, `pegasus_segments`, `zoom_in_video`, `lookup_rights`, `list_audiences`, `lookup_audience` |
+| `jockey.read`             | `vector_search`, `find_by_image`, `get_kb_overview`, `list_kb_assets`, `lookup_asset_profile`, `get_content_profile`, `find_cached_entity_appearances`, `list_cached_entities`, `list_kb_events`, `lookup_event`, `pegasus_analyze`, `pegasus_segments`, `zoom_in_video`, `generate_html_app`, `generate_video`, `execute_code`, `lookup_rights`, `list_audiences`, `lookup_audience` |
 | `jockey.ingest`           | `add_media`                                                                                                                                                         |
 | `jockey.artifact-save`    | *(reserved — PR #18 wires `save_artifact` / `open_artifact` / `list_artifacts`)*                                                                                     |
 | `jockey.mining`           | `jockey_save`, `jockey_list`, `jockey_run`, `jockey_list_runs`                                                                                                        |
