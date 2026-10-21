@@ -56,6 +56,7 @@ for the routing playbook.
 
 from __future__ import annotations
 
+import ast as _ast
 import base64
 import json
 import math
@@ -126,6 +127,12 @@ JOCKEY_RUNS_TABLE                = os.environ.get("JOCKEY_RUNS_TABLE")
 MINING_RUN_LAMBDA_ARN            = os.environ.get("MINING_RUN_LAMBDA_ARN")
 MINING_SCHEDULER_GROUP           = os.environ.get("MINING_SCHEDULER_GROUP")
 MINING_SCHEDULER_TARGET_ROLE_ARN = os.environ.get("MINING_SCHEDULER_TARGET_ROLE_ARN")
+
+# PR #11: generation tools — generate_html_app / generate_video / execute_code.
+# STITCH_LAMBDA_ARN wires generate_video to the existing stitch MediaConvert
+# path. The HTML generator reuses MODEL_ID (Claude Sonnet on Bedrock) via the
+# existing _bedrock_rt client. execute_code is pure Python with no AWS reach.
+STITCH_LAMBDA_ARN = os.environ.get("STITCH_LAMBDA_ARN")
 
 _s3v = boto3.client("s3vectors", region_name=AWS_REGION)
 _bedrock_rt = boto3.client("bedrock-runtime", region_name=AWS_REGION)
@@ -1555,6 +1562,287 @@ def _fetch_image_bytes(url: str) -> bytes:
     raise ValueError(f"unsupported reference_url scheme: {url[:40]}")
 
 
+# ═══ Generation tools (PR #11): html app / video / code ═════════════════════
+
+# ─── generate_html_app via Claude Sonnet on Bedrock ─────────────────────────
+_HTML_APP_SYSTEM = (
+    "You generate complete, self-contained single-page HTML applications. "
+    "Output ONLY the HTML — no markdown fences, no commentary, no explanation. "
+    "Start with <!DOCTYPE html> and end with </html>. All CSS inline in <style>; "
+    "all JavaScript inline in <script>. No external script or stylesheet URLs. "
+    "Modern browser-native APIs only; no framework imports."
+)
+_HTML_APP_DEFAULT_MAX_TOKENS = 8192
+
+
+@tool
+def generate_html_app(
+    spec: str,
+    max_tokens: int = _HTML_APP_DEFAULT_MAX_TOKENS,
+    temperature: float = 0.2,
+    title: Optional[str] = None,
+) -> dict:
+    """Generate a self-contained single-page HTML application from a spec.
+
+    Uses Claude Sonnet on Bedrock. Returns the full HTML string plus
+    metadata. **Does not persist the output** — chain to `save_artifact`
+    (kind='html.app') when the user wants the file retained for sharing.
+
+    Args:
+        spec: natural-language description of the app ("A results browser
+            for these 5 Highlight clips: ..."). Include concrete data and
+            layout intent; the model fills in details.
+        max_tokens: ceiling for the generation (default 8192).
+        temperature: sampling temperature; 0.2 keeps the output stable.
+        title: optional title echoed back in the response for the caller.
+
+    Returns:
+        {html, size_bytes, title, truncated}. `truncated=True` means Claude
+        hit max_tokens — bump the budget and retry.
+    """
+    if not spec:
+        return {"error": "spec is required"}
+    body = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens":        max(512, min(8192, int(max_tokens))),
+        "temperature":       float(temperature),
+        "system":            _HTML_APP_SYSTEM,
+        "messages": [{"role": "user", "content": spec}],
+    }
+    try:
+        resp = _bedrock_rt.invoke_model(
+            modelId=MODEL_ID,
+            contentType="application/json",
+            accept="application/json",
+            body=json.dumps(body),
+        )
+        payload = json.loads(resp["body"].read())
+    except Exception as e:
+        return {"error": f"bedrock invoke failed: {e}"}
+    # Messages API returns {content: [{type:"text", text:"..."}], stop_reason: ...}
+    blocks = payload.get("content") or []
+    html_parts = [b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text"]
+    html = "".join(html_parts).strip()
+    # Strip a stray markdown code fence if the model slipped one in.
+    if html.startswith("```"):
+        html = html.split("\n", 1)[1] if "\n" in html else ""
+        if html.endswith("```"):
+            html = html.rsplit("```", 1)[0]
+        html = html.strip()
+    return {
+        "html":        html,
+        "size_bytes":  len(html.encode("utf-8")),
+        "title":       title,
+        "truncated":   payload.get("stop_reason") == "max_tokens",
+    }
+
+
+# ─── generate_video via the stitch MediaConvert Lambda ──────────────────────
+# The stitch lambda already composes an EDL into a playable MP4 via
+# MediaConvert. We invoke it directly (lambda:Invoke RequestResponse) with an
+# HTTP-API-shaped event so stitch's existing handler needs no changes.
+@tool
+def generate_video(edl_plan: dict) -> dict:
+    """Render an EDL plan to a playable MP4 by invoking the stitch pipeline.
+
+    Delegates to the existing MediaConvert path (lambda/stitch) so the agent
+    gets the same semantics as the UI's "Render preview" button without
+    duplicating job-building. Synchronous invoke — returns once stitch has
+    submitted the MediaConvert job and reports back the job id + preview URL.
+    MediaConvert completion itself is async; poll
+    `GET /stitch/{job_id}` or inspect `s3://CLIPS_BUCKET/stitched/<id>/`.
+
+    Args:
+        edl_plan: the EDL plan dict (same shape the SYSTEM_PROMPT emits in
+            `<plan>...</plan>`). Must include `scenes[].clips[]` with
+            `asset_id`, `start_time`, `end_time`.
+
+    Returns:
+        {job_id, status, preview_url, raw}. `raw` carries the full stitch
+        response for debugging. `preview_url` is populated once the stitch
+        lambda knows the destination; it serves at CloudFront `/stitched/`.
+    """
+    if not isinstance(edl_plan, dict):
+        return {"error": "edl_plan must be a dict"}
+    if not STITCH_LAMBDA_ARN:
+        return {"error": "STITCH_LAMBDA_ARN env var not set"}
+    event = {
+        "requestContext":   {"http": {"method": "POST"}},
+        "rawPath":          "/stitch",
+        "headers":          {"content-type": "application/json"},
+        "body":             json.dumps({"plan": edl_plan}),
+        "isBase64Encoded":  False,
+    }
+    try:
+        resp = _lambda.invoke(
+            FunctionName=STITCH_LAMBDA_ARN,
+            InvocationType="RequestResponse",
+            Payload=json.dumps(event).encode(),
+        )
+    except Exception as e:
+        return {"error": f"stitch invoke failed: {e}"}
+    if resp.get("FunctionError"):
+        try:
+            err_body = json.loads(resp["Payload"].read()) if resp.get("Payload") else {}
+        except Exception:
+            err_body = {}
+        return {"error": f"stitch function error: {err_body}"}
+    try:
+        body_bytes = resp.get("Payload").read() if resp.get("Payload") else b"{}"
+        gw_response = json.loads(body_bytes)
+    except Exception as e:
+        return {"error": f"stitch response parse failed: {e}"}
+    inner = {}
+    if isinstance(gw_response, dict) and "body" in gw_response:
+        try:
+            inner = json.loads(gw_response["body"])
+        except Exception:
+            inner = {"raw_body": gw_response.get("body")}
+    else:
+        inner = gw_response if isinstance(gw_response, dict) else {}
+    return {
+        "job_id":       inner.get("jobId") or inner.get("job_id"),
+        "status":       inner.get("status", "submitted"),
+        "preview_url":  inner.get("outputUrl") or inner.get("preview_url"),
+        "raw":          inner,
+    }
+
+
+# ─── execute_code: narrow safe-eval ────────────────────────────────────────
+# Pure-Python expression (or short multi-statement) evaluator intended for
+# "compute a quick number / munge a dict" style asks. Deliberately NOT a
+# full code interpreter. Walks the AST and rejects:
+#   - imports (Import, ImportFrom)
+#   - defs (FunctionDef, AsyncFunctionDef, ClassDef, Lambda)
+#   - attribute access except on allowed objects (there are none in scope)
+#   - calls to anything outside the _SAFE_CALLABLES allowlist
+#   - any name reference outside _SAFE_NAMES
+# Full Bedrock AgentCore Code Interpreter integration is a focused follow-up
+# when that primitive is stable; this covers the long tail cheaply.
+
+_SAFE_CALLABLES = {
+    "abs": abs, "all": all, "any": any, "bool": bool, "dict": dict, "divmod": divmod,
+    "enumerate": enumerate, "filter": filter, "float": float, "int": int, "len": len,
+    "list": list, "map": map, "max": max, "min": min, "range": range, "repr": repr,
+    "reversed": reversed, "round": round, "set": set, "sorted": sorted, "str": str,
+    "sum": sum, "tuple": tuple, "zip": zip,
+}
+_SAFE_NAMES = set(_SAFE_CALLABLES.keys()) | {"True", "False", "None"}
+_FORBIDDEN_NODES = (
+    _ast.Import, _ast.ImportFrom,
+    _ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef, _ast.Lambda,
+    _ast.Attribute,
+    _ast.Try, _ast.Raise, _ast.Global, _ast.Nonlocal,
+    _ast.With, _ast.AsyncWith, _ast.AsyncFor,
+    _ast.Yield, _ast.YieldFrom, _ast.Await,
+)
+_EXECUTE_CODE_SIZE_LIMIT = 4096
+
+
+def _collect_local_names(tree: _ast.AST) -> set[str]:
+    """Names the snippet itself defines — assignment targets, for-loop vars,
+    comprehension targets. Any such name is safe to read later in the snippet."""
+    locals_: set[str] = set()
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.Assign):
+            for t in node.targets:
+                for n in _ast.walk(t):
+                    if isinstance(n, _ast.Name):
+                        locals_.add(n.id)
+        elif isinstance(node, (_ast.AugAssign, _ast.AnnAssign, _ast.NamedExpr)):
+            tgt = node.target
+            if isinstance(tgt, _ast.Name):
+                locals_.add(tgt.id)
+        elif isinstance(node, (_ast.For, _ast.comprehension)):
+            for n in _ast.walk(node.target):
+                if isinstance(n, _ast.Name):
+                    locals_.add(n.id)
+    return locals_
+
+
+def _validate_safe_ast(tree: _ast.AST) -> Optional[str]:
+    allowed_names = _SAFE_NAMES | _collect_local_names(tree)
+    for node in _ast.walk(tree):
+        if isinstance(node, _FORBIDDEN_NODES):
+            return f"forbidden syntax: {type(node).__name__}"
+        if isinstance(node, _ast.Name):
+            if node.id not in allowed_names and not isinstance(node.ctx, _ast.Store):
+                return f"name not allowed: {node.id!r} (not in safe allowlist)"
+        if isinstance(node, _ast.Call):
+            func = node.func
+            if isinstance(func, _ast.Name):
+                if func.id not in _SAFE_CALLABLES and func.id not in allowed_names:
+                    return f"call to disallowed name: {func.id!r}"
+            else:
+                return "only direct name calls are allowed"
+    return None
+
+
+@tool
+def execute_code(code: str) -> dict:
+    """Evaluate a short Python snippet in a narrow sandbox and return the result.
+
+    **Not a full code interpreter.** Pure Python only, no imports, no I/O,
+    no network, no attribute access. The AST is walked and rejects any
+    forbidden syntax before execution. Intended for arithmetic, string
+    manipulation, basic list/dict/set wrangling — the long tail of
+    "compute a quick number" asks. For heavier work (ML, HTTP, file
+    reads), raise it as a limitation to the user.
+
+    Allowed callables: abs, all, any, bool, dict, divmod, enumerate,
+    filter, float, int, len, list, map, max, min, range, repr, reversed,
+    round, set, sorted, str, sum, tuple, zip.
+
+    Args:
+        code: a single expression OR a short statement block whose last
+            line is an expression. 4096-byte input cap.
+
+    Returns:
+        {result, repr, mode}. On any failure (parse error, forbidden
+        syntax, or runtime exception): {"error": "..."}.
+    """
+    if not isinstance(code, str) or not code.strip():
+        return {"error": "code is required (non-empty string)"}
+    if len(code.encode("utf-8")) > _EXECUTE_CODE_SIZE_LIMIT:
+        return {"error": f"code exceeds {_EXECUTE_CODE_SIZE_LIMIT} byte limit"}
+    try:
+        tree = _ast.parse(code, mode="exec")
+    except SyntaxError as e:
+        return {"error": f"syntax error: {e}"}
+    reason = _validate_safe_ast(tree)
+    if reason:
+        return {"error": reason}
+    # Try to evaluate the LAST statement as an expression if it is one, so
+    # the agent sees "x + 1" style one-liners' value in `result`.
+    globals_dict: dict = {"__builtins__": {}, **_SAFE_CALLABLES}
+    locals_dict: dict = {}
+    mode = "exec"
+    last_result = None
+    try:
+        if tree.body and isinstance(tree.body[-1], _ast.Expr):
+            # Separate the trailing expression so we can both exec the lead-in
+            # and eval the final expression.
+            lead = _ast.Module(body=tree.body[:-1], type_ignores=[])
+            tail = _ast.Expression(body=tree.body[-1].value)
+            if tree.body[:-1]:
+                exec(compile(lead, "<execute_code>", "exec"), globals_dict, locals_dict)
+            last_result = eval(compile(tail, "<execute_code>", "eval"), globals_dict, locals_dict)
+            mode = "exec+eval"
+        else:
+            exec(compile(tree, "<execute_code>", "exec"), globals_dict, locals_dict)
+    except Exception as e:
+        return {"error": f"runtime: {type(e).__name__}: {e}"}
+    try:
+        rendered = repr(last_result)[:1000]
+    except Exception:
+        rendered = "<unreprable>"
+    try:
+        serializable = json.loads(json.dumps(last_result))
+    except (TypeError, ValueError):
+        serializable = rendered
+    return {"result": serializable, "repr": rendered, "mode": mode}
+
+
 # ═══ Phase 3 v0.4: Rekognition + Marengo hybrid image search ═════════════════
 # Replaces the bespoke gdino+TAO+Titan pipeline. Per the 4-way eval in
 # docs/v0.4-plan.md:
@@ -2616,6 +2904,14 @@ A **mining plan** is a saved agent prompt that re-runs on a schedule — for rec
 3. **jockey_run(plan_id, wait=True)** — execute a plan immediately (synchronously invokes the mining-run Lambda). Use for ad-hoc re-runs or testing a plan you just saved. Returns `{plan_id, run_id, status, result_preview, tool_path}`.
 4. **jockey_list_runs(plan_id, limit?)** — history of a plan's executions, newest first. Returns `{plan_id, runs: […]}` where each run carries `status, started_at, completed_at, result_text, tool_path`. Runs are TTL'd to 30 days.
 
+## Generation tools (HTML app · video · code eval)
+
+Three tools for producing new material from the plan you've already built. Prefer these over writing freeform output in your reply when the user wants a concrete artifact (something to open, play, or hand to another system).
+
+1. **generate_html_app(spec, max_tokens?, temperature?, title?)** — asks Claude Sonnet (same model you're running on) to produce a self-contained single-page HTML application that matches `spec`. The spec should include concrete data and layout intent — "a results browser for these 5 clips: [list]", not "a nice UI". Returns `{html, size_bytes, title, truncated}`. **Does not persist** — chain to `save_artifact(kind="html.app", payload=html)` when PR #18's artifact store merges. `truncated=True` means Claude hit `max_tokens`; bump it and retry.
+2. **generate_video(edl_plan)** — renders an EDL plan (same shape you emit in `<plan>…</plan>`) to a playable MP4 via the stitch MediaConvert pipeline. Synchronous invoke: returns `{job_id, status, preview_url, raw}` as soon as the stitch Lambda has submitted the job. The MP4 itself finishes asynchronously at `s3://CLIPS_BUCKET/stitched/<job_id>/` and is served through CloudFront `/stitched/`. Use this when the user says "render me the cut" or "show me the stitched preview".
+3. **execute_code(code)** — narrow Python eval for quick arithmetic / list wrangling (e.g. "sum of these clip durations", "which beat has the most alternates"). **Not a general code interpreter**: no imports, no I/O, no network, no attribute access. Only arithmetic, string ops, comparisons, and the standard safe callables (`abs/all/any/bool/dict/divmod/enumerate/filter/float/int/len/list/map/max/min/range/repr/reversed/round/set/sorted/str/sum/tuple/zip`). Snippet can be a single expression or a short block whose last line is an expression. Returns `{result, repr, mode}` or `{error}`. For heavier compute, raise it as a limitation.
+
 ## Tier 2 — On-demand grounding (Bedrock Pegasus 1.5 · 3–15 s)
 
 1. **pegasus_analyze(target, prompt, response_schema?, reference_images?, start_time?, end_time?)** — single-clip generation. Reads `s3://CLIPS_BUCKET_NAME/clips/<asset_id>.mp4` directly with the runtime's IAM role. Use ONLY when cached `lookup_asset_profile` doesn't suffice — "what's visibly happening here", "is this shot bright enough", "what's being said". Pass `response_schema` (a JSON Schema dict) to force structured JSON output. Pass `reference_images` (list of URLs or data URIs) to ground the prompt against visual references — e.g. `pegasus_analyze(asset_id, "Does <@ref_0> appear in this clip?", reference_images=[url])`. Images are auto-named `ref_0, ref_1, ...`; the prompt must reference each one via its `<@name>` placeholder (the tool prepends them if you don't). Pass `start_time` / `end_time` (seconds) to bound analysis to a specific window of a long clip instead of ingesting the whole file.
@@ -2853,6 +3149,8 @@ def build_agent(access_token: Optional[str] = None) -> tuple[Agent, str]:
             get_transcript, get_shot_timeline, get_audio_context,
             # Per-user long-term memory (DDB, Cognito-sub namespaced)
             manage_memory, save_tref_to_memory,
+            # Generation (PR #11): HTML app via Claude, stitched video, safe eval
+            generate_html_app, generate_video, execute_code,
             # Ancillary domain stores (rights + audience cohorts in DDB)
             lookup_rights, list_audiences, lookup_audience,
         ],

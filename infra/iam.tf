@@ -262,19 +262,27 @@ data "aws_iam_policy_document" "runtime_perms" {
     ]
   }
   statement {
-    sid     = "MiningRunInvoke"
-    actions = ["lambda:InvokeFunction"]
+    sid       = "MiningRunInvoke"
+    actions   = ["lambda:InvokeFunction"]
     resources = [aws_lambda_function.mining_run.arn]
   }
   statement {
-    sid     = "MiningSchedulerPassRole"
-    actions = ["iam:PassRole"]
+    sid       = "MiningSchedulerPassRole"
+    actions   = ["iam:PassRole"]
     resources = [aws_iam_role.mining_scheduler_target.arn]
     condition {
       test     = "StringEquals"
       variable = "iam:PassedToService"
       values   = ["scheduler.amazonaws.com"]
     }
+  }
+  # PR #11: generate_video → stitch Lambda. We invoke the existing stitch
+  # handler synchronously so the agent gets the same MediaConvert job the
+  # UI's Render-preview button submits, without duplicating job-building.
+  statement {
+    sid       = "GenerateVideoInvokeStitch"
+    actions   = ["lambda:InvokeFunction"]
+    resources = [aws_lambda_function.stitch.arn]
   }
 }
 
