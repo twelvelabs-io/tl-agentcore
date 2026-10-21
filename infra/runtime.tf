@@ -81,6 +81,11 @@ resource "aws_bedrockagentcore_agent_runtime" "this" {
     KB_CACHE_TABLE  = aws_dynamodb_table.kb_cache.name
     RIGHTS_TABLE    = aws_dynamodb_table.rights.name
     AUDIENCES_TABLE = aws_dynamodb_table.audiences.name
+    # Multi-turn session scratch (write-only in this release; UI still echoes
+    # [CURRENT PLAN]) + long-term per-user memory for the manage_memory /
+    # save_tref_to_memory tools.
+    SESSIONS_TABLE = aws_dynamodb_table.sessions.name
+    MEMORIES_TABLE = aws_dynamodb_table.memories.name
     # v0.4 hybrid entity-reID: per-KS Rekognition collection id is
     # derived as `<STACK_FQNAME>-ks-<ks_id>`. Marengo image-embed
     # async-invoke needs the bucket owner for s3Location.bucketOwner.

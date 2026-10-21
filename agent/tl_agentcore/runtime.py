@@ -49,10 +49,11 @@ import uuid
 from typing import Any, AsyncIterator, Optional
 
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
+from bedrock_agentcore.runtime.context import BedrockAgentCoreContext
 from strands.hooks import HookProvider, HookRegistry
 from strands.hooks.events import AfterToolCallEvent, BeforeToolCallEvent
 
-from .agent import build_agent
+from .agent import build_agent, persist_session_turn, set_user_id_from_token
 from .duration_enforcer import _extract_plan_block, enforce_duration_target
 
 app = BedrockAgentCoreApp()
@@ -131,6 +132,12 @@ async def _semantic_stream(payload: dict) -> AsyncIterator[dict]:
 
     yield {"__kind__": "created", "response_id": response_id}
 
+    # Seed the per-turn user_id ContextVar so manage_memory /
+    # save_tref_to_memory can namespace writes to this Cognito sub. Decoding
+    # here is safe — the AgentCore JWT authorizer already verified the token
+    # before the request reached us.
+    set_user_id_from_token(access_token)
+
     queue: asyncio.Queue = asyncio.Queue()
     mode = "unknown"
     try:
@@ -208,6 +215,25 @@ async def _semantic_stream(payload: dict) -> AsyncIterator[dict]:
     if text_started:
         yield {"__kind__": "text_done",
                "item_id": text_item_id, "text": final_text}
+
+    # Write-only session persistence: stash this turn's prompt, final text,
+    # and extracted <plan> in the sessions table under the AgentCore session
+    # id. Read-for-resume lands in the follow-up to PR #15 (previous_response_id
+    # wire semantics). Fails soft; a DDB write hiccup must not break the turn.
+    try:
+        session_id = BedrockAgentCoreContext.get_session_id()
+    except Exception:
+        session_id = None
+    try:
+        persist_session_turn(
+            session_id=session_id,
+            knowledge_store_id=ks,
+            prompt=prompt,
+            response_text=final_text,
+            tool_path=mode,
+        )
+    except Exception as e:
+        print(f"runtime: session persistence failed: {e}")
 
     yield {"__kind__": "completed",
            "response_id": response_id, "tool_path": mode}

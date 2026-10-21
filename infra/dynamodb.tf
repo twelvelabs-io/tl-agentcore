@@ -126,3 +126,67 @@ resource "aws_dynamodb_table" "assets" {
     projection_type = "ALL"
   }
 }
+
+# ─── Multi-turn session state + long-term user memory ────────────────────
+#
+# PR #4 of the Jockey-parity roadmap. Two new tables:
+#
+#   sessions  — Per-AgentCore-session scratch for resuming context across
+#               turns. One row per AgentCore runtime session_id (the ≥33-char
+#               id the browser carries in X-Amzn-Bedrock-AgentCore-Runtime-
+#               Session-Id). The runtime writes an updated row at the end of
+#               every turn with the final <plan>...</plan> text, the prompt,
+#               and the knowledge_store_id. 7-day TTL via `expires_at`.
+#
+#               Read-for-resume (previous_response_id semantics) is NOT
+#               wired in this PR — the UI continues to echo [CURRENT PLAN]
+#               back on follow-up turns. The write-only path lands first so
+#               that multi-device resume + audit become possible without a
+#               wire-format change (deferred until after PR #15 merges).
+#
+#   memories  — Long-term, per-user, agent-callable notes and named clip
+#               references (TRefs). Agent tools `manage_memory` and
+#               `save_tref_to_memory` are the only writers; user_id is the
+#               Cognito `sub` claim decoded from the access_token the
+#               browser passes on the WS handshake. Durable, no TTL —
+#               explicit delete via `manage_memory(action="delete", ...)`.
+
+resource "aws_dynamodb_table" "sessions" {
+  name         = "${local.fqname}-sessions"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "session_id"
+
+  point_in_time_recovery {
+    enabled = true
+  }
+
+  attribute {
+    name = "session_id"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+}
+
+resource "aws_dynamodb_table" "memories" {
+  name         = "${local.fqname}-memories"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "user_id"
+  range_key    = "memory_id"
+
+  point_in_time_recovery {
+    enabled = true
+  }
+
+  attribute {
+    name = "user_id"
+    type = "S"
+  }
+  attribute {
+    name = "memory_id"
+    type = "S"
+  }
+}
