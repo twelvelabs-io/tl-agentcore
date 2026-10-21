@@ -24,6 +24,7 @@ Wire format — every event carries a monotonic `sequence_number` starting at
   {"type": "response.output_text.done",   "sequence_number": N,  "item_id": "...", "text": "..."}
   {"type": "response.output_item.done",   "sequence_number": N,  "output_index": 0, "item": {...}}
   {"type": "response.keepalive",          "sequence_number": N}
+  {"type": "response.activity",           "sequence_number": N,  "tool_use_id": "...", "text": "..."}
   {"type": "response.completed",          "sequence_number": N,  "response": {...}}
   {"type": "response.failed",             "sequence_number": N,  "response": {...}}
 
@@ -65,6 +66,7 @@ from .agent import (
     set_selections_from_payload,
     set_user_id_from_token,
 )
+from .activity_narrator import narrate as narrate_activity
 from .duration_enforcer import _extract_plan_block, enforce_duration_target
 from .error_taxonomy import classify as classify_error
 
@@ -90,11 +92,22 @@ class WireEventCollector(HookProvider):
 
     def _on_before(self, event: BeforeToolCallEvent) -> None:
         tool_use = event.tool_use or {}
+        name = tool_use.get("name", "<unknown>")
+        args = tool_use.get("input") or {}
+        tool_use_id = tool_use.get("toolUseId") or f"call_{uuid.uuid4().hex[:12]}"
+        # Human-readable "doing X now" sentence shipped alongside the raw
+        # tool_begin event. The UI can render this as a status pip while
+        # hiding the raw function_call JSON — see activity_narrator.
+        self.queue.put_nowait({
+            "__kind__": "activity",
+            "tool_use_id": tool_use_id,
+            "text": narrate_activity(name, args),
+        })
         self.queue.put_nowait({
             "__kind__": "tool_begin",
-            "tool_use_id": tool_use.get("toolUseId") or f"call_{uuid.uuid4().hex[:12]}",
-            "name": tool_use.get("name", "<unknown>"),
-            "arguments": tool_use.get("input") or {},
+            "tool_use_id": tool_use_id,
+            "name": name,
+            "arguments": args,
         })
 
     def _on_after(self, event: AfterToolCallEvent) -> None:
@@ -441,6 +454,11 @@ async def _envelope(stream: AsyncIterator[dict]) -> AsyncIterator[dict]:
 
         elif kind == "keepalive":
             yield _emit("response.keepalive")
+
+        elif kind == "activity":
+            yield _emit("response.activity",
+                        tool_use_id=raw["tool_use_id"],
+                        text=raw["text"])
 
         elif kind == "completed":
             yield _emit("response.completed", response={
