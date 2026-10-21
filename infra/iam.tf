@@ -320,6 +320,27 @@ data "aws_iam_policy_document" "runtime_perms" {
     actions   = ["dynamodb:BatchGetItem"]
     resources = [aws_dynamodb_table.assets.arn]
   }
+  # Wave-2 PR #10: per-tool / per-model metering. The runtime writes one
+  # row per Bedrock model turn and one row per in-process tool call to
+  # the usage_events table, fire-and-forget. See
+  # agent/tl_agentcore/metering/ledger.py.
+  statement {
+    sid       = "UsageEventsWrite"
+    actions   = ["dynamodb:PutItem"]
+    resources = [aws_dynamodb_table.usage_events.arn]
+  }
+  # Price source for the metering cost column lives in SSM Parameter
+  # Store under /tl-agentcore/prices/<model_id>. GetParameter is read-
+  # only; ops updates happen out of band so pricing can be bumped
+  # without a redeploy. GetParameters supports the per-process cache's
+  # bulk warmup path.
+  statement {
+    sid     = "MeteringPricesSsmRead"
+    actions = ["ssm:GetParameter", "ssm:GetParameters"]
+    resources = [
+      "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter/tl-agentcore/prices/*",
+    ]
+  }
 }
 
 resource "aws_iam_role_policy" "runtime" {
