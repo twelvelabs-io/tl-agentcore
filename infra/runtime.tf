@@ -108,6 +108,11 @@ resource "aws_bedrockagentcore_agent_runtime" "this" {
     # uses the Claude Sonnet model already configured via MODEL_ID. execute_code
     # has no external deps.
     STITCH_LAMBDA_ARN = aws_lambda_function.stitch.arn
+    # PR #6: durable per-user artifact store (saved plans, generated html-1
+    # apps, rendered videos, arbitrary blobs). Small payloads inline, large
+    # payloads under `artifacts/<user_id>/<artifact_id>/<name>` in the
+    # clips bucket.
+    ARTIFACTS_TABLE = aws_dynamodb_table.artifacts.name
     # v0.4 hybrid entity-reID: per-KS Rekognition collection id is
     # derived as `<STACK_FQNAME>-ks-<ks_id>`. Marengo image-embed
     # async-invoke needs the bucket owner for s3Location.bucketOwner.

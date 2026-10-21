@@ -134,6 +134,9 @@ MINING_SCHEDULER_TARGET_ROLE_ARN = os.environ.get("MINING_SCHEDULER_TARGET_ROLE_
 # existing _bedrock_rt client. execute_code is pure Python with no AWS reach.
 STITCH_LAMBDA_ARN = os.environ.get("STITCH_LAMBDA_ARN")
 
+# PR #6: durable per-user artifact store.
+ARTIFACTS_TABLE = os.environ.get("ARTIFACTS_TABLE")
+
 _s3v = boto3.client("s3vectors", region_name=AWS_REGION)
 _bedrock_rt = boto3.client("bedrock-runtime", region_name=AWS_REGION)
 _ddb = boto3.client("dynamodb", region_name=AWS_REGION)
@@ -2702,6 +2705,295 @@ def save_tref_to_memory(
     return {"ok": True, "memory_id": mid, "name": name, "data": data}
 
 
+# ═══ Artifact store (save_artifact / open_artifact / list_artifacts) ════════
+# Durable, per-user, agent-callable storage for artifacts the producer may
+# want to open later: saved EDL plans, generated html-1 apps, rendered
+# videos, arbitrary blobs. Small payloads (<16 KiB) ride inline in DDB;
+# larger payloads land in the clips bucket under
+# `artifacts/<user_id>/<artifact_id>/<name>` with only the s3_key stored in
+# the row. Namespaced by Cognito `sub` via the per-turn user_id ContextVar
+# that PR #4 introduced.
+
+_ARTIFACT_INLINE_LIMIT_BYTES = 16 * 1024  # 16 KiB — well under DDB's 400 KiB item cap
+_ARTIFACT_LIST_LIMIT = 100
+_ARTIFACT_PRESIGN_TTL_SEC = 3600  # 1 h
+
+# Catalog of well-known artifact kinds. Agents can save any string, but the
+# documented kinds get first-class treatment in the UI/follow-ups:
+#   edl.plan     — a saved <plan>...</plan> JSON (from a RoughCut turn)
+#   html.app     — a self-contained HTML page (future: generate_html_app)
+#   video.render — a MediaConvert-rendered mp4 (future: generate_video,
+#                  typically only the s3_key — bytes stay in the clips bucket)
+#   other        — free-form; agent explains what it is in `name`/`tags`
+_ARTIFACT_KNOWN_KINDS = {"edl.plan", "html.app", "video.render", "other"}
+
+
+def _artifacts_s3_key(user_id: str, artifact_id: str, name: str) -> str:
+    safe_name = _re.sub(r"[^A-Za-z0-9._-]+", "_", name or "artifact")[:120] or "artifact"
+    return f"artifacts/{user_id}/{artifact_id}/{safe_name}"
+
+
+def _coerce_content_bytes(content: object) -> tuple[bytes, str]:
+    """Turn whatever the caller handed us into (bytes, content_type).
+    Dicts/lists become compact JSON; strings become UTF-8; bytes pass through."""
+    if content is None:
+        return b"", "application/octet-stream"
+    if isinstance(content, bytes):
+        return content, "application/octet-stream"
+    if isinstance(content, (dict, list)):
+        return json.dumps(content, separators=(",", ":")).encode("utf-8"), "application/json"
+    return str(content).encode("utf-8"), "text/plain; charset=utf-8"
+
+
+def _ddb_artifact_item(row: dict) -> dict:
+    """Normalize an artifact row for return (parse inline JSON when kind suggests it)."""
+    out = dict(row)
+    inline = out.get("inline_data")
+    if isinstance(inline, str) and inline:
+        # Try to parse JSON for the known json-shaped kinds (edl.plan).
+        kind = str(out.get("kind") or "")
+        if kind == "edl.plan":
+            try:
+                out["data"] = json.loads(inline)
+            except Exception:
+                out["data"] = inline
+        else:
+            out["data"] = inline
+    return out
+
+
+@tool
+def save_artifact(
+    name: str,
+    kind: str,
+    content: Optional[object] = None,
+    s3_key: Optional[str] = None,
+    knowledge_store_id: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+) -> dict:
+    """Save a durable artifact to the user's artifact store. Use whenever
+    the producer wants to keep something the agent produced for later
+    reference: a saved EDL plan, a generated html-1 app, a rendered video
+    (pass `s3_key` only — the bytes are already in the clips bucket), or
+    any other blob worth persisting. Namespaced per Cognito user; another
+    user cannot open or list this artifact.
+    Small `content` (<16 KiB) is stored inline in DDB; larger `content`
+    is uploaded to `s3://CLIPS_BUCKET/artifacts/<user_id>/<artifact_id>/
+    <safe_name>`. Callers who already have an S3 object (e.g. a
+    MediaConvert output) should pass `s3_key` directly and omit `content`.
+    Args:
+        name: short human label ("rough cut v3", "campaign dashboard").
+        kind: one of `edl.plan`, `html.app`, `video.render`, `other`.
+            Agents may save other strings but the four above get first-
+            class UI/tool treatment.
+        content: inline payload. str → stored as text, dict/list → JSON,
+            bytes → raw. Omit when passing `s3_key`.
+        s3_key: pre-existing key under CLIPS_BUCKET to register instead
+            of uploading. Must start with "artifacts/" or point at a
+            path the user owns.
+        knowledge_store_id: ks_xxx the artifact relates to, optional.
+        tags: optional list of string tags for later filtering.
+    Returns:
+        {ok, artifact_id, kind, name, size_bytes, inline, s3_key?}.
+        `inline=True` → payload lives in DDB; False → in S3.
+    """
+    if not ARTIFACTS_TABLE:
+        return {"ok": False, "error": "ARTIFACTS_TABLE not configured"}
+    user_id = _current_user_id()
+    if not user_id:
+        return {"ok": False, "error": "no authenticated user — artifact store requires a signed-in session"}
+    if not name:
+        return {"ok": False, "error": "name required"}
+    if not kind:
+        return {"ok": False, "error": "kind required (edl.plan, html.app, video.render, other)"}
+    if content is None and not s3_key:
+        return {"ok": False, "error": "pass `content` or `s3_key`"}
+
+    aid = f"art_{_uuid.uuid4().hex[:16]}"
+    now = _now_iso()
+    s3_key_out: Optional[str] = s3_key
+    inline_data: Optional[str] = None
+    size_bytes = 0
+
+    if content is not None:
+        body, ctype = _coerce_content_bytes(content)
+        size_bytes = len(body)
+        if size_bytes <= _ARTIFACT_INLINE_LIMIT_BYTES:
+            try:
+                inline_data = body.decode("utf-8")
+            except UnicodeDecodeError:
+                # Non-text payload at tiny size — base64 it and tag.
+                inline_data = "b64:" + _base64.b64encode(body).decode("ascii")
+        else:
+            if not CLIPS_BUCKET_NAME:
+                return {"ok": False, "error": "CLIPS_BUCKET_NAME not configured for large artifact upload"}
+            s3_key_out = _artifacts_s3_key(user_id, aid, name)
+            try:
+                _s3.put_object(
+                    Bucket=CLIPS_BUCKET_NAME,
+                    Key=s3_key_out,
+                    Body=body,
+                    ContentType=ctype,
+                )
+            except Exception as e:
+                return {"ok": False, "error": f"artifact S3 put failed: {e}"}
+
+    av: dict = {
+        "user_id":     {"S": user_id},
+        "artifact_id": {"S": aid},
+        "kind":        {"S": kind},
+        "name":        {"S": name},
+        "created_at":  {"S": now},
+        "updated_at":  {"S": now},
+        "size_bytes":  {"N": str(size_bytes)},
+    }
+    if inline_data is not None:
+        av["inline_data"] = {"S": inline_data}
+    if s3_key_out:
+        av["s3_key"] = {"S": s3_key_out}
+    if knowledge_store_id:
+        av["knowledge_store_id"] = {"S": knowledge_store_id}
+    if tags:
+        av["tags"] = {"SS": sorted({str(t) for t in tags if t})}
+    try:
+        _ddb.put_item(TableName=ARTIFACTS_TABLE, Item=av)
+    except Exception as e:
+        return {"ok": False, "error": f"artifact row put failed: {e}"}
+
+    return {
+        "ok":          True,
+        "artifact_id": aid,
+        "kind":        kind,
+        "name":        name,
+        "size_bytes":  size_bytes,
+        "inline":      inline_data is not None,
+        **({"s3_key": s3_key_out} if s3_key_out else {}),
+        **({"known_kind": kind in _ARTIFACT_KNOWN_KINDS}),
+    }
+
+
+@tool
+def open_artifact(artifact_id: str, presign_ttl_sec: int = _ARTIFACT_PRESIGN_TTL_SEC) -> dict:
+    """Open a saved artifact by id. Returns the inline payload for small
+    artifacts; for S3-backed artifacts, returns a short-lived (default 1h)
+    presigned HTTPS URL plus the raw s3_key. Only artifacts owned by the
+    signed-in user are visible — another user's artifact_id returns
+    `{found: False}`.
+    Use when the producer says "open the plan I saved as X" or references
+    an artifact by name after a prior `list_artifacts` call.
+    Args:
+        artifact_id: from a prior `save_artifact` or `list_artifacts` result.
+        presign_ttl_sec: validity of the returned URL in seconds (default
+            3600 = 1 h). Max 86400 (24 h).
+    Returns:
+        {found, artifact_id, kind, name, size_bytes, inline?, data?,
+        s3_key?, url?, created_at, updated_at, tags, knowledge_store_id}.
+    """
+    if not ARTIFACTS_TABLE:
+        return {"found": False, "error": "ARTIFACTS_TABLE not configured"}
+    user_id = _current_user_id()
+    if not user_id:
+        return {"found": False, "error": "no authenticated user"}
+    if not artifact_id:
+        return {"found": False, "error": "artifact_id required"}
+
+    try:
+        r = _ddb.get_item(TableName=ARTIFACTS_TABLE, Key={
+            "user_id":     {"S": user_id},
+            "artifact_id": {"S": artifact_id},
+        })
+    except Exception as e:
+        return {"found": False, "error": f"artifact get failed: {e}"}
+    item = _ddb_to_python(r.get("Item"))
+    if not item:
+        return {"found": False, "artifact_id": artifact_id}
+
+    out = _ddb_artifact_item(item)
+    out["found"] = True
+    s3_key = item.get("s3_key")
+    if s3_key:
+        ttl = max(60, min(int(presign_ttl_sec or _ARTIFACT_PRESIGN_TTL_SEC), 86400))
+        try:
+            url = _s3.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": CLIPS_BUCKET_NAME, "Key": s3_key},
+                ExpiresIn=ttl,
+            )
+            out["url"] = url
+            out["url_ttl_sec"] = ttl
+        except Exception as e:
+            out["url_error"] = f"presign failed: {e}"
+    return out
+
+
+@tool
+def list_artifacts(
+    kind: Optional[str] = None,
+    tag: Optional[str] = None,
+    limit: int = 50,
+) -> dict:
+    """List the signed-in user's artifacts, newest first. Optional filters
+    by `kind` (uses the by-kind GSI — faster than a client-side filter)
+    and `tag` (client-side substring match on the SS attribute).
+    Args:
+        kind: optional (edl.plan / html.app / video.render / other / any
+            custom string the agent has saved).
+        tag: optional case-sensitive match against the artifact's tags.
+        limit: max rows (default 50, hard cap 100).
+    Returns:
+        {ok, count, artifacts: [{artifact_id, kind, name, size_bytes,
+        inline (bool), s3_key?, knowledge_store_id?, tags, created_at,
+        updated_at}]}.
+    """
+    if not ARTIFACTS_TABLE:
+        return {"ok": False, "error": "ARTIFACTS_TABLE not configured"}
+    user_id = _current_user_id()
+    if not user_id:
+        return {"ok": False, "error": "no authenticated user"}
+    hard_limit = max(1, min(int(limit or 50), _ARTIFACT_LIST_LIMIT))
+
+    try:
+        if kind:
+            r = _ddb.query(
+                TableName=ARTIFACTS_TABLE,
+                IndexName="by-kind",
+                KeyConditionExpression="user_id = :u AND kind = :k",
+                ExpressionAttributeValues={":u": {"S": user_id}, ":k": {"S": kind}},
+                Limit=hard_limit * 2,  # fetch some headroom for the tag post-filter
+            )
+        else:
+            r = _ddb.query(
+                TableName=ARTIFACTS_TABLE,
+                KeyConditionExpression="user_id = :u",
+                ExpressionAttributeValues={":u": {"S": user_id}},
+                Limit=hard_limit * 2,
+            )
+    except Exception as e:
+        return {"ok": False, "error": f"artifact list failed: {e}"}
+
+    rows: list[dict] = []
+    for it in r.get("Items", []):
+        obj = _ddb_to_python(it) or {}
+        if tag and tag not in (obj.get("tags") or []):
+            continue
+        rows.append({
+            "artifact_id":        obj.get("artifact_id"),
+            "kind":               obj.get("kind"),
+            "name":               obj.get("name"),
+            "size_bytes":         obj.get("size_bytes"),
+            "inline":             bool(obj.get("inline_data")),
+            "s3_key":             obj.get("s3_key"),
+            "knowledge_store_id": obj.get("knowledge_store_id"),
+            "tags":               obj.get("tags") or [],
+            "created_at":         obj.get("created_at"),
+            "updated_at":         obj.get("updated_at"),
+        })
+        if len(rows) >= hard_limit:
+            break
+    rows.sort(key=lambda m: str(m.get("created_at") or ""), reverse=True)
+    return {"ok": True, "count": len(rows), "artifacts": rows}
+
+
 # ═══ Session scratch — write-only in this release ══════════════════════════
 # runtime.py calls persist_session_turn() at the end of each turn with the
 # AgentCore session_id, the knowledge_store_id, the user's prompt, and the
@@ -2929,6 +3221,14 @@ Three tools for producing new material from the plan you've already built. Prefe
 1. **manage_memory(action, content?, name?, tags?, memory_id?, limit?)** — create/list/delete the user's long-term notes. Use whenever the producer says "remember that…", "save this as…", "forget the note about…", or asks what you have on file. One user's memories are never visible to another. Prefer `save_tref_to_memory` for named clip references.
 2. **save_tref_to_memory(name, asset_id, start_time, end_time, knowledge_store_id?, notes?)** — park a named clip (TRef) for later. Use when the producer says "save this clip as 'intro shot'" or similar. The saved TRef is callable from a future turn via `manage_memory(action="list")`.
 
+## Artifact store (DDB + S3 · per-user, durable)
+
+1. **save_artifact(name, kind, content?, s3_key?, knowledge_store_id?, tags?)** — persist a durable artifact. Known kinds: `edl.plan` (a saved <plan> JSON), `html.app` (a self-contained HTML page), `video.render` (MediaConvert output — pass `s3_key` only, bytes already in the clips bucket), `other` (free-form). Small payloads inline; large payloads auto-upload to `artifacts/<user_id>/<artifact_id>/<name>`. Use when the producer says "save this as X" after a Rough Cut, when generating an HTML dashboard, or when a video render finishes and should be bookmarked.
+2. **open_artifact(artifact_id, presign_ttl_sec?)** — read one artifact by id. Inline payloads return as `data`; S3-backed payloads return a 1h-TTL presigned HTTPS URL plus the raw `s3_key`. Only the owning user can open.
+3. **list_artifacts(kind?, tag?, limit?)** — list the user's artifacts, newest first. The `kind` filter uses a GSI (fast); `tag` is a client-side filter on the string set. Use before `open_artifact` when the producer refers to an artifact by name rather than id.
+
+Distinction from `manage_memory` / `save_tref_to_memory`: **memories are short notes and TRefs** the agent should recall when reasoning (prefs, named clips). **Artifacts are produced outputs** the producer owns and may want to open later (full plan JSON, generated HTML, rendered video).
+
 ## Ancillary stores (DDB)
 
 1. **lookup_rights(asset_id, region?)** — DDB licensing record.
@@ -3151,6 +3451,8 @@ def build_agent(access_token: Optional[str] = None) -> tuple[Agent, str]:
             manage_memory, save_tref_to_memory,
             # Generation (PR #11): HTML app via Claude, stitched video, safe eval
             generate_html_app, generate_video, execute_code,
+            # Per-user artifact store (saved plans / html-1 apps / rendered videos / blobs)
+            save_artifact, open_artifact, list_artifacts,
             # Ancillary domain stores (rights + audience cohorts in DDB)
             lookup_rights, list_audiences, lookup_audience,
         ],
