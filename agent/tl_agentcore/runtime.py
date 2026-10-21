@@ -61,6 +61,7 @@ from strands.hooks import HookProvider, HookRegistry
 from strands.hooks.events import AfterToolCallEvent, BeforeToolCallEvent
 
 from .agent import (
+    _current_user_id,
     build_agent,
     persist_session_turn,
     set_selections_from_payload,
@@ -69,6 +70,7 @@ from .agent import (
 from .activity_narrator import narrate as narrate_activity
 from .duration_enforcer import _extract_plan_block, enforce_duration_target
 from .error_taxonomy import classify as classify_error
+from .scoring import maybe_judge_turn
 
 app = BedrockAgentCoreApp()
 
@@ -300,6 +302,20 @@ async def _semantic_stream(payload: dict) -> AsyncIterator[dict]:
         )
     except Exception as e:
         print(f"runtime: session persistence failed: {e}")
+
+    # Fire-and-forget online judges. Returns immediately; the judge
+    # tasks run on the loop while we yield the completed event. A judge
+    # failure logs but can't affect the user response.
+    try:
+        maybe_judge_turn(
+            prompt=prompt,
+            response_text=final_text,
+            response_id=response_id,
+            knowledge_store_id=ks,
+            user_id=_current_user_id(),
+        )
+    except Exception as e:
+        print(f"runtime: judge dispatch failed: {e}")
 
     yield {"__kind__": "completed",
            "response_id": response_id, "tool_path": mode}

@@ -113,6 +113,15 @@ resource "aws_bedrockagentcore_agent_runtime" "this" {
     # payloads under `artifacts/<user_id>/<artifact_id>/<name>` in the
     # clips bucket.
     ARTIFACTS_TABLE = aws_dynamodb_table.artifacts.name
+    # Wave-2 PR #9: online quality judges. The runtime dispatches a
+    # coherence judge (Sonnet) + reference-validity judge (deterministic
+    # <plan> parse) fire-and-forget at end-of-turn and writes one row
+    # per judge to the scores table. JUDGE_SAMPLE_RATE defaults to 1.0
+    # during the calibration window (every turn judged for 1-2 weeks);
+    # flip to "0.1" once trends are stable. JUDGE_MODEL_ID defaults to
+    # us.anthropic.claude-sonnet-4-6 inside the scoring module.
+    SCORES_TABLE      = aws_dynamodb_table.scores.name
+    JUDGE_SAMPLE_RATE = "1.0"
     # v0.4 hybrid entity-reID: per-KS Rekognition collection id is
     # derived as `<STACK_FQNAME>-ks-<ks_id>`. Marengo image-embed
     # async-invoke needs the bucket owner for s3Location.bucketOwner.
