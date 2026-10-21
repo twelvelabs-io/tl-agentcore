@@ -62,6 +62,8 @@ deploy-agent:
 	terraform -chdir=infra apply -var agent_image_tag=$$TAG
 
 deploy-ui:
+	@echo "==> deploy-ui: npm ci (lockfile-pinned install so vite + friends match main)"
+	cd ui && npm ci
 	@echo "==> deploy-ui: vite build"
 	cd ui && npm run build
 	@BUCKET=$$(terraform -chdir=infra output -raw frontend_bucket); \
