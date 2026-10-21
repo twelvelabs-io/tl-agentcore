@@ -155,6 +155,31 @@ data "aws_iam_policy_document" "runtime_perms" {
     actions   = ["rekognition:SearchFacesByImage", "rekognition:DescribeCollection"]
     resources = ["arn:aws:rekognition:${var.region}:${data.aws_caller_identity.current.account_id}:collection/${local.fqname}-ks-*"]
   }
+  # Rekognition Video SegmentDetection powers the get_shot_timeline agent
+  # tool. StartSegmentDetection + GetSegmentDetection operate on the account
+  # level — no collection scoping — so resource is "*". The video S3 object
+  # is accessed via the Rekognition service principal, not the runtime
+  # role, so no extra s3:GetObject grant is required beyond the existing
+  # ReadClipBytes statement.
+  statement {
+    sid     = "RekognitionSegmentDetection"
+    actions = [
+      "rekognition:StartSegmentDetection",
+      "rekognition:GetSegmentDetection",
+    ]
+    resources = ["*"]
+  }
+  # Comprehend DetectSentiment + DetectEntities back the get_audio_context
+  # tool (transcript-derived audio activity sketch). Account-wide sync APIs
+  # with no resource-level scoping.
+  statement {
+    sid     = "ComprehendDetect"
+    actions = [
+      "comprehend:DetectSentiment",
+      "comprehend:DetectEntities",
+    ]
+    resources = ["*"]
+  }
   # Read the cache DDB tables. kb_cache is Query-driven (single-
   # table pk/sk); rights and audiences are GetItem + Scan. Write access
   # belongs to the operator (ingest-kb-cache.py + seed-*.py), not the
