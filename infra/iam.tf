@@ -215,6 +215,16 @@ data "aws_iam_policy_document" "runtime_perms" {
       aws_dynamodb_table.memories.arn,
     ]
   }
+  # PR #8: add_media writes a lightweight registration row (asset_id,
+  # knowledge_store_id, source S3 URI, status) to the assets table. The
+  # runtime does NOT get write on kb_cache or on the vector index — those
+  # stay operator-owned. GetItem lets add_media no-op on a duplicate, if we
+  # add that path later.
+  statement {
+    sid       = "AddMediaWriteAssets"
+    actions   = ["dynamodb:PutItem", "dynamodb:GetItem"]
+    resources = [aws_dynamodb_table.assets.arn]
+  }
 }
 
 resource "aws_iam_role_policy" "runtime" {
