@@ -80,6 +80,32 @@ TOOL_SCOPES: dict[str, str] = {
     "generate_html_app":               SCOPE_READ,
     "generate_video":                  SCOPE_READ,
     "execute_code":                    SCOPE_READ,
+    # Transcript / shot / audio context (PR #17). Pure reads over cached
+    # ASR + Rekognition SegmentDetection + Comprehend output.
+    "get_transcript":                  SCOPE_READ,
+    "get_shot_timeline":               SCOPE_READ,
+    "get_audio_context":               SCOPE_READ,
+    # Per-user long-term memory (PR #16). manage_memory covers both read
+    # and write actions; group under jockey.read to match Jockey's own
+    # memory tool scoping. save_tref_to_memory is a dedicated write path,
+    # so it rides on jockey.ingest.
+    "manage_memory":                   SCOPE_READ,
+    "save_tref_to_memory":             SCOPE_INGEST,
+    # Artifact store (PR #18). save_artifact is the only write path and
+    # takes the dedicated jockey.artifact-save scope; open/list are reads.
+    "save_artifact":                   SCOPE_ARTIFACT_SAVE,
+    "open_artifact":                   SCOPE_READ,
+    "list_artifacts":                  SCOPE_READ,
+    # Jockey-parity wave-2 additions (this PR). `render` returns a
+    # presigned URL — read-equivalent. `manage_artifacts` mutates rows,
+    # so it rides on jockey.artifact-save. `list_filterable_fields` is
+    # pure cache introspection. `feedback` writes one log line and is
+    # grouped with reads since it exposes no durable surface the way
+    # artifact-save does.
+    "render":                          SCOPE_READ,
+    "manage_artifacts":                SCOPE_ARTIFACT_SAVE,
+    "list_filterable_fields":          SCOPE_READ,
+    "feedback":                        SCOPE_READ,
     # Ancillary DDB lookups
     "lookup_rights":                   SCOPE_READ,
     "list_audiences":                  SCOPE_READ,
