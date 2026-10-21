@@ -70,7 +70,7 @@ const TOOL_BRANCHES: {
     tool: "pegasus_tool",
     store: "clips_bucket",
     storeLabel: "S3 · clips bucket",
-    storeSub: "Bedrock Pegasus 1.2 reads s3Location",
+    storeSub: "Bedrock Pegasus 1.5 reads s3Location",
     hint: "On-demand take-note when a clip needs prose grounding",
     tier: "tier 2 · analyze",
   },
