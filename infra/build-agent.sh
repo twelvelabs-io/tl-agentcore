@@ -42,7 +42,9 @@ echo "==> 1/4 docker login to ECR"
 aws ecr get-login-password --region "${AWS_REGION}" \
   | docker login --username AWS --password-stdin "${ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 
-TAG="v$(date +%Y%m%d%H%M%S)"
+# Allow the caller (e.g. `make deploy`) to pin the tag so terraform
+# apply + ECR push use the same string. Default: fresh timestamp.
+TAG="${TAG:-v$(date +%Y%m%d%H%M%S)}"
 
 echo "==> 2/4 build linux/arm64 image (AgentCore Runtime is Graviton)"
 docker buildx build \
