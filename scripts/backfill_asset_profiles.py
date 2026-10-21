@@ -7,7 +7,7 @@ script just covers the assets that already existed when the trigger was
 attached — they need a manual kick.
 
 Idempotent: skips any asset whose kb_cache ASSET# row already exists.
-Bounded concurrency so we don't blow Pegasus 1.2 rate limits.
+Bounded concurrency so we don't blow Pegasus 1.5 rate limits.
 
 Usage:
     AWS_PROFILE=TLSolProd python scripts/backfill_asset_profiles.py [--only ks_demo02-blender-open-movies] [--concurrency 4]

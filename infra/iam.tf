@@ -86,11 +86,9 @@ data "aws_iam_policy_document" "runtime_perms" {
     resources = [
       "arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6*",
       "arn:aws:bedrock:*::foundation-model/twelvelabs.marengo-embed-3-0-v1:0",
-      "arn:aws:bedrock:*::foundation-model/twelvelabs.pegasus-1-2-v1:0",
       "arn:aws:bedrock:*::foundation-model/twelvelabs.pegasus-1-5-v1:0",
       "arn:aws:bedrock:*:${data.aws_caller_identity.current.account_id}:inference-profile/us.anthropic.claude-sonnet-4-6*",
       "arn:aws:bedrock:*:${data.aws_caller_identity.current.account_id}:inference-profile/us.twelvelabs.marengo-embed-3-0-v1:0",
-      "arn:aws:bedrock:*:${data.aws_caller_identity.current.account_id}:inference-profile/us.twelvelabs.pegasus-1-2-v1:0",
       "arn:aws:bedrock:*:${data.aws_caller_identity.current.account_id}:inference-profile/us.twelvelabs.pegasus-1-5-v1:0",
     ]
   }

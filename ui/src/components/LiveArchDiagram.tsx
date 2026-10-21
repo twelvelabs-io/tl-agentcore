@@ -116,7 +116,7 @@ export function LiveArchDiagram({
           <ArchCardInner compact state={stateOf("s3vectors_index")} tag="store" title="S3 Vectors" sub="clips · entity-thumbs · entity-patches" highlightAlways />
         </div>
         <div className="flex flex-col items-center">
-          <ArchCardInner compact state={stateOf("pegasus_tool")} tag="tier 2 · analyze" title="pegasus_analyze" sub="Bedrock Pegasus 1.2" highlightAlways />
+          <ArchCardInner compact state={stateOf("pegasus_tool")} tag="tier 2 · analyze" title="pegasus_analyze" sub="Bedrock Pegasus 1.5" highlightAlways />
           <ArchArrow active={activeNode === "clips_bucket"} label="reads s3Location" />
           <ArchCardInner compact state={stateOf("clips_bucket")} tag="store" title="S3 · clips bucket" sub="mirrored asset bytes + HLS bundles" highlightAlways />
         </div>
