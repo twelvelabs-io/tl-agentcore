@@ -46,11 +46,13 @@ test.describe("Agent tab", () => {
     await expect(submit).toBeEnabled({ timeout: 15_000 });
     await submit.click();
 
-    // Streaming responses surface as <p> updates under § II. Wait for
-    // ANY text to land. Agent turns take 30-120 s.
+    // Streaming responses surface as <p> updates under § II. Agent turns
+    // take 30-120 s and the text accumulates token-by-token, so a plain
+    // `toBeVisible` + `textContent()` races the stream — the element flips
+    // visible as soon as the first delta lands and we'd read a partial
+    // string. Use a web-first assertion that keeps retrying textContent
+    // until the element holds a non-trivial response.
     const responseRegion = signedInPage.locator(".response-md").first();
-    await expect(responseRegion).toBeVisible({ timeout: 3 * 60_000 });
-    const t = (await responseRegion.textContent()) || "";
-    expect(t.length).toBeGreaterThan(20);
+    await expect(responseRegion).toHaveText(/[\s\S]{21,}/, { timeout: 3 * 60_000 });
   });
 });

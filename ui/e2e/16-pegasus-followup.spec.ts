@@ -9,7 +9,18 @@ import { captureAgentWs } from "./_ws-helper";
  *  profile is missing or insufficient. This spec asserts that EITHER
  *  tool fires — both legitimately answer the user's question. */
 
-const PER_CLIP_TOOLS = new Set(["pegasus_analyze", "lookup_asset_profile"]);
+// Any of these counts as "the agent reached for a per-clip analysis tool."
+// `lookup_asset_profile` and `pegasus_analyze` are the original pair;
+// `get_content_profile` is the Jockey-named alias of `lookup_asset_profile`
+// added in PR #25; `zoom_in_video` is the time-windowed Pegasus wrapper
+// (PR #25) that the SYSTEM_PROMPT now prefers for "describe what's happening
+// in these frames" style questions.
+const PER_CLIP_TOOLS = new Set([
+  "pegasus_analyze",
+  "lookup_asset_profile",
+  "get_content_profile",
+  "zoom_in_video",
+]);
 
 test.describe("Per-clip analysis tool", () => {
   test("Agent: a clip-content question triggers pegasus_analyze or lookup_asset_profile", async ({ signedInPage }) => {
