@@ -239,8 +239,7 @@ async def _semantic_stream(payload: dict) -> AsyncIterator[dict]:
 
     # Wave-2 PR #4: install a fresh per-turn alias map so asset_id
     # handles (`@id_N`) allocated during one tool call stay bound for
-    # the rest of this turn and get wiped before the next. No-op when
-    # ID_ALIASES_ENABLED is unset.
+    # the rest of this turn and get wiped before the next.
     reset_turn_aliases()
 
     # Wave-2 PR #11: pipeline selection. ReWOO handles info-type turns
@@ -303,13 +302,12 @@ async def _semantic_stream(payload: dict) -> AsyncIterator[dict]:
                              "trace": traceback.format_exc()}}
             return
 
-        # Wave-2 PR #5: synthetic tool-call injection. When enabled,
-        # pre-execute get_kb_overview + list_kb_assets for the current KS
-        # and splice them into agent.messages as a 4-message synthetic
-        # turn so the model's first move can skip two near-reflex tool
-        # calls. No-op when PRESEED_TOOLS_ENABLED is unset or when no KS
-        # is set on the payload. Fails soft — a preseed error never
-        # breaks the user's turn.
+        # Wave-2 PR #5: synthetic tool-call injection. Pre-execute
+        # get_kb_overview + list_kb_assets for the current KS and splice
+        # them into agent.messages as a 4-message synthetic turn so the
+        # model's first move can skip two near-reflex tool calls. No-op
+        # when no KS is set on the payload. Fails soft — a preseed error
+        # never breaks the user's turn.
         try:
             preseed_status = await maybe_preseed(
                 agent,

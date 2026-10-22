@@ -332,9 +332,9 @@ resource "aws_dynamodb_table" "artifacts" {
 #            sampled_at, user_id, knowledge_store_id, error?, missing_asset_ids?
 #
 #            Judge-model identity: Sonnet 4.6 (per the wave-2 locked
-#            decision in project_jockey_parity_wave_2.md). Sampling via
-#            JUDGE_SAMPLE_RATE env var — defaults to 1.0 during
-#            calibration, flipped to 0.1 once trends are stable.
+#            decision in project_jockey_parity_wave_2.md). Every turn is
+#            judged — no sampling gate; the runtime only skips dispatch
+#            when SCORES_TABLE isn't configured.
 resource "aws_dynamodb_table" "scores" {
   name         = "${local.fqname}-scores"
   billing_mode = "PAY_PER_REQUEST"

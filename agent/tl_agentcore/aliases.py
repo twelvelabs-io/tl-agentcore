@@ -14,9 +14,6 @@ expanded back to the real id before the tool runs; the final prose and
 `<plan>` text are expanded on the way out to the UI so clip ids stay
 real everywhere outside the model's view.
 
-Opt-in via `ID_ALIASES_ENABLED=1` env var. Default off — turn it on
-after validating a few turns worth of trace in the usage_events table.
-
 Public:
   reset_turn_aliases() — call at the top of each turn to zero the map.
   alias_for(asset_id)  — allocate / fetch the handle. Idempotent.
@@ -34,13 +31,9 @@ inherit it via the normal asyncio ContextVar propagation.
 """
 from __future__ import annotations
 
-import os
 import re
 from contextvars import ContextVar
 from typing import Any
-
-# Set true for an easy global off-switch during an incident.
-_ENABLED_ENV = "ID_ALIASES_ENABLED"
 
 # "@id_<n>" with word-boundary semantics but tolerant of adjacent
 # punctuation (`'`, `)`, `,`, `.`), which the model often emits in prose.
@@ -91,18 +84,10 @@ class _AliasMap:
 _ctx: ContextVar[_AliasMap | None] = ContextVar("tl_agentcore_aliases", default=None)
 
 
-def enabled() -> bool:
-    return os.environ.get(_ENABLED_ENV, "0") == "1"
-
-
 def reset_turn_aliases() -> None:
     """Install a fresh alias map on this task. The runtime calls this at
-    the top of each _semantic_stream turn. A no-op when the feature is
-    disabled, so callers can invoke it unconditionally."""
-    if enabled():
-        _ctx.set(_AliasMap())
-    else:
-        _ctx.set(None)
+    the top of each _semantic_stream turn."""
+    _ctx.set(_AliasMap())
 
 
 def _get() -> _AliasMap | None:
@@ -119,9 +104,7 @@ def _get_or_init() -> _AliasMap:
 
 def alias_for(asset_id: str) -> str:
     """Return the handle (`@id_N`) for `asset_id`. Idempotent. Returns
-    the id unchanged when the feature is disabled or input is falsy."""
-    if not enabled():
-        return asset_id
+    the input unchanged when it is falsy or not a string."""
     return _get_or_init().alias(asset_id)
 
 
@@ -130,7 +113,7 @@ def resolve_alias(value: str | Any) -> Any:
     (24-hex ids, None, non-strings, strings that don't match the alias
     shape) pass through unchanged. Used by tools that take `asset_id` as
     a kwarg so the agent can refer to clips by their handles."""
-    if not enabled() or not isinstance(value, str):
+    if not isinstance(value, str):
         return value
     stripped = value.strip()
     m = _ALIAS_RE.fullmatch(stripped)
@@ -148,8 +131,6 @@ def aliasify_result(obj: Any) -> Any:
     handles. Returns a new object; the input is not mutated. Keys left
     as-is are: `asset_id` / `mimir_id` (string → handle),
     `asset_ids` / `mimir_ids` (list[string] → list[handle])."""
-    if not enabled():
-        return obj
     m = _get_or_init()
     return _walk(obj, m, forward=True)
 
@@ -161,8 +142,6 @@ def dealias_dict(obj: Any) -> Any:
     (generate_video(edl_plan=...), save_tref_to_memory batch args) where
     the agent may have carried the handles through from a prior tool
     result. Returns a new object; input not mutated."""
-    if not enabled():
-        return obj
     cur = _get()
     if cur is None:
         return obj
@@ -198,7 +177,7 @@ def expand_text(text: str) -> str:
     allocated) pass through verbatim — safer than erroring and losing
     the response. Used post-stream on `final_text` so the UI and the
     duration enforcer see real asset_ids inside the `<plan>` block."""
-    if not enabled() or not text:
+    if not text:
         return text
     cur = _get()
     if cur is None:
@@ -213,9 +192,7 @@ def expand_text(text: str) -> str:
 
 
 def current_snapshot() -> dict[str, str]:
-    """{alias: asset_id} map for this turn, or {} when disabled / empty.
+    """{alias: asset_id} map for this turn, or {} when empty.
     Suitable for logging, session persistence, or a UI debug panel."""
-    if not enabled():
-        return {}
     cur = _get()
     return cur.snapshot() if cur else {}

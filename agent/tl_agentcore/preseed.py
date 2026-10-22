@@ -23,12 +23,11 @@ Both preseed tool calls get a `record_tool_call` metering row so the
 usage_events ledger stays comparable with turns that call these tools
 through the normal hook path.
 
-Opt-in via `PRESEED_TOOLS_ENABLED=1` env var. Default off — flip the
-flag after confirming the trace shows the tool calls were actually
-redundant on the targeted turns.
+Runs unconditionally when a knowledge store id is set. When no KS is
+present (freeform chat), there's nothing to preseed and the function
+no-ops.
 
 Public:
-  enabled() -> bool
   async maybe_preseed(agent, *, knowledge_store_id, response_id, user_id)
       -> {"used": bool, "activity": str | None}
       Mutates agent.messages in place on success. Returns a short status
@@ -45,16 +44,10 @@ from typing import Any
 
 from .metering import record_tool_call
 
-_ENABLED_ENV = "PRESEED_TOOLS_ENABLED"
-
 # Keep the preseed `list_kb_assets` cheap on prompt bytes — the full
 # asset profile is already in DDB, so the model can fetch more via a
 # plain tool call if it needs them.
 _PRESEED_ASSETS_LIMIT = int(os.environ.get("PRESEED_ASSETS_LIMIT", "30"))
-
-
-def enabled() -> bool:
-    return os.environ.get(_ENABLED_ENV, "0") == "1"
 
 
 async def maybe_preseed(
@@ -67,10 +60,10 @@ async def maybe_preseed(
     """Fetch the preamble tools and splice them into agent.messages.
 
     Returns {"used": True, "activity": "preseed: ..."} on success,
-    {"used": False, "activity": None} when the feature is off, no KS is
-    set, or either tool failed. Never raises — a preseed problem must
-    not break the user's turn."""
-    if not enabled() or not knowledge_store_id:
+    {"used": False, "activity": None} when no KS is set or either tool
+    failed. Never raises — a preseed problem must not break the user's
+    turn."""
+    if not knowledge_store_id:
         return {"used": False, "activity": None}
 
     from . import agent as _a

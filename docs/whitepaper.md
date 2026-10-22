@@ -469,10 +469,10 @@ session.
 A wave of 2026-10 additions moves the runtime up a layer: the agent
 is no longer a bare ReAct loop with a tool catalog, it carries its own
 pipeline selection, pre-flight context seeding, in-session identity
-compression, online quality scoring, and a per-call cost ledger. Each
-addition ships behind an env-var flag so a deployment can run with
-the baseline wave-1 shape and promote features incrementally after
-dev-stack trace evidence confirms them.
+compression, online quality scoring, and a per-call cost ledger. Every
+feature below runs unconditionally — there is no ship-dark toggle to
+flip on later; the only knobs are config values that name a provider
+or model id.
 
 - **Pipeline selection + ReWOO.** `pipelines/router.py` classifies
   each turn into INFORMATIONAL (routed to a planner → executor →
@@ -481,25 +481,24 @@ dev-stack trace evidence confirms them.
   with a clarifying question). ReWOO's executor transparently falls
   back to ReAct on any error — the user never sees a failure. The
   `response.completed.tool_path` field surfaces which pipeline ran.
-- **Synthetic tool-call injection.** When `PRESEED_TOOLS_ENABLED=1`,
-  the runtime pre-executes `get_kb_overview` + `list_kb_assets` for
-  the current KS in parallel and splices synthetic
+- **Synthetic tool-call injection.** Every turn with a knowledge
+  store pre-executes `get_kb_overview` + `list_kb_assets` for the
+  current KS in parallel and splices synthetic
   tool_use + tool_result messages into `agent.messages` before
   `stream_async`. The model's first move can then be the actual
   answer instead of two near-reflex lookups.
-- **ID aliases.** When `ID_ALIASES_ENABLED=1`, 24-hex `asset_id`
-  values on tool fanout results get rewritten to short `@id_N`
-  handles bound per-turn via a `ContextVar`. Final text re-expands
-  the handles before the UI, duration enforcer, and judges see
-  them. Saves ~600 tokens per 25-clip retrieval.
+- **ID aliases.** 24-hex `asset_id` values on tool fanout results
+  are rewritten to short `@id_N` handles bound per-turn via a
+  `ContextVar`. Final text re-expands the handles before the UI,
+  duration enforcer, and judges see them. Saves ~600 tokens per
+  25-clip retrieval.
 - **Online judges.** `scoring/judge_runner.py` dispatches a Sonnet
   4.6 coherence judge + a deterministic reference-validity judge
-  fire-and-forget at end-of-turn. Rows land in a `scores` DDB table
-  keyed by `(response_id, judge_name)` with 90-day TTL. The SPA
-  reads them through the `/scores/{response_id}` lambda and renders
-  a judge panel under each turn. Sampling via `JUDGE_SAMPLE_RATE`
-  env var; default `"1.0"` during calibration, flip to `"0.1"`
-  once trends are stable.
+  fire-and-forget at end-of-turn — every turn, no sampling gate.
+  Rows land in a `scores` DDB table keyed by
+  `(response_id, judge_name)` with 90-day TTL. The SPA reads them
+  through the `/scores/{response_id}` lambda and renders a judge
+  panel under each turn.
 - **Metering ledger.** `metering/ledger.py` writes one row per
   Bedrock model invocation + per in-process tool call to a
   `usage_events` DDB table keyed by `(user_id, event_id)`. Prices

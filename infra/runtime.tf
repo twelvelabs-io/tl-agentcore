@@ -115,13 +115,10 @@ resource "aws_bedrockagentcore_agent_runtime" "this" {
     ARTIFACTS_TABLE = aws_dynamodb_table.artifacts.name
     # Wave-2 PR #9: online quality judges. The runtime dispatches a
     # coherence judge (Sonnet) + reference-validity judge (deterministic
-    # <plan> parse) fire-and-forget at end-of-turn and writes one row
-    # per judge to the scores table. JUDGE_SAMPLE_RATE defaults to 1.0
-    # during the calibration window (every turn judged for 1-2 weeks);
-    # flip to "0.1" once trends are stable. JUDGE_MODEL_ID defaults to
+    # <plan> parse) fire-and-forget at end-of-turn and writes one row per
+    # judge to the scores table. JUDGE_MODEL_ID defaults to
     # us.anthropic.claude-sonnet-4-6 inside the scoring module.
-    SCORES_TABLE      = aws_dynamodb_table.scores.name
-    JUDGE_SAMPLE_RATE = "1.0"
+    SCORES_TABLE = aws_dynamodb_table.scores.name
     # Wave-2 PR #10: per-tool / per-model metering ledger. One row per
     # Bedrock model turn + per in-process tool call, fire-and-forget.
     # Prices for the cost column live in SSM Parameter Store under
@@ -131,20 +128,14 @@ resource "aws_bedrockagentcore_agent_runtime" "this" {
     USAGE_EVENTS_TABLE       = aws_dynamodb_table.usage_events.name
     PRICES_SSM_PREFIX        = "/tl-agentcore/prices"
     PRICES_CACHE_TTL_SECONDS = "900"
-    # Wave-2 PR #4: asset-id handles (`@id_N`) for tool fanout.
-    # Opt-in — default off until we validate token savings + solver
-    # fidelity on a few turns' trace in usage_events. Flip to "1" via
-    # a terraform apply (no redeploy of the agent image needed).
-    ID_ALIASES_ENABLED = "0"
-    # Wave-2 PR #5: synthetic tool-call injection. When "1", every turn
-    # pre-executes get_kb_overview + list_kb_assets in parallel and
+    # Wave-2 PR #5: synthetic tool-call injection cap. Every turn with a
+    # KS pre-executes get_kb_overview + list_kb_assets in parallel and
     # splices them into agent.messages as a 4-message synthetic turn so
-    # the model's first move can skip two near-reflex tool calls. Opt-in
-    # until the usage_events trace confirms the tools were actually
-    # redundant on the targeted turns (otherwise we're paying for two
-    # DDB round-trips to avoid two model round-trips the model wouldn't
-    # have taken anyway).
-    PRESEED_TOOLS_ENABLED = "0"
+    # the model's first move can skip two near-reflex tool calls. This
+    # knob caps how many assets the preseed list_kb_assets fetches to
+    # keep the preamble bounded; the model can fetch more via a plain
+    # tool call if it needs them.
+    PRESEED_ASSETS_LIMIT = "30"
     # Wave-2 PR #7: hosted web search + citations. The `web_search` tool
     # routes to the provider named here. Default "none" (NullProvider)
     # returns an explanatory error so the tool is callable but obviously

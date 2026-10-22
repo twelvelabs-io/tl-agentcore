@@ -5,10 +5,9 @@ Entry point: `maybe_judge_turn(prompt, response_text, response_id,
 knowledge_store_id, user_id)` — asyncio.create_task-safe. Fire-and-
 forget: any failure logs and returns, never raises up to the caller.
 
-Sampling:
-  JUDGE_SAMPLE_RATE env var, float in [0.0, 1.0], default 1.0 during
-  the calibration window (per the wave-2 memory decision). 0.0 disables
-  entirely; useful for local dev.
+Judges run on every turn (no sampling gate). The runtime only skips
+the dispatch when SCORES_TABLE isn't configured — that's a deploy-time
+missing-env condition, not a feature flag.
 
 Row shape (one per judge, so 2 rows per judged turn):
   {
@@ -28,7 +27,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import random
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -39,23 +37,8 @@ from . import coherence_judge, reference_evaluator
 
 _REGION = os.environ.get("AWS_REGION", "us-east-1")
 _SCORES_TABLE = os.environ.get("SCORES_TABLE", "")
-_SAMPLE_RATE = float(os.environ.get("JUDGE_SAMPLE_RATE", "1.0"))
 _TTL_DAYS = 90
 _ddb = boto3.client("dynamodb", region_name=_REGION)
-
-
-def _should_sample() -> bool:
-    """Return True on JUDGE_SAMPLE_RATE fraction of calls. 0.0 disables,
-    1.0 always samples (calibration mode)."""
-    try:
-        rate = max(0.0, min(1.0, float(_SAMPLE_RATE)))
-    except (TypeError, ValueError):
-        return False
-    if rate <= 0.0:
-        return False
-    if rate >= 1.0:
-        return True
-    return random.random() < rate
 
 
 def maybe_judge_turn(
@@ -66,12 +49,12 @@ def maybe_judge_turn(
     knowledge_store_id: str | None,
     user_id: str | None,
 ) -> None:
-    """Fire-and-forget. If sampling says yes AND SCORES_TABLE is
-    configured, spawn an asyncio task that runs both judges and writes
-    their rows. Returns immediately."""
+    """Fire-and-forget. If SCORES_TABLE is configured, spawn an asyncio
+    task that runs both judges and writes their rows. Returns
+    immediately. The function name keeps `maybe_` as a reminder that
+    the dispatch is best-effort — a missing SCORES_TABLE or absent
+    event loop silently no-ops rather than raising."""
     if not _SCORES_TABLE:
-        return
-    if not _should_sample():
         return
     try:
         loop = asyncio.get_running_loop()
