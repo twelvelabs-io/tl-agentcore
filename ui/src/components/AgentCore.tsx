@@ -28,6 +28,12 @@ type Turn = {
   text: string;
   streaming?: boolean;
   elapsedMs?: number;
+  // Human-readable "doing X now" lines from response.activity frames.
+  // The agent emits one per tool call (narrated by activity_narrator.py)
+  // and one for each pipeline / preseed / rewoo stage. Rendered as a dim
+  // mono strip under the § Response header so producers can see what the
+  // agent is up to without reading the raw function_call JSON.
+  activity?: string[];
 };
 
 const enabled = agentEnabled();
@@ -111,6 +117,13 @@ export function AgentCore() {
           acc += ev.delta;
           setTurns((ts) => ts.map((t) => t.id === aTurn.id ? { ...t, text: acc } : t));
           responseRef.current?.scrollTo({ top: 1e9 });
+        } else if (ev.type === "response.activity") {
+          const line = ev.text;
+          setTurns((ts) => ts.map((t) =>
+            t.id === aTurn.id
+              ? { ...t, activity: [...(t.activity || []), line] }
+              : t
+          ));
         } else if (ev.type === "response.failed") {
           setErr(ev.response.error.message);
         } else if (ev.type === "response.completed") {
@@ -297,6 +310,9 @@ export function AgentCore() {
               )}
             </div>
             <div ref={responseRef} className="flex-1 min-h-0 overflow-y-auto px-8 py-6">
+              {heroTurn?.activity && heroTurn.activity.length > 0 && (
+                <ActivityStrip lines={heroTurn.activity} live={!!heroTurn.streaming} />
+              )}
               {heroTurn ? (
                 <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }}>
                   {heroTurn.text ? (
@@ -342,6 +358,52 @@ export function AgentCore() {
 }
 
 function rid() { return Math.random().toString(36).slice(2, 10); }
+
+// Dim mono strip rendered under the § Response header for the active
+// turn, showing the agent's own human-readable narration (one line per
+// tool call plus pipeline / preseed / rewoo stage lines). While the
+// turn is streaming, shows a collapsed tail; once completed, becomes
+// a disclosure the producer can expand to see the full trace.
+function ActivityStrip({ lines, live }: { lines: string[]; live: boolean }) {
+  const [open, setOpen] = useState(false);
+  const tail = live ? lines.slice(-4) : lines.slice(-1);
+  const hidden = lines.length - tail.length;
+  const show = open ? lines : tail;
+  return (
+    <div
+      className="mb-4 rounded-[var(--radius-card)] px-3 py-2 border font-mono"
+      style={{
+        borderColor: "var(--color-rule)",
+        background: "var(--color-surface)",
+        color: "var(--color-ink-faint)",
+        fontSize: 11,
+        lineHeight: 1.5,
+      }}
+    >
+      <div className="flex items-baseline justify-between">
+        <span className="label" style={{ color: "var(--color-ink-faint)" }}>
+          § Trace
+        </span>
+        {!live && hidden > 0 && (
+          <button
+            className="label hover:text-[var(--color-ink)] transition-colors"
+            onClick={() => setOpen((o) => !o)}
+          >
+            {open ? "collapse" : `+${hidden} more`}
+          </button>
+        )}
+      </div>
+      <ul className="mt-1 space-y-0.5">
+        {show.map((line, i) => (
+          <li key={`${i}-${line.slice(0, 24)}`} className="truncate">
+            {live && i === show.length - 1 ? "▸ " : "· "}
+            {line}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
 
 function Suggestions({ onPick }: { onPick: (s: string) => void }) {
   const samples = [
