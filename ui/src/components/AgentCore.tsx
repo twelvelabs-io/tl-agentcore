@@ -9,7 +9,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
-import { agentEnabled, streamAgentTurn } from "../lib/agent-api";
+import { agentEnabled, errorLabel, streamAgentTurn } from "../lib/agent-api";
 import { ResponseMarkdown } from "../lib/vref";
 import { useStore, setState as setGlobal } from "../lib/store";
 import { LiveArchSidebar } from "./LiveArchSidebar";
@@ -45,6 +45,7 @@ export function AgentCore() {
   const [sessionId, setSessionId] = useState<string | undefined>(undefined);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [errCode, setErrCode] = useState<string | null>(null);
   const [activeNode, setActiveNode] = useState<NodeId | null>(null);
   const [nodeHistory, setNodeHistory] = useState<NodeId[]>([]);
   const [historyEntryId, setHistoryEntryId] = useState<string | null>(null);
@@ -78,7 +79,7 @@ export function AgentCore() {
   const send = async () => {
     if (!ks || !draft.trim() || busy) return;
     const text = draft.trim();
-    setDraft(""); setErr(null);
+    setDraft(""); setErr(null); setErrCode(null);
     const userTurn: Turn = { id: rid(), role: "user", text };
     const aTurn: Turn = { id: rid(), role: "assistant", text: "", streaming: true };
     setTurns((ts) => [...ts, userTurn, aTurn]);
@@ -124,8 +125,23 @@ export function AgentCore() {
               ? { ...t, activity: [...(t.activity || []), line] }
               : t
           ));
+        } else if (ev.type === "response.output_item.done"
+                   && ev.item.type === "function_call"
+                   && ev.item.error_code) {
+          // Surface tool-level failures in the activity trace. The
+          // narrator fired a "Searching the KB for..." line at
+          // tool_begin; this appends the outcome so the producer sees
+          // which tool failed and the taxonomic bucket.
+          const label = errorLabel(ev.item.error_code);
+          const line = `⚠ ${ev.item.name} failed — ${label}`;
+          setTurns((ts) => ts.map((t) =>
+            t.id === aTurn.id
+              ? { ...t, activity: [...(t.activity || []), line] }
+              : t
+          ));
         } else if (ev.type === "response.failed") {
           setErr(ev.response.error.message);
+          setErrCode(ev.response.error.code || null);
         } else if (ev.type === "response.completed") {
           setTimeout(() => setActiveNode(null), 1200);
         }
@@ -331,9 +347,20 @@ export function AgentCore() {
                 </p>
               )}
               {err && (
-                <pre className="font-mono text-xs mt-6 p-3 whitespace-pre-wrap rounded-[var(--radius-card)]" style={{ background: "var(--color-surface)", color: "var(--color-status-failed)" }}>
-                  {err}
-                </pre>
+                <div className="mt-6">
+                  {errCode && (
+                    <div className="inline-block mb-2 px-2 py-0.5 rounded-full font-mono text-[10px] uppercase tracking-wider" style={{
+                      background: "var(--color-surface)",
+                      border: "1px solid var(--color-rule)",
+                      color: "var(--color-status-failed)",
+                    }}>
+                      {errorLabel(errCode)}
+                    </div>
+                  )}
+                  <pre className="font-mono text-xs p-3 whitespace-pre-wrap rounded-[var(--radius-card)]" style={{ background: "var(--color-surface)", color: "var(--color-status-failed)" }}>
+                    {err}
+                  </pre>
+                </div>
               )}
             </div>
           </>
