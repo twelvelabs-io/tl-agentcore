@@ -29,10 +29,16 @@ Wire format — every event carries a monotonic `sequence_number` starting at
 
 Output-item shapes we emit:
   - `message` (assistant prose) — content: [{"type":"output_text","text":"..."}]
-  - `function_call` (one per tool call) — {id, name, arguments:string, output?}
+  - `function_call` (one per tool call) — {id, name, arguments:string, output?,
+     status:"completed"|"failed", error_code?}. error_code comes from
+     error_taxonomy.classify when the tool returned {"error":...} or raised.
   - `custom` with `custom_type:"edl.plan"` — carries the parsed Edit Decision
     List JSON in `data`. The duration_enforcer rewrite emits a SECOND
     `output_item.done` with the same `item.id` — supersedes-in-place.
+
+Error shape on `response.failed`: {"message":"...", "code":"<bucket>",
+"trace":"..."?}. `code` is a stable slug from error_taxonomy — see that
+module for the enum. UIs should map on `code`, not regex the message.
 
 Keepalives (`response.keepalive`) fire on every 20 s of upstream silence to
 keep ALB/CloudFront from idle-killing a WS during a slow `pegasus_analyze`.
@@ -60,6 +66,7 @@ from .agent import (
     set_user_id_from_token,
 )
 from .duration_enforcer import _extract_plan_block, enforce_duration_target
+from .error_taxonomy import classify as classify_error
 
 app = BedrockAgentCoreApp()
 
@@ -92,12 +99,33 @@ class WireEventCollector(HookProvider):
 
     def _on_after(self, event: AfterToolCallEvent) -> None:
         tool_use = event.tool_use or {}
-        self.queue.put_nowait({
+        summary = _summarize_tool_result(event.result)
+        code = _tool_error_code(event.result, summary)
+        payload = {
             "__kind__": "tool_end",
             "tool_use_id": tool_use.get("toolUseId") or "",
             "name": tool_use.get("name", "<unknown>"),
-            "output": _summarize_tool_result(event.result),
-        })
+            "output": summary,
+        }
+        if code:
+            payload["error_code"] = code
+        self.queue.put_nowait(payload)
+
+
+def _tool_error_code(result: Any, summary: str) -> str | None:
+    """Classify a tool result as an error bucket, or None if the tool
+    succeeded. Covers three shapes the agent's tools actually return:
+    (a) a raised exception caught by Strands, (b) a dict with
+    `status == 'error'`, and (c) a dict with an `error` key (our
+    hand-rolled `return {"error": "..."}` branches)."""
+    if isinstance(result, BaseException):
+        return classify_error(str(result), exc=result)
+    if isinstance(result, dict):
+        if result.get("status") == "error":
+            return classify_error(summary) or classify_error("tool error")
+        if "error" in result and result["error"]:
+            return classify_error(str(result["error"]))
+    return None
 
 
 def _summarize_tool_result(result: Any) -> str:
@@ -130,7 +158,8 @@ async def _semantic_stream(payload: dict) -> AsyncIterator[dict]:
 
     if not prompt:
         yield {"__kind__": "failed", "response_id": response_id,
-               "error": {"message": "missing prompt"}}
+               "error": {"message": "missing prompt",
+                         "code": classify_error("missing prompt")}}
         return
 
     # PR #8: pull the per-turn working set and stash it on the agent's
@@ -168,6 +197,7 @@ async def _semantic_stream(payload: dict) -> AsyncIterator[dict]:
     except Exception as e:
         yield {"__kind__": "failed", "response_id": response_id,
                "error": {"message": f"agent build failed: {e}",
+                         "code": classify_error(f"agent build failed: {e}", exc=e),
                          "trace": traceback.format_exc()}}
         return
 
@@ -202,6 +232,7 @@ async def _semantic_stream(payload: dict) -> AsyncIterator[dict]:
     except Exception as e:
         yield {"__kind__": "failed", "response_id": response_id,
                "error": {"message": f"agent run failed: {e}",
+                         "code": classify_error(f"agent run failed: {e}", exc=e),
                          "trace": traceback.format_exc()},
                "tool_path": mode}
         return
@@ -280,6 +311,7 @@ async def _with_keepalive(
             await queue.put({"__kind__": "failed",
                              "response_id": "",
                              "error": {"message": f"stream pump failed: {e}",
+                                       "code": classify_error(f"stream pump failed: {e}", exc=e),
                                        "trace": traceback.format_exc()}})
         finally:
             await queue.put(_SENTINEL)
@@ -369,13 +401,16 @@ async def _envelope(stream: AsyncIterator[dict]) -> AsyncIterator[dict]:
             })
 
         elif kind == "tool_end":
-            yield _emit("response.output_item.done", output_index=0, item={
+            item: dict[str, Any] = {
                 "id": raw["tool_use_id"],
                 "type": "function_call",
-                "status": "completed",
+                "status": "failed" if raw.get("error_code") else "completed",
                 "name": raw["name"],
                 "output": raw["output"][:600],
-            })
+            }
+            if raw.get("error_code"):
+                item["error_code"] = raw["error_code"]
+            yield _emit("response.output_item.done", output_index=0, item=item)
 
         elif kind == "plan_item":
             yield _emit("response.output_item.added", output_index=0, item={
@@ -460,7 +495,8 @@ async def ws_handler(websocket, _context: Any) -> None:
                 "sequence_number": 0,
                 "response": {
                     "status": "failed",
-                    "error": {"message": "invalid JSON body"},
+                    "error": {"message": "invalid JSON body",
+                              "code": classify_error("invalid JSON body")},
                 },
             }))
             await websocket.close(code=1003)  # 1003 = unsupported data
@@ -478,6 +514,7 @@ async def ws_handler(websocket, _context: Any) -> None:
                     "status": "failed",
                     "error": {
                         "message": f"ws handler failed: {e}",
+                        "code": classify_error(f"ws handler failed: {e}", exc=e),
                         "trace": traceback.format_exc(),
                     },
                 },
