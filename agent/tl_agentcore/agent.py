@@ -3901,24 +3901,7 @@ def build_agent(access_token: Optional[str] = None) -> tuple[Agent, str]:
     """
     system_prompt = _load_system_prompt()
 
-    mcp_url = os.environ.get("GATEWAY_MCP_URL")
-    if mcp_url and access_token:
-        from strands.tools.mcp import MCPClient
-        from mcp.client.streamable_http import streamablehttp_client
-
-        client = MCPClient(lambda: streamablehttp_client(
-            url=mcp_url,
-            headers={"Authorization": f"Bearer {access_token}"},
-        ))
-        client.start()
-        tools = client.list_tools_sync()
-        agent = Agent(system_prompt=system_prompt, model=MODEL_ID, tools=tools)
-        return agent, "mcp-gateway"
-
-    agent = Agent(
-        system_prompt=system_prompt,
-        model=MODEL_ID,
-        tools=[
+    in_process_tools = [
             # Tier 0 — AWS-native retrieval
             vector_search,
             find_by_image,
@@ -3955,6 +3938,45 @@ def build_agent(access_token: Optional[str] = None) -> tuple[Agent, str]:
             render, manage_artifacts, list_filterable_fields, feedback,
             # Ancillary domain stores (rights + audience cohorts in DDB)
             lookup_rights, list_audiences, lookup_audience,
-        ],
+    ]
+
+    # ─── Plugin surface — Distribution-Readiness PR 1 ─────────────────
+    # When GATEWAY_MCP_URL is set, the runtime also connects to an
+    # AgentCore Gateway that aggregates every registered customer data
+    # source (gateway targets, managed by the plugins lambda). Tools
+    # discovered from the gateway are MERGED into the in-process tool
+    # list; on a name collision the in-process tool wins so a customer
+    # can't accidentally shadow a built-in. Falls through silently when
+    # the gateway isn't configured (local runs, legacy deploys) or no
+    # access token was forwarded (background jobs).
+    mcp_url = os.environ.get("GATEWAY_MCP_URL")
+    mcp_tools: list = []
+    if mcp_url and access_token:
+        try:
+            from strands.tools.mcp import MCPClient
+            from mcp.client.streamable_http import streamablehttp_client
+
+            client = MCPClient(lambda: streamablehttp_client(
+                url=mcp_url,
+                headers={"Authorization": f"Bearer {access_token}"},
+            ))
+            client.start()
+            mcp_tools = client.list_tools_sync()
+        except Exception as e:
+            # A broken plugin must not kill the whole turn — the agent
+            # still works with its in-process tools alone.
+            print(f"[plugins] gateway tool discovery failed: {e}", flush=True)
+            mcp_tools = []
+
+    builtin_names = {getattr(t, "__name__", str(t)) for t in in_process_tools}
+    merged_tools = list(in_process_tools) + [
+        t for t in mcp_tools if getattr(t, "tool_name", getattr(t, "__name__", None)) not in builtin_names
+    ]
+
+    agent = Agent(
+        system_prompt=system_prompt,
+        model=MODEL_ID,
+        tools=merged_tools,
     )
-    return agent, "in-process"
+    mode = f"in-process+mcp({len(mcp_tools)})" if mcp_tools else "in-process"
+    return agent, mode

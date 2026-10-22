@@ -152,6 +152,12 @@ resource "aws_bedrockagentcore_agent_runtime" "this" {
     # async-invoke needs the bucket owner for s3Location.bucketOwner.
     STACK_FQNAME   = local.fqname
     AWS_ACCOUNT_ID = data.aws_caller_identity.current.account_id
+    # Distribution-Readiness plugin surface (PR #TBD). When set, the
+    # runtime opens an MCP connection to this gateway on top of its
+    # in-process tool list — see build_agent() in agent/.../agent.py.
+    # Each customer-added data source is a gateway target managed by
+    # the plugins lambda. Not set → in-process tools only.
+    GATEWAY_MCP_URL = aws_bedrockagentcore_gateway.plugins.gateway_url
   }
 }
 
