@@ -243,14 +243,21 @@ touching the stack:
   The runtime caches with a 15 min TTL (`PRICES_CACHE_TTL_SECONDS`).
   Missing parameters are cached as "unknown price" and still write
   a `usage_events` row with `cost=null`.
-- **Hosted web search** — `WEB_SEARCH_PROVIDER` env var picks between
-  `none` (default; the `web_search` tool explains itself as
-  unconfigured), `brave` (ready adapter), `google_cse`, and `serpapi`
-  (stubs that need wire-up in `agent/tl_agentcore/web_search/stubs.py`
-  before use). The API key is a SecureString SSM parameter at
-  `/tl-agentcore/web-search/<provider>` — Terraform does NOT create
-  the parameter, so ops writes the key out of band to keep the KMS
-  encryption context in operator-controlled scope.
+- **Hosted web search** — `WEB_SEARCH_PROVIDER` env var picks the
+  provider; default `brave` (adapter in
+  `agent/tl_agentcore/web_search/brave.py`). `google_cse` and
+  `serpapi` are stubs that need wire-up in
+  `agent/tl_agentcore/web_search/stubs.py` before use; set to `none`
+  to disable the tool with an explanatory error. The API key is a
+  SecureString SSM parameter at `/tl-agentcore/web-search/<provider>`
+  — Terraform does NOT create the parameter, so ops writes the key
+  out of band to keep the KMS encryption context in
+  operator-controlled scope. For Brave: get a key from
+  https://api.search.brave.com (free tier is 2K queries/month), then
+  `aws ssm put-parameter --name /tl-agentcore/web-search/brave --type
+  SecureString --value <key>`. The runtime caches the key for 5 min
+  (`WEB_SEARCH_API_KEY_CACHE_TTL_SECONDS`), so rotating is just
+  overwriting the parameter and waiting out the TTL.
 
 ## Lambda surface
 
