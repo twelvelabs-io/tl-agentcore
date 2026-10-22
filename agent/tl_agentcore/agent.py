@@ -3309,6 +3309,57 @@ def persist_session_turn(
         return None
 
 
+# Wave-2 PR #8 — session index. The runtime writes `user_id` into every
+# turn's session row (when a Cognito sub is resolvable), and the sessions
+# table carries a `by-user` GSI (HK=user_id, RK=last_updated_at). The
+# tool below queries that GSI so the agent can resurface past turns at
+# the user's request ("what was I working on yesterday?", "show me my
+# last 5 sessions") without the operator standing up a separate API.
+#
+# Rows surface only for the signed-in user; a Scan is never issued.
+# ScanIndexForward=False sorts most-recent-first.
+@tool
+def list_my_sessions(limit: int = 10) -> dict:
+    """List the signed-in user's most recent agent sessions (one row per
+    AgentCore session_id). Use this when the user asks what they were
+    working on, wants to resume a prior conversation, or asks you to
+    show their recent history. Rows carry: `session_id`, `knowledge_store_id`,
+    `last_prompt` (truncated preview), `last_updated_at`, `turn_count`,
+    `tool_path`. Returns `{"sessions": [...], "count": N}`, or `{"error": "..."}`
+    if the index is unconfigured / the user isn't signed in."""
+    if not SESSIONS_TABLE:
+        return {"error": "sessions table not configured"}
+    user_id = _current_user_id()
+    if not user_id:
+        return {"error": "no signed-in user — list_my_sessions requires an authenticated session"}
+    limit = max(1, min(int(limit or 10), 50))
+    try:
+        r = _ddb.query(
+            TableName=SESSIONS_TABLE,
+            IndexName="by-user",
+            KeyConditionExpression="user_id = :u",
+            ExpressionAttributeValues={":u": {"S": user_id}},
+            ScanIndexForward=False,  # newest first
+            Limit=limit,
+        )
+    except Exception as e:
+        return {"error": f"query failed: {type(e).__name__}: {e}"}
+    sessions: list[dict] = []
+    for row in r.get("Items", []):
+        prompt_preview = row.get("last_prompt", {}).get("S", "")[:200]
+        plan_text = row.get("last_plan_text", {}).get("S", "")
+        sessions.append({
+            "session_id":         row.get("session_id", {}).get("S", ""),
+            "knowledge_store_id": row.get("knowledge_store_id", {}).get("S") or None,
+            "last_prompt":        prompt_preview,
+            "last_updated_at":    row.get("last_updated_at", {}).get("S", ""),
+            "turn_count":         int(row.get("turn_count", {}).get("N", "0")),
+            "tool_path":          row.get("tool_path", {}).get("S") or None,
+            "has_plan":           bool(plan_text),
+        })
+    return {"sessions": sessions, "count": len(sessions)}
+
+
 # ═══ Ancillary: Domain DDB lookups ════════════════════════════════════════════
 
 @tool
@@ -3694,6 +3745,9 @@ def build_agent(access_token: Optional[str] = None) -> tuple[Agent, str]:
             get_transcript, get_shot_timeline, get_audio_context,
             # Per-user long-term memory (DDB, Cognito-sub namespaced)
             manage_memory, save_tref_to_memory,
+            # Session index — resurface the signed-in user's past turns
+            # (sessions.by-user GSI, newest-first).
+            list_my_sessions,
             # Generation (PR #11): HTML app via Claude, stitched video, safe eval
             generate_html_app, generate_video, execute_code,
             # Per-user artifact store (saved plans / html-1 apps / rendered videos / blobs)

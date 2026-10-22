@@ -91,6 +91,9 @@ TOOL_SCOPES: dict[str, str] = {
     # so it rides on jockey.ingest.
     "manage_memory":                   SCOPE_READ,
     "save_tref_to_memory":             SCOPE_INGEST,
+    # Session index (wave-2 PR #8). Read-only query over the signed-in
+    # user's past turns via the sessions.by-user GSI.
+    "list_my_sessions":                SCOPE_READ,
     # Artifact store (PR #18). save_artifact is the only write path and
     # takes the dedicated jockey.artifact-save scope; open/list are reads.
     "save_artifact":                   SCOPE_ARTIFACT_SAVE,
