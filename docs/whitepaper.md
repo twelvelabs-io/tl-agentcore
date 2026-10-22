@@ -507,11 +507,10 @@ or model id.
   and `output_per_mtok`) with a 15 min per-process cache, so ops
   bumps rates without a redeploy.
 - **Hosted web search.** The `web_search` tool wraps a provider
-  adapter picked by the `WEB_SEARCH_PROVIDER` env var: `none`
-  (default — returns a configuration error), `brave` (ready adapter
-  in `web_search/brave.py`), `google_cse` and `serpapi` (stubs with
-  wire-up docstrings). API keys live in SSM SecureStrings at
-  `/tl-agentcore/web-search/<provider>`.
+  adapter picked by the `WEB_SEARCH_PROVIDER` env var: `brave`
+  (default — adapter in `web_search/brave.py`) or `none` (disables
+  the tool with an explanatory error). API keys live in SSM
+  SecureStrings at `/tl-agentcore/web-search/<provider>`.
 - **QA-item.** A per-asset question-answer tool with a kb_cache row
   per `(asset_id, modality, window, normalized_question)`. Repeat
   questions over the same clip collapse from a $0.001 Pegasus call

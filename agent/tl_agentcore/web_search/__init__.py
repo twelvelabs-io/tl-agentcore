@@ -1,16 +1,15 @@
 """Hosted web search + citations (wave-2 PR #7 of Jockey parity).
 
 Provider-agnostic scaffold. The agent calls one tool — `web_search` —
-and the runtime routes to whichever provider the operator has picked
-by setting `WEB_SEARCH_PROVIDER`. Ships with a null default so the
-tool is callable but obviously unconfigured until a provider is wired.
+and the runtime routes to the active provider named in
+`WEB_SEARCH_PROVIDER`. Ships with Brave as the default; if another
+provider is needed, add an adapter next to `brave.py` and extend
+`select_provider()` in `provider.py`.
 
-Pick a provider by setting:
+Options:
 
-  WEB_SEARCH_PROVIDER = "brave"       # ready adapter (this release)
-  WEB_SEARCH_PROVIDER = "google_cse"  # stub — wire up in stubs.py
-  WEB_SEARCH_PROVIDER = "serpapi"     # stub — wire up in stubs.py
-  WEB_SEARCH_PROVIDER = "none"        # default — tool returns an error
+  WEB_SEARCH_PROVIDER = "brave"   # default — adapter in brave.py
+  WEB_SEARCH_PROVIDER = "none"    # disable — tool returns an error
 
 The provider's API key lives in SSM at
 `{WEB_SEARCH_API_KEY_SSM_PREFIX}/<provider>` (SecureString).

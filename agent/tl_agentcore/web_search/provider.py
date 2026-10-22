@@ -80,17 +80,11 @@ def select_provider() -> Provider:
     if name == "brave":
         from .brave import BraveProvider
         return BraveProvider()
-    if name == "google_cse":
-        from .stubs import GoogleCseProvider
-        return GoogleCseProvider()
-    if name == "serpapi":
-        from .stubs import SerpApiProvider
-        return SerpApiProvider()
     # Unknown value shouldn't crash the runtime — surface it as a
     # configuration error through the tool response instead.
     raise ValueError(
         f"unknown WEB_SEARCH_PROVIDER: {name!r} "
-        f"(expected one of: none, brave, google_cse, serpapi)"
+        f"(expected one of: none, brave)"
     )
 
 
@@ -170,9 +164,8 @@ def search(query: str, max_results: int = 5) -> dict[str, Any]:
             "configured": False,
             "results": [],
             "error": (
-                "web search not configured — set WEB_SEARCH_PROVIDER "
-                "to one of: brave, google_cse, serpapi; put the key at "
-                f"SSM {_API_KEY_SSM_PREFIX}/<provider>"
+                "web search not configured — set WEB_SEARCH_PROVIDER=brave "
+                f"and put the key at SSM {_API_KEY_SSM_PREFIX}/brave"
             ),
         }
 
