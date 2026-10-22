@@ -72,6 +72,7 @@ from .activity_narrator import narrate as narrate_activity
 from .duration_enforcer import _extract_plan_block, enforce_duration_target
 from .error_taxonomy import classify as classify_error
 from .metering import record_model_invocation, record_tool_call
+from .pipelines import RewooFallback, run_rewoo, select_pipeline
 from .scoring import maybe_judge_turn
 
 app = BedrockAgentCoreApp()
@@ -234,78 +235,118 @@ async def _semantic_stream(payload: dict) -> AsyncIterator[dict]:
     # before the request reached us.
     set_user_id_from_token(access_token)
 
-    queue: asyncio.Queue = asyncio.Queue()
-    mode = "unknown"
-    try:
-        agent, mode = build_agent(access_token=access_token)
-        agent.hooks.add_hook(WireEventCollector(
-            queue,
-            response_id=response_id,
-            knowledge_store_id=ks,
-        ))
-    except Exception as e:
-        yield {"__kind__": "failed", "response_id": response_id,
-               "error": {"message": f"agent build failed: {e}",
-                         "code": classify_error(f"agent build failed: {e}", exc=e),
-                         "trace": traceback.format_exc()}}
-        return
-
+    # Wave-2 PR #11: pipeline selection. ReWOO handles info-type turns
+    # with a fixed planner+executor+solver round-trip; ReAct is the
+    # default for structural / ambiguous turns and the fallback target
+    # when ReWOO's executor hits a problem it can't recover from.
+    pipeline, pipeline_reason = select_pipeline(payload)
     text_item_id = f"msg_{uuid.uuid4().hex[:12]}"
     text_started = False
     final_text = ""
+    mode = pipeline  # observability — overwritten by the ReAct branch
 
-    try:
-        async for event in agent.stream_async(user_text):
+    yield {
+        "__kind__": "activity",
+        "tool_use_id": response_id,
+        "text": f"pipeline: {pipeline} ({pipeline_reason})",
+    }
+
+    if pipeline == "rewoo":
+        try:
+            async for ev in run_rewoo(
+                prompt=prompt,
+                user_text=user_text,
+                knowledge_store_id=ks,
+                response_id=response_id,
+                selections=selections,
+            ):
+                kind = ev.get("__kind__")
+                if kind == "text_begin":
+                    text_started = True
+                elif kind == "text_delta":
+                    final_text += ev.get("delta", "")
+                elif kind == "text_done":
+                    final_text = ev.get("text", final_text)
+                yield ev
+        except RewooFallback as e:
+            yield {
+                "__kind__": "activity",
+                "tool_use_id": response_id,
+                "text": f"rewoo fallback → react ({e})",
+            }
+            text_started = False
+            final_text = ""
+            pipeline = "react"
+            text_item_id = f"msg_{uuid.uuid4().hex[:12]}"
+
+    if pipeline == "react":
+        queue: asyncio.Queue = asyncio.Queue()
+        try:
+            agent, mode = build_agent(access_token=access_token)
+            agent.hooks.add_hook(WireEventCollector(
+                queue,
+                response_id=response_id,
+                knowledge_store_id=ks,
+            ))
+        except Exception as e:
+            yield {"__kind__": "failed", "response_id": response_id,
+                   "error": {"message": f"agent build failed: {e}",
+                             "code": classify_error(f"agent build failed: {e}", exc=e),
+                             "trace": traceback.format_exc()}}
+            return
+
+        try:
+            async for event in agent.stream_async(user_text):
+                while not queue.empty():
+                    yield queue.get_nowait()
+
+                if not isinstance(event, dict):
+                    continue
+
+                chunk = event.get("data")
+                if isinstance(chunk, str) and chunk:
+                    if not text_started:
+                        text_started = True
+                        yield {"__kind__": "text_begin", "item_id": text_item_id}
+                    final_text += chunk
+                    yield {"__kind__": "text_delta",
+                           "item_id": text_item_id, "delta": chunk}
+                    continue
+
+                # One Strands event per completed model cycle carries a
+                # `stop` tuple: (stop_reason, message, usage, metrics). We
+                # mint one metering row per cycle so a multi-turn ReAct
+                # trace shows up as N `model_invoke` rows, not one. Any
+                # metering miss logs and continues.
+                stop_tuple = event.get("stop")
+                if isinstance(stop_tuple, tuple) and len(stop_tuple) >= 4:
+                    try:
+                        _, _msg, usage, metrics = stop_tuple
+                        record_model_invocation(
+                            user_id=_current_user_id(),
+                            model_id=MODEL_ID,
+                            input_tokens=int((usage or {}).get("inputTokens", 0)),
+                            output_tokens=int((usage or {}).get("outputTokens", 0)),
+                            latency_ms=int((metrics or {}).get("latencyMs", 0)),
+                            response_id=response_id,
+                            knowledge_store_id=ks,
+                        )
+                    except Exception as e:
+                        print(f"runtime: model metering failed: {e}")
+
+                result = event.get("result")
+                if result is not None:
+                    final_text = str(result) or final_text
+
             while not queue.empty():
                 yield queue.get_nowait()
-
-            if not isinstance(event, dict):
-                continue
-
-            chunk = event.get("data")
-            if isinstance(chunk, str) and chunk:
-                if not text_started:
-                    text_started = True
-                    yield {"__kind__": "text_begin", "item_id": text_item_id}
-                final_text += chunk
-                yield {"__kind__": "text_delta",
-                       "item_id": text_item_id, "delta": chunk}
-                continue
-
-            # One Strands event per completed model cycle carries a
-            # `stop` tuple: (stop_reason, message, usage, metrics). We
-            # mint one metering row per cycle so a multi-turn ReAct
-            # trace shows up as N `model_invoke` rows, not one. Any
-            # metering miss logs and continues.
-            stop_tuple = event.get("stop")
-            if isinstance(stop_tuple, tuple) and len(stop_tuple) >= 4:
-                try:
-                    _, _msg, usage, metrics = stop_tuple
-                    record_model_invocation(
-                        user_id=_current_user_id(),
-                        model_id=MODEL_ID,
-                        input_tokens=int((usage or {}).get("inputTokens", 0)),
-                        output_tokens=int((usage or {}).get("outputTokens", 0)),
-                        latency_ms=int((metrics or {}).get("latencyMs", 0)),
-                        response_id=response_id,
-                        knowledge_store_id=ks,
-                    )
-                except Exception as e:
-                    print(f"runtime: model metering failed: {e}")
-
-            result = event.get("result")
-            if result is not None:
-                final_text = str(result) or final_text
-
-        while not queue.empty():
-            yield queue.get_nowait()
-    except Exception as e:
-        yield {"__kind__": "failed", "response_id": response_id,
-               "error": {"message": f"agent run failed: {e}",
-                         "code": classify_error(f"agent run failed: {e}", exc=e),
-                         "trace": traceback.format_exc()},
-               "tool_path": mode}
-        return
+        except Exception as e:
+            yield {"__kind__": "failed", "response_id": response_id,
+                   "error": {"message": f"agent run failed: {e}",
+                             "code": classify_error(f"agent run failed: {e}", exc=e),
+                             "trace": traceback.format_exc()},
+                   "tool_path": mode}
+            return
 
     # EDL extraction. If the model's prose included a <plan>...</plan> block
     # with parseable JSON, emit it as a `custom` output item so the UI
