@@ -44,10 +44,17 @@ export type ResponseMessageItem = {
 export type ResponseFunctionCallItem = {
   id: string;
   type: "function_call";
-  status: "in_progress" | "completed";
+  // runtime.py also sets "failed" when `error_code` is populated — the
+  // envelope converts a tool_end with an error_code into this item shape.
+  status: "in_progress" | "completed" | "failed";
   name: string;
   arguments?: string;
   output?: string;
+  // Stable bucket slug from agent/tl_agentcore/error_taxonomy.py when the
+  // tool raised or returned {"error": ...}. One of: unknown, not_found,
+  // permission, rate_limit, throttled, validation, timeout, model_error,
+  // network, config. UIs map on this, never on `output` prose.
+  error_code?: string;
 };
 
 export type ResponseCustomItem = {
@@ -67,7 +74,30 @@ export type ResponseItem =
 type ResponseErrorBody = {
   message: string;
   trace?: string;
+  // Same taxonomy as ResponseFunctionCallItem.error_code — mapped on the
+  // UI side via errorLabel() below.
+  code?: string;
 };
+
+/** Map an error_taxonomy slug to a short human label. Falls back to the
+ *  raw slug (with underscores → spaces) when the code is unknown so new
+ *  taxonomy additions still render legibly. */
+export function errorLabel(code?: string): string {
+  if (!code) return "";
+  switch (code) {
+    case "rate_limit":  return "rate limited";
+    case "throttled":   return "throttled";
+    case "timeout":     return "timeout";
+    case "not_found":   return "not found";
+    case "permission":  return "no permission";
+    case "validation":  return "bad input";
+    case "model_error": return "model error";
+    case "network":     return "network";
+    case "config":      return "misconfigured";
+    case "unknown":     return "failed";
+    default: return code.replace(/_/g, " ");
+  }
+}
 
 export type AgentEvent =
   | { type: "response.created"; sequence_number: number;
