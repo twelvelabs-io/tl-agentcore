@@ -245,10 +245,10 @@ touching the stack:
   a `usage_events` row with `cost=null`.
 - **Hosted web search** — `WEB_SEARCH_PROVIDER` env var picks the
   provider; default `brave` (adapter in
-  `agent/tl_agentcore/web_search/brave.py`). `google_cse` and
-  `serpapi` are stubs that need wire-up in
-  `agent/tl_agentcore/web_search/stubs.py` before use; set to `none`
-  to disable the tool with an explanatory error. The API key is a
+  `agent/tl_agentcore/web_search/brave.py`). Set to `none` to
+  disable the tool with an explanatory error. If a different
+  provider is needed, add an adapter next to `brave.py` and extend
+  `select_provider()` in `provider.py`. The API key is a
   SecureString SSM parameter at `/tl-agentcore/web-search/<provider>`
   — Terraform does NOT create the parameter, so ops writes the key
   out of band to keep the KMS encryption context in

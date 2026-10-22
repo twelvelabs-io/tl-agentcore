@@ -137,13 +137,13 @@ resource "aws_bedrockagentcore_agent_runtime" "this" {
     # tool call if it needs them.
     PRESEED_ASSETS_LIMIT = "30"
     # Wave-2 PR #7: hosted web search + citations. The `web_search` tool
-    # routes to the provider named here. Brave has a ready adapter in
-    # web_search/brave.py; google_cse / serpapi are stubs that need
-    # wire-up in web_search/stubs.py before use. The provider's API key
+    # routes to the provider named here. Brave is the shipped adapter
+    # (`web_search/brave.py`); add another one next to it and extend
+    # `select_provider()` if a different provider is needed. The API key
     # lives at `${WEB_SEARCH_API_KEY_SSM_PREFIX}/<provider>`
     # (SecureString) — written out of band by ops so the KMS encryption
-    # context stays in operator-controlled scope. Set to "none"
-    # (NullProvider) to disable the tool with an explanatory error.
+    # context stays in operator-controlled scope. Set to "none" to
+    # disable the tool with an explanatory error.
     WEB_SEARCH_PROVIDER                  = "brave"
     WEB_SEARCH_API_KEY_SSM_PREFIX        = "/tl-agentcore/web-search"
     WEB_SEARCH_API_KEY_CACHE_TTL_SECONDS = "300"
