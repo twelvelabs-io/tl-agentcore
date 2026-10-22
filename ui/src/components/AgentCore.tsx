@@ -34,6 +34,11 @@ type Turn = {
   // mono strip under the § Response header so producers can see what the
   // agent is up to without reading the raw function_call JSON.
   activity?: string[];
+  // Set from response.completed.tool_path — carries the pipeline / tool
+  // transport the agent actually ran this turn through (e.g. "react",
+  // "rewoo", "in-process", "mcp-gateway"). Rendered as a small label
+  // next to the elapsed time in the response header.
+  toolPath?: string;
 };
 
 const enabled = agentEnabled();
@@ -143,6 +148,12 @@ export function AgentCore() {
           setErr(ev.response.error.message);
           setErrCode(ev.response.error.code || null);
         } else if (ev.type === "response.completed") {
+          const tp = ev.response.tool_path;
+          if (tp) {
+            setTurns((ts) => ts.map((t) =>
+              t.id === aTurn.id ? { ...t, toolPath: tp } : t
+            ));
+          }
           setTimeout(() => setActiveNode(null), 1200);
         }
       }
@@ -320,8 +331,23 @@ export function AgentCore() {
                 )}
               </div>
               {heroTurn?.elapsedMs && !heroTurn.streaming && (
-                <div className="font-mono text-sm" style={{ color: "var(--color-ink-soft)" }}>
-                  {(heroTurn.elapsedMs / 1000).toFixed(1)}s
+                <div className="flex items-baseline gap-2">
+                  {heroTurn.toolPath && (
+                    <span
+                      className="px-1.5 py-0.5 rounded-full font-mono text-[9px] uppercase tracking-wider"
+                      style={{
+                        background: "var(--color-surface)",
+                        border: "1px solid var(--color-rule)",
+                        color: "var(--color-ink-faint)",
+                      }}
+                      title={`pipeline / transport: ${heroTurn.toolPath}`}
+                    >
+                      {heroTurn.toolPath}
+                    </span>
+                  )}
+                  <span className="font-mono text-sm" style={{ color: "var(--color-ink-soft)" }}>
+                    {(heroTurn.elapsedMs / 1000).toFixed(1)}s
+                  </span>
                 </div>
               )}
             </div>
