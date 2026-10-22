@@ -86,6 +86,7 @@ def _build() -> dict[str, Any]:
         _a.add_media,
         _a.jockey_save, _a.jockey_list, _a.jockey_run, _a.jockey_list_runs,
         _a.pegasus_analyze, _a.pegasus_segments, _a.zoom_in_video,
+        _a.qa_item,
         _a.get_transcript, _a.get_shot_timeline, _a.get_audio_context,
         _a.manage_memory, _a.save_tref_to_memory,
         _a.list_my_sessions,
