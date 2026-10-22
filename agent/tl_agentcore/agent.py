@@ -3936,8 +3936,14 @@ def build_agent(access_token: Optional[str] = None) -> tuple[Agent, str]:
             # artifact mutations, kb_cache schema introspection, lightweight
             # feedback sink.
             render, manage_artifacts, list_filterable_fields, feedback,
-            # Ancillary domain stores (rights + audience cohorts in DDB)
-            lookup_rights, list_audiences, lookup_audience,
+            # Ancillary domain stores (rights + audience cohorts) now
+            # live as AgentCore Gateway targets — lambda/plugin_rights
+            # and lambda/plugin_audience — so the agent discovers them
+            # over MCP alongside anything else a customer plugs in.
+            # The in-process Python functions below (lookup_rights,
+            # list_audiences, lookup_audience) stay in the file for
+            # local_run.py and for the migration safety net, but are
+            # no longer registered as Strands tools.
     ]
 
     # ─── Plugin surface — Distribution-Readiness PR 1 ─────────────────
