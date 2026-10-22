@@ -342,6 +342,19 @@ data "aws_iam_policy_document" "runtime_perms" {
       "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter/tl-agentcore/prices/*",
     ]
   }
+  # Wave-2 PR #7: hosted web-search API keys. Each provider's key lives
+  # under /tl-agentcore/web-search/<provider> as a SecureString; the
+  # web_search tool fetches with WithDecryption=true. Terraform does
+  # NOT create these parameters — ops writes the key out of band after
+  # choosing a provider so the SecureString's KMS encryption context
+  # stays in operator-controlled scope.
+  statement {
+    sid     = "WebSearchApiKeysSsmRead"
+    actions = ["ssm:GetParameter", "ssm:GetParameters"]
+    resources = [
+      "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter/tl-agentcore/web-search/*",
+    ]
+  }
 }
 
 resource "aws_iam_role_policy" "runtime" {

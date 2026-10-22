@@ -145,6 +145,17 @@ resource "aws_bedrockagentcore_agent_runtime" "this" {
     # DDB round-trips to avoid two model round-trips the model wouldn't
     # have taken anyway).
     PRESEED_TOOLS_ENABLED = "0"
+    # Wave-2 PR #7: hosted web search + citations. The `web_search` tool
+    # routes to the provider named here. Default "none" (NullProvider)
+    # returns an explanatory error so the tool is callable but obviously
+    # unconfigured. Flip to "brave" / "google_cse" / "serpapi" once ops
+    # has put the provider's API key in SSM at
+    # `${WEB_SEARCH_API_KEY_SSM_PREFIX}/<provider>` (SecureString). Brave
+    # has a ready adapter in web_search/brave.py; the other two are
+    # stubs — flesh out web_search/stubs.py when picking one.
+    WEB_SEARCH_PROVIDER                  = "none"
+    WEB_SEARCH_API_KEY_SSM_PREFIX        = "/tl-agentcore/web-search"
+    WEB_SEARCH_API_KEY_CACHE_TTL_SECONDS = "300"
     # v0.4 hybrid entity-reID: per-KS Rekognition collection id is
     # derived as `<STACK_FQNAME>-ks-<ks_id>`. Marengo image-embed
     # async-invoke needs the bucket owner for s3Location.bucketOwner.
