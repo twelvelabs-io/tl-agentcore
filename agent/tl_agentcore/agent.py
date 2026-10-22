@@ -72,6 +72,13 @@ import httpx
 from strands import Agent, tool
 
 from .aliases import aliasify_result, dealias_dict, resolve_alias
+from .qa_item import (
+    from_cached_row as _qa_from_cached_row,
+    qa_cache_row as _qa_cache_row,
+    resolve_modality as _qa_resolve_modality,
+    shape_prompt as _qa_shape_prompt,
+    cache_key as _qa_cache_key,
+)
 from .web_search import search as _web_search
 
 # ─── Configuration via env ──────────────────────────────────────────────────
@@ -1295,6 +1302,129 @@ def pegasus_analyze(
         start_time=start_time,
         end_time=end_time,
     )
+
+
+# ─── Wave-2 PR #6: QA-item tool + per-item DDB cache ─────────────────────────
+
+PEGASUS_QA_MODEL_ID = os.environ.get(
+    "PEGASUS_BEDROCK_MODEL_ID",
+    "us.twelvelabs.pegasus-1-5-v1:0",
+)
+
+
+@tool
+def qa_item(
+    asset_id: str,
+    question: str,
+    modality: str = "auto",
+    knowledge_store_id: Optional[str] = None,
+    start_time: Optional[float] = None,
+    end_time: Optional[float] = None,
+    use_cache: bool = True,
+) -> dict:
+    """Ask a specific question about one asset and get a grounded answer
+    with cache metadata. Backed by Bedrock Pegasus 1.5 with a per-item
+    DDB cache under kb_cache (sk prefix `QA#<asset_id>#`).
+
+    Prefer this over calling `pegasus_analyze` directly when:
+      - the question is answerable from a single clip, and
+      - the same question may be asked again later in this session or by
+        another user (the cache cuts repeat Pegasus spend to a single
+        sub-10ms DDB GetItem).
+
+    For broad "describe this clip" asks or when you need fine control
+    over the Pegasus prompt / schema, call `pegasus_analyze` directly;
+    this tool is for repeated question-shaped queries.
+
+    Args:
+        asset_id: 24-hex asset_id. Alias handles (`@id_N`) accepted.
+        question: free-text question about the asset.
+        modality: "auto" | "visual" | "audio". "auto" classifies the
+            question from its wording. "visual" / "audio" force a
+            modality-shaped prompt prefix so Pegasus biases attention.
+        knowledge_store_id: ks_xxxxxxxx (defaults from current selection).
+        start_time / end_time: optional sub-clip bounds in seconds. The
+            window is baked into the cache key so answers over 0-10s
+            don't collide with answers over 10-20s.
+        use_cache: when False, bypass the DDB read (still writes on
+            success). Useful if the operator suspects a stale answer.
+
+    Returns:
+        {asset_id, question, modality, answer, cached, cached_at?,
+         model_id, source: "pegasus_live"|"qa_cache"}
+    """
+    asset_id = resolve_alias(asset_id)
+    asset_id = _sel_default("asset_id", asset_id)
+    knowledge_store_id = _sel_default("knowledge_store_id", knowledge_store_id)
+    start_time = _sel_default("start_sec", start_time)
+    end_time = _sel_default("end_sec", end_time)
+
+    if not asset_id:
+        return {"error": "asset_id is required"}
+    if not isinstance(question, str) or not question.strip():
+        return {"error": "question is required"}
+    if not knowledge_store_id:
+        return {"error": "knowledge_store_id required (or set via selections)"}
+
+    resolved_modality = _qa_resolve_modality(modality, question)
+
+    # Cache read.
+    if use_cache and KB_CACHE_TABLE:
+        sk = _qa_cache_key(asset_id, resolved_modality, question, start_time, end_time)
+        try:
+            hit = _ddb_kb_get(f"ks#{knowledge_store_id}", sk)
+        except Exception as e:
+            print(f"qa_item: cache read failed: {e}")
+            hit = None
+        if hit:
+            return aliasify_result(_qa_from_cached_row(hit))
+
+    # Cache miss → call Pegasus with a modality-shaped prompt.
+    shaped = _qa_shape_prompt(resolved_modality, question)
+    answer = _pegasus_bedrock(
+        asset_id, shaped, 0.2,
+        max_output_tokens=1024,
+        response_schema=None,
+        reference_images=None,
+        start_time=start_time,
+        end_time=end_time,
+    )
+    # pegasus_analyze returns a string. Error paths return a string
+    # starting with "error:" — don't cache those.
+    cacheable = isinstance(answer, str) and not answer.lower().startswith("error:")
+
+    if cacheable and KB_CACHE_TABLE:
+        try:
+            _ddb.put_item(
+                TableName=KB_CACHE_TABLE,
+                Item=_qa_cache_row(
+                    asset_id=asset_id,
+                    knowledge_store_id=knowledge_store_id,
+                    modality=resolved_modality,
+                    question=question,
+                    answer=answer,
+                    start_sec=start_time,
+                    end_sec=end_time,
+                    model_id=PEGASUS_QA_MODEL_ID,
+                ),
+            )
+        except Exception as e:
+            print(f"qa_item: cache write failed: {e}")
+
+    result = {
+        "asset_id":  asset_id,
+        "question":  question,
+        "modality":  resolved_modality,
+        "answer":    answer,
+        "cached":    False,
+        "model_id":  PEGASUS_QA_MODEL_ID,
+        "source":    "pegasus_live",
+    }
+    if start_time is not None:
+        result["start_sec"] = start_time
+    if end_time is not None:
+        result["end_sec"] = end_time
+    return aliasify_result(result)
 
 
 @tool
@@ -3804,6 +3934,8 @@ def build_agent(access_token: Optional[str] = None) -> tuple[Agent, str]:
             jockey_save, jockey_list, jockey_run, jockey_list_runs,
             # Tier 2 — On-demand grounding via Bedrock Pegasus
             pegasus_analyze, pegasus_segments, zoom_in_video,
+            # Wave-2 PR #6: cached question-answer over one asset.
+            qa_item,
             # Transcript / shot / audio context (ASR + Rekognition SegmentDetection + Comprehend)
             get_transcript, get_shot_timeline, get_audio_context,
             # Per-user long-term memory (DDB, Cognito-sub namespaced)
