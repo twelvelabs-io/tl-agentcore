@@ -211,6 +211,17 @@ resource "aws_cloudfront_distribution" "frontend" {
     cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # CachingDisabled
   }
 
+  ordered_cache_behavior {
+    path_pattern             = "/usage"
+    target_origin_id         = "tl-proxy-http"
+    viewer_protocol_policy   = "redirect-to-https"
+    allowed_methods          = ["GET", "HEAD", "OPTIONS"]
+    cached_methods           = ["GET", "HEAD"]
+    compress                 = true
+    origin_request_policy_id = "b689b0a8-53d0-40ab-baf2-68738e2966ac" # AllViewer
+    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # CachingDisabled
+  }
+
   # /settings/* → HTTP API Gateway (settings lambda → kb_cache DDB).
   # View/edit the system prompts the agent + ingest pipeline use.
   ordered_cache_behavior {

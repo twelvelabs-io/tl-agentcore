@@ -24,9 +24,10 @@ import {
   resetPwd,
   type User,
 } from "../lib/users-api";
+import { fetchUsage, type UsagePayload } from "../lib/api";
 
 type Prompts = Record<PromptId, PromptInfo>;
-type TabId = "prompts" | "users";
+type TabId = "prompts" | "users" | "usage";
 
 export default function SettingsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   return (
@@ -77,7 +78,7 @@ function SettingsModalContent({ onClose }: { onClose: () => void }) {
           <div>
             <div className="label" style={{ color: "var(--color-cue)" }}>settings</div>
             <h2 className="font-display text-2xl mt-1">
-              {tab === "prompts" ? "System prompts" : "Users"}
+              {tab === "prompts" ? "System prompts" : tab === "users" ? "Users" : "Usage"}
             </h2>
             {tab === "prompts" && (
               <p className="font-mono text-[11px] mt-1" style={{ color: "var(--color-ink-faint)" }}>
@@ -94,11 +95,13 @@ function SettingsModalContent({ onClose }: { onClose: () => void }) {
           {showUsers && (
             <TabButton active={tab === "users"} onClick={() => setTab("users")}>Users</TabButton>
           )}
+          <TabButton active={tab === "usage"} onClick={() => setTab("usage")}>Usage</TabButton>
         </div>
 
         <div className="flex-1 min-h-0 overflow-y-auto">
           {tab === "prompts" && <PromptsTab />}
           {tab === "users" && showUsers && <UsersTab />}
+          {tab === "usage" && <UsageTab />}
         </div>
       </motion.div>
     </motion.div>
@@ -571,6 +574,230 @@ function RowBtn({
       {busy ? "…" : children}
     </button>
   );
+}
+
+// ─── Usage tab ───────────────────────────────────────────────────────────────
+
+const USAGE_WINDOWS: { id: string; label: string; ms: number }[] = [
+  { id: "24h",  label: "last 24h", ms: 86_400_000 },
+  { id: "7d",   label: "last 7d",  ms: 7  * 86_400_000 },
+  { id: "30d",  label: "last 30d", ms: 30 * 86_400_000 },
+];
+
+function UsageTab() {
+  const [winId, setWinId] = useState<string>("24h");
+  const [data, setData] = useState<UsagePayload | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    const win = USAGE_WINDOWS.find((w) => w.id === winId)!;
+    const since = new Date(Date.now() - win.ms).toISOString();
+    setBusy(true); setErr(null);
+    fetchUsage({ since })
+      .then((p) => { if (!cancelled) { setData(p); setBusy(false); } })
+      .catch((e) => { if (!cancelled) { setErr(String(e?.message || e)); setBusy(false); } });
+    return () => { cancelled = true; };
+  }, [winId]);
+
+  return (
+    <section className="px-5 py-4">
+      <header className="flex items-baseline justify-between gap-4 pb-3">
+        <div>
+          <div className="label" style={{ color: "var(--color-cue)" }}>metering ledger</div>
+          <p className="font-mono text-[11px] mt-1" style={{ color: "var(--color-ink-faint)" }}>
+            per-model + per-tool activity for your signed-in sub · 90-day TTL on rows
+            {!isAdmin() && " · admin to query other users"}
+          </p>
+        </div>
+        <div className="flex items-center gap-1">
+          {USAGE_WINDOWS.map((w) => (
+            <TabButton key={w.id} active={winId === w.id} onClick={() => setWinId(w.id)}>
+              {w.label}
+            </TabButton>
+          ))}
+        </div>
+      </header>
+
+      {busy && (
+        <p className="caret font-display text-lg py-6" style={{ color: "var(--color-ink-soft)" }}>loading</p>
+      )}
+      {err && (
+        <div className="py-4">
+          <p className="font-display text-lg" style={{ color: "var(--color-status-failed)" }}>Couldn't load usage</p>
+          <p className="font-mono text-xs mt-2 break-all" style={{ color: "var(--color-ink-soft)" }}>{err}</p>
+        </div>
+      )}
+      {!busy && !err && data && <UsageBody data={data} />}
+    </section>
+  );
+}
+
+function UsageBody({ data }: { data: UsagePayload }) {
+  const { summary, events } = data;
+  const nothing = summary.model_invocations === 0 && summary.tool_calls === 0;
+  if (nothing) {
+    return (
+      <p className="font-mono text-sm py-6" style={{ color: "var(--color-ink-soft)" }}>
+        No events in this window.
+      </p>
+    );
+  }
+
+  const modelRows = Object.entries(summary.by_model)
+    .sort((a, b) => b[1].invocations - a[1].invocations);
+  const toolRows = Object.entries(summary.by_tool)
+    .sort((a, b) => b[1].calls - a[1].calls);
+
+  return (
+    <div className="flex flex-col gap-6">
+      <div className="grid grid-cols-4 gap-4">
+        <Stat label="model turns"      value={fmtCount(summary.model_invocations)} />
+        <Stat label="tool calls"       value={fmtCount(summary.tool_calls)} />
+        <Stat label="tokens (in · out)" value={`${fmtCount(summary.total_input_tokens)} · ${fmtCount(summary.total_output_tokens)}`} />
+        <Stat
+          label="total cost"
+          value={summary.total_cost_usd === null ? "—" : fmtUsd(summary.total_cost_usd)}
+          hint={summary.unknown_cost_count > 0 ? `${summary.unknown_cost_count} unknown-price` : undefined}
+        />
+      </div>
+
+      {modelRows.length > 0 && (
+        <div>
+          <div className="label pb-2" style={{ color: "var(--color-cue)" }}>by model</div>
+          <table className="w-full font-mono text-xs">
+            <thead style={{ color: "var(--color-ink-faint)" }}>
+              <tr>
+                <th className="text-left py-1">model</th>
+                <th className="text-right py-1">turns</th>
+                <th className="text-right py-1">in</th>
+                <th className="text-right py-1">out</th>
+                <th className="text-right py-1">cost</th>
+              </tr>
+            </thead>
+            <tbody>
+              {modelRows.map(([mid, b]) => (
+                <tr key={mid} className="border-t" style={{ borderColor: "var(--color-rule)" }}>
+                  <td className="py-1 pr-4 break-all">{mid}</td>
+                  <td className="text-right py-1 tabular-nums">{fmtCount(b.invocations)}</td>
+                  <td className="text-right py-1 tabular-nums">{fmtCount(b.input_tokens)}</td>
+                  <td className="text-right py-1 tabular-nums">{fmtCount(b.output_tokens)}</td>
+                  <td className="text-right py-1 tabular-nums">
+                    {b.unknown_cost ? "—" : fmtUsd(b.cost_usd)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {toolRows.length > 0 && (
+        <div>
+          <div className="label pb-2" style={{ color: "var(--color-cue)" }}>by tool</div>
+          <table className="w-full font-mono text-xs">
+            <thead style={{ color: "var(--color-ink-faint)" }}>
+              <tr>
+                <th className="text-left py-1">tool</th>
+                <th className="text-right py-1">calls</th>
+                <th className="text-right py-1">total ms</th>
+                <th className="text-right py-1">avg ms</th>
+              </tr>
+            </thead>
+            <tbody>
+              {toolRows.map(([tn, b]) => (
+                <tr key={tn} className="border-t" style={{ borderColor: "var(--color-rule)" }}>
+                  <td className="py-1 pr-4">{tn}</td>
+                  <td className="text-right py-1 tabular-nums">{fmtCount(b.calls)}</td>
+                  <td className="text-right py-1 tabular-nums">{fmtCount(b.duration_ms_total)}</td>
+                  <td className="text-right py-1 tabular-nums">
+                    {fmtCount(Math.round(b.duration_ms_total / b.calls))}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div>
+        <div className="label pb-2 flex items-baseline justify-between" style={{ color: "var(--color-cue)" }}>
+          <span>recent events</span>
+          <span className="font-mono text-[10px]" style={{ color: "var(--color-ink-faint)" }}>
+            showing {events.length.toLocaleString()} newest in window
+          </span>
+        </div>
+        <table className="w-full font-mono text-[11px]">
+          <thead style={{ color: "var(--color-ink-faint)" }}>
+            <tr>
+              <th className="text-left py-1">when</th>
+              <th className="text-left py-1">kind</th>
+              <th className="text-left py-1">what</th>
+              <th className="text-right py-1">tokens / ms</th>
+              <th className="text-right py-1">cost</th>
+            </tr>
+          </thead>
+          <tbody>
+            {events.slice(0, 50).map((e) => (
+              <tr key={e.event_id} className="border-t align-top" style={{ borderColor: "var(--color-rule)" }}>
+                <td className="py-1 pr-4 whitespace-nowrap">{fmtEventWhen(e.sampled_at)}</td>
+                <td className="py-1 pr-2">
+                  {e.event_type === "model_invoke" ? "model" : "tool"}
+                </td>
+                <td className="py-1 pr-4 break-all">
+                  {e.event_type === "model_invoke" ? e.model_id : e.tool_name}
+                </td>
+                <td className="text-right py-1 tabular-nums whitespace-nowrap">
+                  {e.event_type === "model_invoke"
+                    ? `${fmtCount(e.input_tokens || 0)} / ${fmtCount(e.output_tokens || 0)}`
+                    : `${fmtCount(e.duration_ms || 0)} ms`}
+                </td>
+                <td className="text-right py-1 tabular-nums whitespace-nowrap">
+                  {e.event_type === "model_invoke"
+                    ? (e.cost_usd === null || e.cost_usd === undefined ? "—" : fmtUsd(e.cost_usd))
+                    : ""}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {events.length > 50 && (
+          <p className="font-mono text-[10px] mt-2" style={{ color: "var(--color-ink-faint)" }}>
+            {events.length - 50} older events hidden · widen the window to filter server-side
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <div className="px-3 py-2" style={{ background: "var(--color-surface)", border: "1px solid var(--color-rule)" }}>
+      <div className="label" style={{ color: "var(--color-ink-faint)" }}>{label}</div>
+      <div className="font-display text-lg mt-1 tabular-nums">{value}</div>
+      {hint && (
+        <div className="font-mono text-[10px] mt-0.5" style={{ color: "var(--color-ink-faint)" }}>{hint}</div>
+      )}
+    </div>
+  );
+}
+
+function fmtCount(n: number): string {
+  return (n || 0).toLocaleString();
+}
+
+function fmtUsd(n: number): string {
+  if (n < 0.01) return `$${n.toFixed(4)}`;
+  if (n < 1)    return `$${n.toFixed(3)}`;
+  return `$${n.toFixed(2)}`;
+}
+
+function fmtEventWhen(iso: string): string {
+  // Short local time; keeps the recent-events table scannable.
+  const d = new Date(iso);
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 // ─── shared utils ────────────────────────────────────────────────────────────

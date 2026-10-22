@@ -104,6 +104,77 @@ export async function fetchScores(response_id: string): Promise<ScoresPayload> {
   if (!r.ok) throw new Error(`scores ${r.status}: ${await r.text().catch(() => "")}`);
   return r.json();
 }
+
+// ─── Usage (wave-2 metering ledger) ─────────────────────────────────────────
+export type UsageEvent = {
+  user_id: string;
+  event_id: string;
+  event_type: "model_invoke" | "tool_call";
+  sampled_at: string;
+  response_id?: string;
+  knowledge_store_id?: string;
+  // model_invoke:
+  model_id?: string;
+  input_tokens?: number;
+  output_tokens?: number;
+  cost_usd?: number | null;
+  price_source?: string;
+  latency_ms?: number;
+  // tool_call:
+  tool_name?: string;
+  duration_ms?: number;
+};
+
+export type UsageModelBucket = {
+  invocations: number;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+  unknown_cost?: boolean;
+};
+export type UsageToolBucket = {
+  calls: number;
+  duration_ms_total: number;
+};
+
+export type UsagePayload = {
+  user_id: string;
+  window: { since: string; until: string };
+  summary: {
+    model_invocations: number;
+    tool_calls: number;
+    total_input_tokens: number;
+    total_output_tokens: number;
+    total_cost_usd: number | null;   // null when any invocation had unknown price
+    unknown_cost_count: number;
+    by_model: Record<string, UsageModelBucket>;
+    by_tool: Record<string, UsageToolBucket>;
+  };
+  events: UsageEvent[];
+};
+
+/** Fetch metering-ledger events for a user and time window. `since` /
+ *  `until` are ISO strings; default is the last 24h. `user_id` is
+ *  admin-only — non-admin callers see only their own events regardless
+ *  of the argument. `limit` defaults to 500, capped at 2000 by the
+ *  lambda. */
+export async function fetchUsage(opts: {
+  since?: string;
+  until?: string;
+  user_id?: string;
+  limit?: number;
+} = {}): Promise<UsagePayload> {
+  const headers = await authHeaders();
+  const qs = new URLSearchParams();
+  if (opts.since)   qs.set("since", opts.since);
+  if (opts.until)   qs.set("until", opts.until);
+  if (opts.user_id) qs.set("user_id", opts.user_id);
+  if (opts.limit)   qs.set("limit", String(opts.limit));
+  const suffix = qs.toString() ? `?${qs}` : "";
+  const r = await fetch(`/usage${suffix}`, { headers });
+  if (!r.ok) throw new Error(`usage ${r.status}: ${await r.text().catch(() => "")}`);
+  return r.json();
+}
 async function authHeaders(): Promise<Record<string, string>> {
   const token = await getAccessToken();
   if (token) return { authorization: `Bearer ${token}` };
