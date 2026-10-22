@@ -2994,6 +2994,251 @@ def list_artifacts(
     return {"ok": True, "count": len(rows), "artifacts": rows}
 
 
+# ═══ Jockey-parity surface additions (wave 2, PR #3) ═══════════════════════
+# Four tools that round out Jockey's MCP surface. All are additive — no new
+# tables, no new IAM grants — because they ride on the already-provisioned
+# artifacts / kb_cache tables and the existing clips bucket presign flow.
+
+@tool
+def render(artifact_id: str, ttl_sec: int = 3600) -> dict:
+    """Return a user-facing render URL for a saved artifact: a presigned
+    HTTPS URL that opens the raw bytes in a browser, with no agent-side
+    JSON wrapper. Prefer this over `open_artifact` whenever the user asks
+    for "a link I can click/share" — `open_artifact` is for the agent to
+    inspect the payload; `render` is for the user to view it.
+    Inline artifacts (<16 KiB) come back as a `data:` URI so the UI can
+    embed them without a round-trip. S3-backed artifacts come back as a
+    short-lived presigned URL.
+    Args:
+        artifact_id: from a prior `save_artifact` or `list_artifacts`.
+        ttl_sec: validity of the URL (default 3600 = 1 h, max 86400).
+    Returns:
+        {found, artifact_id, kind, name, url, url_ttl_sec?, is_inline}.
+        Not found → {found: False, artifact_id}.
+    """
+    if not ARTIFACTS_TABLE:
+        return {"found": False, "error": "ARTIFACTS_TABLE not configured"}
+    user_id = _current_user_id()
+    if not user_id:
+        return {"found": False, "error": "no authenticated user"}
+    if not artifact_id:
+        return {"found": False, "error": "artifact_id required"}
+    try:
+        r = _ddb.get_item(TableName=ARTIFACTS_TABLE, Key={
+            "user_id":     {"S": user_id},
+            "artifact_id": {"S": artifact_id},
+        })
+    except Exception as e:
+        return {"found": False, "error": f"artifact get failed: {e}"}
+    item = _ddb_to_python(r.get("Item"))
+    if not item:
+        return {"found": False, "artifact_id": artifact_id}
+
+    kind = item.get("kind")
+    name = item.get("name")
+    s3_key = item.get("s3_key")
+    inline = item.get("inline_data")
+    if s3_key:
+        ttl = max(60, min(int(ttl_sec or 3600), 86400))
+        try:
+            url = _s3.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": CLIPS_BUCKET_NAME, "Key": s3_key},
+                ExpiresIn=ttl,
+            )
+        except Exception as e:
+            return {"found": True, "artifact_id": artifact_id, "error": f"presign failed: {e}"}
+        return {"found": True, "artifact_id": artifact_id, "kind": kind,
+                "name": name, "url": url, "url_ttl_sec": ttl, "is_inline": False}
+    if inline is not None:
+        # Build a data: URI so the frontend can embed without a fetch.
+        # inline is either raw UTF-8 text or a "b64:" prefix for binary.
+        ctype = "text/html" if kind == "html.app" else (
+            "application/json" if kind == "edl.plan" else "text/plain")
+        if isinstance(inline, str) and inline.startswith("b64:"):
+            b64 = inline[4:]
+        else:
+            b64 = _base64.b64encode(str(inline).encode("utf-8")).decode("ascii")
+        data_uri = f"data:{ctype};base64,{b64}"
+        return {"found": True, "artifact_id": artifact_id, "kind": kind,
+                "name": name, "url": data_uri, "is_inline": True}
+    return {"found": True, "artifact_id": artifact_id, "kind": kind,
+            "name": name, "error": "artifact has neither inline_data nor s3_key"}
+
+
+@tool
+def manage_artifacts(
+    artifact_id: str,
+    action: str,
+    new_name: Optional[str] = None,
+    add_tags: Optional[list[str]] = None,
+    remove_tags: Optional[list[str]] = None,
+) -> dict:
+    """Mutate an existing artifact — rename it, delete it, or edit its tag
+    list. Only the signed-in user's own artifacts are reachable.
+    Args:
+        artifact_id: from `list_artifacts`.
+        action: one of `rename` (requires `new_name`), `delete`
+            (removes the DDB row AND the S3 object if any), `tag`
+            (applies `add_tags` and/or `remove_tags`).
+        new_name: for `rename`. Ignored for other actions.
+        add_tags / remove_tags: for `tag`. Both optional; empty = no-op.
+    Returns:
+        {ok, artifact_id, action, name?, tags?}.
+    """
+    if not ARTIFACTS_TABLE:
+        return {"ok": False, "error": "ARTIFACTS_TABLE not configured"}
+    user_id = _current_user_id()
+    if not user_id:
+        return {"ok": False, "error": "no authenticated user"}
+    if not artifact_id or not action:
+        return {"ok": False, "error": "artifact_id and action required"}
+    action = action.lower().strip()
+    if action not in ("rename", "delete", "tag"):
+        return {"ok": False, "error": f"unknown action {action!r} (expected rename|delete|tag)"}
+
+    key = {"user_id": {"S": user_id}, "artifact_id": {"S": artifact_id}}
+    try:
+        r = _ddb.get_item(TableName=ARTIFACTS_TABLE, Key=key)
+    except Exception as e:
+        return {"ok": False, "error": f"artifact get failed: {e}"}
+    item = _ddb_to_python(r.get("Item"))
+    if not item:
+        return {"ok": False, "artifact_id": artifact_id, "error": "not found"}
+
+    now = _now_iso()
+    if action == "rename":
+        if not new_name:
+            return {"ok": False, "error": "new_name required for rename"}
+        try:
+            _ddb.update_item(
+                TableName=ARTIFACTS_TABLE,
+                Key=key,
+                UpdateExpression="SET #n = :n, updated_at = :u",
+                ExpressionAttributeNames={"#n": "name"},
+                ExpressionAttributeValues={":n": {"S": new_name}, ":u": {"S": now}},
+            )
+        except Exception as e:
+            return {"ok": False, "error": f"rename failed: {e}"}
+        return {"ok": True, "artifact_id": artifact_id, "action": "rename", "name": new_name}
+
+    if action == "delete":
+        s3_key = item.get("s3_key")
+        try:
+            _ddb.delete_item(TableName=ARTIFACTS_TABLE, Key=key)
+        except Exception as e:
+            return {"ok": False, "error": f"delete failed: {e}"}
+        if s3_key and CLIPS_BUCKET_NAME:
+            try:
+                _s3.delete_object(Bucket=CLIPS_BUCKET_NAME, Key=s3_key)
+            except Exception as e:
+                # DDB row is gone; log but return ok. The S3 object is a
+                # leak but harmless and reclaimable by a sweep job.
+                print(f"manage_artifacts: s3 delete failed for {s3_key}: {e}")
+        return {"ok": True, "artifact_id": artifact_id, "action": "delete"}
+
+    # action == "tag"
+    tags = list(item.get("tags") or [])
+    for t in (add_tags or []):
+        if t and t not in tags:
+            tags.append(t)
+    if remove_tags:
+        drop = set(remove_tags)
+        tags = [t for t in tags if t not in drop]
+    try:
+        if tags:
+            _ddb.update_item(
+                TableName=ARTIFACTS_TABLE,
+                Key=key,
+                UpdateExpression="SET tags = :t, updated_at = :u",
+                ExpressionAttributeValues={
+                    ":t": {"SS": [str(t) for t in tags]},
+                    ":u": {"S": now},
+                },
+            )
+        else:
+            # DDB SS can't be empty — remove the attribute instead.
+            _ddb.update_item(
+                TableName=ARTIFACTS_TABLE,
+                Key=key,
+                UpdateExpression="REMOVE tags SET updated_at = :u",
+                ExpressionAttributeValues={":u": {"S": now}},
+            )
+    except Exception as e:
+        return {"ok": False, "error": f"tag update failed: {e}"}
+    return {"ok": True, "artifact_id": artifact_id, "action": "tag", "tags": tags}
+
+
+@tool
+def list_filterable_fields(knowledge_store_id: str) -> dict:
+    """Introspect the kb_cache schema and return the field names a client
+    can filter on when calling `list_kb_assets`, plus the distinct values
+    we've seen for each. Lets the UI build real filter dropdowns instead
+    of hard-coding option lists.
+    Args:
+        knowledge_store_id: ks_xxxxxxxx.
+    Returns:
+        {ok, knowledge_store_id, fields: {<field_name>: [values…]}}.
+        Fields are: `mood_tags`, `role_hint`, `visual_style`,
+        `primary_subjects`. Values are deduped + sorted.
+    """
+    if not knowledge_store_id:
+        return {"ok": False, "error": "knowledge_store_id required"}
+    raw = _ddb_kb_query(f"ks#{knowledge_store_id}", "ASSET#", limit=None)
+    buckets: dict[str, set[str]] = {
+        "mood_tags": set(),
+        "role_hint": set(),
+        "visual_style": set(),
+        "primary_subjects": set(),
+    }
+    for r in raw:
+        for t in (r.get("mood_tags") or []):
+            if t: buckets["mood_tags"].add(str(t))
+        for s in (r.get("primary_subjects") or []):
+            if s: buckets["primary_subjects"].add(str(s))
+        if r.get("role_hint"):
+            buckets["role_hint"].add(str(r["role_hint"]))
+        if r.get("visual_style"):
+            buckets["visual_style"].add(str(r["visual_style"]))
+    return {
+        "ok": True,
+        "knowledge_store_id": knowledge_store_id,
+        "fields": {k: sorted(v) for k, v in buckets.items()},
+    }
+
+
+@tool
+def feedback(rating: str, response_id: Optional[str] = None, comment: Optional[str] = None) -> dict:
+    """Record a user's reaction to the current response. Writes one line to
+    the runtime's stdout, which AgentCore captures into CloudWatch Logs
+    under the runtime log group — queryable via Logs Insights without
+    needing a dedicated table. Lightweight by design.
+    Args:
+        rating: `up`, `down`, or any short slug the UI wants (`neutral`,
+            `wrong`, `great`). Case-insensitive.
+        response_id: optional opaque id for the response being rated —
+            correlates with `response.created` on the wire.
+        comment: optional short free-text note (truncated at 500 chars).
+    Returns:
+        {ok, rating, response_id?, logged_at}.
+    """
+    rating_l = str(rating or "").strip().lower()
+    if not rating_l:
+        return {"ok": False, "error": "rating required"}
+    user_id = _current_user_id() or "anonymous"
+    now = _now_iso()
+    row = {
+        "event": "user_feedback",
+        "user_id": user_id,
+        "rating": rating_l,
+        "response_id": response_id,
+        "comment": (comment or "")[:500] or None,
+        "logged_at": now,
+    }
+    print(f"[feedback] {json.dumps(row)}")
+    return {"ok": True, "rating": rating_l, "response_id": response_id, "logged_at": now}
+
+
 # ═══ Session scratch — write-only in this release ══════════════════════════
 # runtime.py calls persist_session_turn() at the end of each turn with the
 # AgentCore session_id, the knowledge_store_id, the user's prompt, and the
@@ -3453,6 +3698,10 @@ def build_agent(access_token: Optional[str] = None) -> tuple[Agent, str]:
             generate_html_app, generate_video, execute_code,
             # Per-user artifact store (saved plans / html-1 apps / rendered videos / blobs)
             save_artifact, open_artifact, list_artifacts,
+            # Jockey-parity wave-2 additions: user-facing render URL, bulk
+            # artifact mutations, kb_cache schema introspection, lightweight
+            # feedback sink.
+            render, manage_artifacts, list_filterable_fields, feedback,
             # Ancillary domain stores (rights + audience cohorts in DDB)
             lookup_rights, list_audiences, lookup_audience,
         ],
