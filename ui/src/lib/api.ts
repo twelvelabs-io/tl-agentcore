@@ -77,6 +77,33 @@ export async function fetchKbGraph(ks_id: string): Promise<GraphPayload> {
   if (!r.ok) throw new Error(`kb-graph ${r.status}: ${await r.text().catch(() => "")}`);
   return r.json();
 }
+
+// ─── Scores (wave-2 online judges) ──────────────────────────────────────────
+export type JudgeRow = {
+  judge_name: string;             // "coherence" | "reference_validity"
+  score?: number | null;          // 1-5, or null when a judge couldn't score
+  justification?: string;
+  latency_ms?: number;
+  sampled_at?: string;
+  error?: string;
+  missing_asset_ids?: string[];
+};
+
+export type ScoresPayload = {
+  response_id: string;
+  judges: JudgeRow[];
+};
+
+/** Fetch the online judge rows for one agent turn. Returns {judges: []}
+ *  when no rows have landed yet — judges run fire-and-forget after
+ *  response.completed, so a tight-loop fetch may need to be delayed
+ *  by a second or two for the writes to settle. */
+export async function fetchScores(response_id: string): Promise<ScoresPayload> {
+  const headers = await authHeaders();
+  const r = await fetch(`/scores/${encodeURIComponent(response_id)}`, { headers });
+  if (!r.ok) throw new Error(`scores ${r.status}: ${await r.text().catch(() => "")}`);
+  return r.json();
+}
 async function authHeaders(): Promise<Record<string, string>> {
   const token = await getAccessToken();
   if (token) return { authorization: `Bearer ${token}` };
