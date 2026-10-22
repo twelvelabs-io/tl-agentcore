@@ -228,8 +228,7 @@ def _sel_default(key: str, current):
     """If `current` is None/empty, pull the same key from selections[0].
 
     Also expands any `@id_N` handle the agent passed in `asset_id` to the
-    real 24-hex id. This is a no-op when the alias layer is disabled
-    (ID_ALIASES_ENABLED unset) or when `current` doesn't look like an
+    real 24-hex id. This is a no-op when `current` doesn't look like an
     alias. See aliases.py for the handle contract."""
     if current is not None and current != "":
         if key == "asset_id":
@@ -3647,7 +3646,6 @@ Tool results sometimes carry asset ids as short handles like `@id_1`, `@id_2` in
   - **Refer to them in prose** — "the clip at `@id_3`" is fine; the UI expands handles back to real ids before showing them.
   - **Pass them as `asset_id` args** — tools that take `asset_id` accept either shape and resolve the handle internally.
   - **Keep real ids inside `<plan>`** — the runtime expands handles before `<plan>` is parsed, so write whatever is shorter in your reasoning; the plan JSON ends up with real asset ids regardless.
-When ID_ALIASES_ENABLED is off (default today), tool results use raw 24-hex ids and the handles never appear — behave the same way either case.
 
 # Tools by speed class — ALWAYS try the fastest path first
 

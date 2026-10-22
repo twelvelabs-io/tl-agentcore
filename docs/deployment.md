@@ -231,23 +231,9 @@ Both applies converge on the same infra — the second one just
 narrows the CORS allowlist. Add this variable to your CI-run
 tfvars going forward.
 
-## Wave-2 feature flags
+## Pricing + web search
 
-Three features from the wave-2 roadmap ship opt-in behind env vars
-on `aws_bedrockagentcore_agent_runtime` (`infra/runtime.tf`). Default
-off so they land as plumbing; flip with a `terraform apply` once a
-dev-stack trace has validated the change — no agent image rebuild
-needed.
-
-| Env var | Default | What it does | Watch |
-|---|---|---|---|
-| `ID_ALIASES_ENABLED` | `"0"` | Rewrites 24-hex asset_ids to `@id_N` handles on tool fanout results, saving ~600 tokens per 25-clip search. Final text re-expands the handles before the UI sees them. | token delta in `usage_events`; `<plan>` fidelity across turns. |
-| `PRESEED_TOOLS_ENABLED` | `"0"` | Pre-executes `get_kb_overview` + `list_kb_assets` for the current KS and splices synthetic tool_use + tool_result messages into `agent.messages` so the model's first move skips those two near-reflex calls. | first-move tool choice in the trace; verify the preseed actually was redundant. |
-| `JUDGE_SAMPLE_RATE` | `"1.0"` | Fraction of turns the online judges (coherence + reference_validity) run on. Default `"1.0"` during a 1-2 week calibration window; flip to `"0.10"` once trends are stable. | row volume in the `scores` table (per `/scores/{response_id}`). |
-
-### Pricing + web search
-
-Two more wave-2 subsystems are activated out-of-band via SSM
+Two wave-2 subsystems are activated out-of-band via SSM
 parameters, not Terraform variables, so ops can rotate / bump without
 touching the stack:
 
