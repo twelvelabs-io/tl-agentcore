@@ -136,6 +136,15 @@ resource "aws_bedrockagentcore_agent_runtime" "this" {
     # fidelity on a few turns' trace in usage_events. Flip to "1" via
     # a terraform apply (no redeploy of the agent image needed).
     ID_ALIASES_ENABLED = "0"
+    # Wave-2 PR #5: synthetic tool-call injection. When "1", every turn
+    # pre-executes get_kb_overview + list_kb_assets in parallel and
+    # splices them into agent.messages as a 4-message synthetic turn so
+    # the model's first move can skip two near-reflex tool calls. Opt-in
+    # until the usage_events trace confirms the tools were actually
+    # redundant on the targeted turns (otherwise we're paying for two
+    # DDB round-trips to avoid two model round-trips the model wouldn't
+    # have taken anyway).
+    PRESEED_TOOLS_ENABLED = "0"
     # v0.4 hybrid entity-reID: per-KS Rekognition collection id is
     # derived as `<STACK_FQNAME>-ks-<ks_id>`. Marengo image-embed
     # async-invoke needs the bucket owner for s3Location.bucketOwner.
