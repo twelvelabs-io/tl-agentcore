@@ -16,6 +16,12 @@
 //                      response.output_text.done
 //                      response.output_item.done
 //                      response.keepalive            (every ~20s during idle)
+//                      response.activity             (human-readable "doing X now"
+//                                                     sentence; emitted alongside
+//                                                     tool_begin events and for
+//                                                     pipeline / preseed / rewoo
+//                                                     narration — see
+//                                                     agent/tl_agentcore/activity_narrator.py)
 //                      response.completed
 //                      response.failed
 //                    EDL plans arrive as `custom` output items with
@@ -75,6 +81,8 @@ export type AgentEvent =
   | { type: "response.output_item.done"; sequence_number: number;
       output_index: number; item: ResponseItem }
   | { type: "response.keepalive"; sequence_number: number }
+  | { type: "response.activity"; sequence_number: number;
+      tool_use_id: string; text: string }
   | { type: "response.completed"; sequence_number: number;
       response: { id: string; object: "response"; status: "completed"; tool_path?: string } }
   | { type: "response.failed"; sequence_number: number;
