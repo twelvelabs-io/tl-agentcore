@@ -122,6 +122,15 @@ resource "aws_bedrockagentcore_agent_runtime" "this" {
     # us.anthropic.claude-sonnet-4-6 inside the scoring module.
     SCORES_TABLE      = aws_dynamodb_table.scores.name
     JUDGE_SAMPLE_RATE = "1.0"
+    # Wave-2 PR #10: per-tool / per-model metering ledger. One row per
+    # Bedrock model turn + per in-process tool call, fire-and-forget.
+    # Prices for the cost column live in SSM Parameter Store under
+    # /tl-agentcore/prices/<model_id> — ops bumps a rate by writing a
+    # new parameter value; PRICES_CACHE_TTL_SECONDS controls how long
+    # until the runtime re-reads it (default 15 min).
+    USAGE_EVENTS_TABLE       = aws_dynamodb_table.usage_events.name
+    PRICES_SSM_PREFIX        = "/tl-agentcore/prices"
+    PRICES_CACHE_TTL_SECONDS = "900"
     # v0.4 hybrid entity-reID: per-KS Rekognition collection id is
     # derived as `<STACK_FQNAME>-ks-<ks_id>`. Marengo image-embed
     # async-invoke needs the bucket owner for s3Location.bucketOwner.

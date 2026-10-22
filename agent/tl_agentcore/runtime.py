@@ -61,6 +61,7 @@ from strands.hooks import HookProvider, HookRegistry
 from strands.hooks.events import AfterToolCallEvent, BeforeToolCallEvent
 
 from .agent import (
+    MODEL_ID,
     _current_user_id,
     build_agent,
     persist_session_turn,
@@ -70,6 +71,7 @@ from .agent import (
 from .activity_narrator import narrate as narrate_activity
 from .duration_enforcer import _extract_plan_block, enforce_duration_target
 from .error_taxonomy import classify as classify_error
+from .metering import record_model_invocation, record_tool_call
 from .scoring import maybe_judge_turn
 
 app = BedrockAgentCoreApp()
@@ -85,8 +87,19 @@ class WireEventCollector(HookProvider):
     SEMANTIC `__kind__` markers; the envelope wrapper converts them to
     Open-Responses events."""
 
-    def __init__(self, queue: asyncio.Queue):
+    def __init__(
+        self,
+        queue: asyncio.Queue,
+        *,
+        response_id: str,
+        knowledge_store_id: str | None,
+    ):
         self.queue = queue
+        self.response_id = response_id
+        self.knowledge_store_id = knowledge_store_id
+        # tool_use_id -> perf_counter at start. Lets _on_after derive the
+        # tool's wall-clock duration for the metering ledger.
+        self._starts: dict[str, float] = {}
 
     def register_hooks(self, registry: HookRegistry, **_kwargs: Any) -> None:
         registry.add_callback(BeforeToolCallEvent, self._on_before)
@@ -97,6 +110,7 @@ class WireEventCollector(HookProvider):
         name = tool_use.get("name", "<unknown>")
         args = tool_use.get("input") or {}
         tool_use_id = tool_use.get("toolUseId") or f"call_{uuid.uuid4().hex[:12]}"
+        self._starts[tool_use_id] = time.perf_counter()
         # Human-readable "doing X now" sentence shipped alongside the raw
         # tool_begin event. The UI can render this as a status pip while
         # hiding the raw function_call JSON — see activity_narrator.
@@ -114,12 +128,28 @@ class WireEventCollector(HookProvider):
 
     def _on_after(self, event: AfterToolCallEvent) -> None:
         tool_use = event.tool_use or {}
+        tuid = tool_use.get("toolUseId") or ""
+        name = tool_use.get("name", "<unknown>")
+        t0 = self._starts.pop(tuid, None)
+        duration_ms = int((time.perf_counter() - t0) * 1000) if t0 else 0
         summary = _summarize_tool_result(event.result)
         code = _tool_error_code(event.result, summary)
+
+        # Fire-and-forget metering row. The hook runs synchronously
+        # inside strands' loop, but record_tool_call is wrapped in its
+        # own try/except so a DDB hiccup can't propagate up.
+        record_tool_call(
+            user_id=_current_user_id(),
+            tool_name=name,
+            duration_ms=duration_ms,
+            response_id=self.response_id,
+            knowledge_store_id=self.knowledge_store_id,
+        )
+
         payload = {
             "__kind__": "tool_end",
-            "tool_use_id": tool_use.get("toolUseId") or "",
-            "name": tool_use.get("name", "<unknown>"),
+            "tool_use_id": tuid,
+            "name": name,
             "output": summary,
         }
         if code:
@@ -208,7 +238,11 @@ async def _semantic_stream(payload: dict) -> AsyncIterator[dict]:
     mode = "unknown"
     try:
         agent, mode = build_agent(access_token=access_token)
-        agent.hooks.add_hook(WireEventCollector(queue))
+        agent.hooks.add_hook(WireEventCollector(
+            queue,
+            response_id=response_id,
+            knowledge_store_id=ks,
+        ))
     except Exception as e:
         yield {"__kind__": "failed", "response_id": response_id,
                "error": {"message": f"agent build failed: {e}",
@@ -237,6 +271,27 @@ async def _semantic_stream(payload: dict) -> AsyncIterator[dict]:
                 yield {"__kind__": "text_delta",
                        "item_id": text_item_id, "delta": chunk}
                 continue
+
+            # One Strands event per completed model cycle carries a
+            # `stop` tuple: (stop_reason, message, usage, metrics). We
+            # mint one metering row per cycle so a multi-turn ReAct
+            # trace shows up as N `model_invoke` rows, not one. Any
+            # metering miss logs and continues.
+            stop_tuple = event.get("stop")
+            if isinstance(stop_tuple, tuple) and len(stop_tuple) >= 4:
+                try:
+                    _, _msg, usage, metrics = stop_tuple
+                    record_model_invocation(
+                        user_id=_current_user_id(),
+                        model_id=MODEL_ID,
+                        input_tokens=int((usage or {}).get("inputTokens", 0)),
+                        output_tokens=int((usage or {}).get("outputTokens", 0)),
+                        latency_ms=int((metrics or {}).get("latencyMs", 0)),
+                        response_id=response_id,
+                        knowledge_store_id=ks,
+                    )
+                except Exception as e:
+                    print(f"runtime: model metering failed: {e}")
 
             result = event.get("result")
             if result is not None:

@@ -338,3 +338,49 @@ resource "aws_dynamodb_table" "scores" {
     enabled        = true
   }
 }
+
+# ─── Per-tool / per-model metering ledger (wave-2 PR #10) ────────────────
+#
+#   usage_events — one row per Bedrock model invocation + per in-process
+#                  tool call. Keyed by (user_id, event_id) where event_id
+#                  is an ISO-timestamp-prefixed ULID-ish string so Range
+#                  queries sort chronologically. 90-day TTL via
+#                  `expires_at`. Writes are fire-and-forget from the
+#                  runtime (see agent/tl_agentcore/metering/ledger.py).
+#
+#                  Attributes:
+#                    event_type:  "model_invoke" | "tool_call"
+#                    response_id: agent turn id
+#                    knowledge_store_id: ks_... or ''
+#                    # model_invoke:
+#                    model_id, input_tokens, output_tokens, cost_usd,
+#                    price_source, latency_ms
+#                    # tool_call:
+#                    tool_name, duration_ms
+#
+#                  Prices live in SSM Parameter Store under
+#                  `/tl-agentcore/prices/<model_id>` as JSON blobs so ops
+#                  can bump a rate without a redeploy. Missing price →
+#                  cost_usd omitted (tokens stay useful).
+resource "aws_dynamodb_table" "usage_events" {
+  name         = "${local.fqname}-usage-events"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "user_id"
+  range_key    = "event_id"
+
+  point_in_time_recovery { enabled = true }
+
+  attribute {
+    name = "user_id"
+    type = "S"
+  }
+  attribute {
+    name = "event_id"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+}
