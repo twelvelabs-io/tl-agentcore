@@ -164,6 +164,25 @@ resource "aws_dynamodb_table" "sessions" {
     name = "session_id"
     type = "S"
   }
+  # Wave-2 PR #8 — session index. The by-user GSI lets a user resurface
+  # their recent sessions across devices without a Scan. Only turns with
+  # a resolved Cognito sub populate `user_id`, so the GSI's sparse-key
+  # semantics naturally exclude anonymous rows.
+  attribute {
+    name = "user_id"
+    type = "S"
+  }
+  attribute {
+    name = "last_updated_at"
+    type = "S"
+  }
+
+  global_secondary_index {
+    name            = "by-user"
+    hash_key        = "user_id"
+    range_key       = "last_updated_at"
+    projection_type = "ALL"
+  }
 
   ttl {
     attribute_name = "expires_at"

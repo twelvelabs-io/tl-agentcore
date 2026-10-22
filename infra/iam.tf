@@ -215,6 +215,7 @@ data "aws_iam_policy_document" "runtime_perms" {
     ]
     resources = [
       aws_dynamodb_table.sessions.arn,
+      "${aws_dynamodb_table.sessions.arn}/index/by-user",
       aws_dynamodb_table.memories.arn,
     ]
   }
