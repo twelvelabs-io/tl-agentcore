@@ -74,6 +74,7 @@ from .duration_enforcer import _extract_plan_block, enforce_duration_target
 from .error_taxonomy import classify as classify_error
 from .metering import record_model_invocation, record_tool_call
 from .pipelines import RewooFallback, run_rewoo, select_pipeline
+from .preseed import maybe_preseed
 from .scoring import maybe_judge_turn
 
 app = BedrockAgentCoreApp()
@@ -301,6 +302,29 @@ async def _semantic_stream(payload: dict) -> AsyncIterator[dict]:
                              "code": classify_error(f"agent build failed: {e}", exc=e),
                              "trace": traceback.format_exc()}}
             return
+
+        # Wave-2 PR #5: synthetic tool-call injection. When enabled,
+        # pre-execute get_kb_overview + list_kb_assets for the current KS
+        # and splice them into agent.messages as a 4-message synthetic
+        # turn so the model's first move can skip two near-reflex tool
+        # calls. No-op when PRESEED_TOOLS_ENABLED is unset or when no KS
+        # is set on the payload. Fails soft — a preseed error never
+        # breaks the user's turn.
+        try:
+            preseed_status = await maybe_preseed(
+                agent,
+                knowledge_store_id=ks,
+                response_id=response_id,
+                user_id=_current_user_id(),
+            )
+            if preseed_status.get("activity"):
+                yield {
+                    "__kind__": "activity",
+                    "tool_use_id": response_id,
+                    "text": preseed_status["activity"],
+                }
+        except Exception as e:
+            print(f"runtime: preseed dispatch failed: {e}")
 
         try:
             async for event in agent.stream_async(user_text):
