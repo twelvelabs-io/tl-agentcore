@@ -22,13 +22,17 @@
 //   200 {
 //     user_id, window: {since, until},
 //     summary: {
-//       model_invocations, tool_calls,
+//       model_invocations, tool_calls, pipeline_fallbacks,
 //       total_input_tokens, total_output_tokens,
 //       total_cost_usd,              // null when any invocation had unknown price
 //       unknown_cost_count,          // model invocations with price_source=none
 //       by_model:    {[id]:   {invocations, input_tokens, output_tokens, cost_usd}},
 //       by_tool:     {[name]: {calls, duration_ms_total}},
-//       by_category: {[cat]:  {calls, duration_ms_total}}   // tool_category rollup
+//       by_category: {[cat]:  {calls, duration_ms_total}},  // tool_category rollup
+//       fallbacks: {                                        // pipeline fallback rollup
+//         total, by_reason: {[slug]: count}, by_stage: {[stage]: count},
+//         by_from_to: {[from→to]: count}, recent: [{...}]
+//       }
 //     },
 //     events: [...]               // raw rows, newest-first, truncated to limit
 //   }
@@ -124,6 +128,7 @@ export const handler = async (event) => {
   const summary = {
     model_invocations: 0,
     tool_calls: 0,
+    pipeline_fallbacks: 0,
     total_input_tokens: 0,
     total_output_tokens: 0,
     total_cost_usd: 0,
@@ -131,6 +136,15 @@ export const handler = async (event) => {
     by_model: {},
     by_tool: {},
     by_category: {},
+    fallbacks: {
+      total: 0,
+      by_reason: {},
+      by_stage: {},
+      by_from_to: {},
+      // Last 10 fallback events (newest-first in `items`), carrying
+      // enough shape to click through to the response_id in traces.
+      recent: [],
+    },
   };
   let anyUnknownCost = false;
 
@@ -153,6 +167,28 @@ export const handler = async (event) => {
         bucket.unknown_cost = true;
         anyUnknownCost = true;
         summary.unknown_cost_count += 1;
+      }
+    } else if (r.event_type === "pipeline_fallback") {
+      summary.pipeline_fallbacks += 1;
+      const f = summary.fallbacks;
+      f.total += 1;
+      const reasonKey = r.reason_class || "other";
+      const stageKey  = r.stage        || "unknown";
+      const flowKey   = `${r.from_pipeline || "?"}→${r.to_pipeline || "?"}`;
+      f.by_reason[reasonKey]   = (f.by_reason[reasonKey]   || 0) + 1;
+      f.by_stage[stageKey]     = (f.by_stage[stageKey]     || 0) + 1;
+      f.by_from_to[flowKey]    = (f.by_from_to[flowKey]    || 0) + 1;
+      if (f.recent.length < 10) {
+        f.recent.push({
+          event_id:       r.event_id,
+          sampled_at:     r.sampled_at,
+          response_id:    r.response_id,
+          from_pipeline:  r.from_pipeline,
+          to_pipeline:    r.to_pipeline,
+          reason_class:   r.reason_class,
+          stage:          r.stage,
+          reason_text:    r.reason_text,
+        });
       }
     } else if (r.event_type === "tool_call") {
       summary.tool_calls += 1;

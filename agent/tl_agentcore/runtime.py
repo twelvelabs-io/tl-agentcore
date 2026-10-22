@@ -72,7 +72,11 @@ from .activity_narrator import narrate as narrate_activity
 from .aliases import expand_text as expand_id_aliases, reset_turn_aliases
 from .duration_enforcer import _extract_plan_block, enforce_duration_target
 from .error_taxonomy import classify as classify_error
-from .metering import record_model_invocation, record_tool_call
+from .metering import (
+    record_model_invocation,
+    record_pipeline_fallback,
+    record_tool_call,
+)
 from .pipelines import RewooFallback, run_rewoo, select_pipeline
 from .preseed import maybe_preseed
 from .scoring import maybe_judge_turn
@@ -281,6 +285,18 @@ async def _semantic_stream(payload: dict) -> AsyncIterator[dict]:
                 "tool_use_id": response_id,
                 "text": f"rewoo fallback → react ({e})",
             }
+            # Structured telemetry row so dashboards can group-by
+            # reason_class + stage. The free-text activity frame above
+            # stays for the UI trace strip, but the raw message isn't
+            # queryable; this row is.
+            record_pipeline_fallback(
+                user_id=_current_user_id(),
+                response_id=response_id,
+                knowledge_store_id=ks,
+                from_pipeline="rewoo",
+                to_pipeline="react",
+                reason_message=str(e),
+            )
             text_started = False
             final_text = ""
             pipeline = "react"
