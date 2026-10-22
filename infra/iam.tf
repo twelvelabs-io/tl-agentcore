@@ -304,6 +304,22 @@ data "aws_iam_policy_document" "runtime_perms" {
       "${aws_dynamodb_table.artifacts.arn}/index/by-kind",
     ]
   }
+  # Wave-2 PR #9: online quality judges. The runtime fire-and-forgets
+  # judge dispatch at end-of-turn (see agent/tl_agentcore/scoring/
+  # judge_runner.py) and writes one row per judge to the scores table.
+  statement {
+    sid       = "ScoresTableWrite"
+    actions   = ["dynamodb:PutItem"]
+    resources = [aws_dynamodb_table.scores.arn]
+  }
+  # Wave-2 PR #9: reference-validity judge uses BatchGetItem on the
+  # assets table to verify that every asset_id cited inside a <plan>
+  # block exists. Read-only; the add_media write grant above is unchanged.
+  statement {
+    sid       = "ScoresJudgeReadAssets"
+    actions   = ["dynamodb:BatchGetItem"]
+    resources = [aws_dynamodb_table.assets.arn]
+  }
 }
 
 resource "aws_iam_role_policy" "runtime" {

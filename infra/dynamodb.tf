@@ -300,3 +300,41 @@ resource "aws_dynamodb_table" "artifacts" {
     projection_type = "ALL"
   }
 }
+
+# ─── Online quality judges — scores (wave-2 PR #9) ───────────────────────
+#
+#   scores — one row per (response_id, judge_name) pair. Judges are
+#            dispatched fire-and-forget at end-of-turn by the runtime;
+#            see agent/tl_agentcore/scoring/judge_runner.py. 90-day TTL
+#            via `expires_at` keeps the table small.
+#
+#            pk = response_id   sk = judge_name  (coherence | reference_validity)
+#            Payload: score (int 1-5 | null), justification, latency_ms,
+#            sampled_at, user_id, knowledge_store_id, error?, missing_asset_ids?
+#
+#            Judge-model identity: Sonnet 4.6 (per the wave-2 locked
+#            decision in project_jockey_parity_wave_2.md). Sampling via
+#            JUDGE_SAMPLE_RATE env var — defaults to 1.0 during
+#            calibration, flipped to 0.1 once trends are stable.
+resource "aws_dynamodb_table" "scores" {
+  name         = "${local.fqname}-scores"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "response_id"
+  range_key    = "judge_name"
+
+  point_in_time_recovery { enabled = true }
+
+  attribute {
+    name = "response_id"
+    type = "S"
+  }
+  attribute {
+    name = "judge_name"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+}
