@@ -71,6 +71,8 @@ import boto3
 import httpx
 from strands import Agent, tool
 
+from .aliases import aliasify_result, dealias_dict, resolve_alias
+
 # ─── Configuration via env ──────────────────────────────────────────────────
 MODEL_ID = os.environ.get(
     "AGENT_MODEL_ID",
@@ -215,13 +217,23 @@ def _current_selections() -> list:
 
 
 def _sel_default(key: str, current):
-    """If `current` is None/empty, pull the same key from selections[0]."""
+    """If `current` is None/empty, pull the same key from selections[0].
+
+    Also expands any `@id_N` handle the agent passed in `asset_id` to the
+    real 24-hex id. This is a no-op when the alias layer is disabled
+    (ID_ALIASES_ENABLED unset) or when `current` doesn't look like an
+    alias. See aliases.py for the handle contract."""
     if current is not None and current != "":
+        if key == "asset_id":
+            current = resolve_alias(current)
         return current
     sel = _current_selections()
     if not sel:
         return current
-    return sel[0].get(key, current)
+    val = sel[0].get(key, current)
+    if key == "asset_id":
+        val = resolve_alias(val)
+    return val
 
 
 # ═══ DDB helpers (kb_cache, rights, audiences) ═══════════════════════════════
@@ -569,11 +581,11 @@ def vector_search(
             "distance":          round(1.0 - r["score"], 4),
             "dominant_modality": r["dominant_modality"],
         })
-    return {
+    return aliasify_result({
         "clips":           clips,
         "query":           query_text,
         "routing_weights": {m: round(w, 3) for m, w in weights.items()},
-    }
+    })
 
 
 # ═══ Tier 1: Cache (DDB · sub-10ms) ═══════════════════════════════════════════
@@ -664,7 +676,7 @@ def list_kb_assets(
         })
         if len(out) >= limit:
             break
-    return out
+    return aliasify_result(out)
 
 
 @tool
@@ -758,7 +770,7 @@ def find_cached_entity_appearances(knowledge_store_id: str, entity_name: str) ->
     item = _ddb_kb_get(f"ks#{knowledge_store_id}", f"ENTITY#{canonical}")
     if not item:
         return {"found": False, "entity_name": entity_name, "canonical": canonical}
-    return {
+    return aliasify_result({
         "found":            True,
         "name":             item.get("name"),
         "canonical":        item.get("canonical"),
@@ -766,7 +778,7 @@ def find_cached_entity_appearances(knowledge_store_id: str, entity_name: str) ->
         "asset_ids":        item.get("asset_ids") or [],
         "appearance_count": item.get("appearance_count") or 0,
         "aliases":          item.get("aliases") or [],
-    }
+    })
 
 
 @tool
@@ -805,13 +817,13 @@ def list_cached_entities(
             "aliases":          r.get("aliases") or [],
         })
     rows.sort(key=lambda r: r["appearance_count"], reverse=True)
-    return rows[:limit]
+    return aliasify_result(rows[:limit])
 
 
 def _asset_profile_dict(knowledge_store_id: str, asset_id: str) -> dict:
     """Shared body for lookup_asset_profile / get_content_profile."""
     knowledge_store_id = _sel_default("knowledge_store_id", knowledge_store_id)
-    asset_id = _sel_default("asset_id", asset_id)
+    asset_id = resolve_alias(_sel_default("asset_id", asset_id))
     if not knowledge_store_id or not asset_id:
         return {"cached": False, "error": "knowledge_store_id and asset_id required"}
     item = _ddb_kb_get(f"ks#{knowledge_store_id}", f"ASSET#{asset_id}")
@@ -1665,6 +1677,7 @@ def generate_video(edl_plan: dict) -> dict:
         response for debugging. `preview_url` is populated once the stitch
         lambda knows the destination; it serves at CloudFront `/stitched/`.
     """
+    edl_plan = dealias_dict(edl_plan) if isinstance(edl_plan, dict) else edl_plan
     if not isinstance(edl_plan, dict):
         return {"error": "edl_plan must be a dict"}
     if not STITCH_LAMBDA_ARN:
@@ -2187,6 +2200,7 @@ def get_transcript(
         hasn't run or is still processing). Fall through to `pegasus_analyze`
         with a transcript-focused prompt.
     """
+    asset_id = resolve_alias(asset_id)
     if not asset_id:
         return {"found": False, "error": "asset_id required"}
     if not CLIPS_BUCKET_NAME:
@@ -2275,6 +2289,7 @@ def get_shot_timeline(
         Error:
             {status: "error", error}.
     """
+    asset_id = resolve_alias(asset_id)
     if not knowledge_store_id or not asset_id:
         return {"status": "error", "error": "knowledge_store_id and asset_id required"}
     if not CLIPS_BUCKET_NAME:
@@ -2386,6 +2401,7 @@ def get_audio_context(
         dominant_sentiment, sentiment_scores, named_mentions,
         approximation_note}.
     """
+    asset_id = resolve_alias(asset_id)
     t = get_transcript(asset_id, start_time=start_time, end_time=end_time)
     if not t.get("found"):
         return {
@@ -2677,6 +2693,7 @@ def save_tref_to_memory(
     user_id = _current_user_id()
     if not user_id:
         return {"ok": False, "error": "no authenticated user — memory requires a signed-in session"}
+    asset_id = resolve_alias(asset_id)
     if not (name and asset_id and start_time and end_time):
         return {"ok": False, "error": "name, asset_id, start_time, end_time are required"}
 
@@ -3378,6 +3395,7 @@ def lookup_rights(asset_id: str, region: Optional[str] = None) -> dict:
     """
     if not RIGHTS_TABLE:
         return {"error": "RIGHTS_TABLE env var not set"}
+    asset_id = resolve_alias(asset_id)
     r = _ddb.get_item(TableName=RIGHTS_TABLE, Key={"asset_id": {"S": asset_id}})
     item = _ddb_to_python(r.get("Item"))
     if not item:
@@ -3455,6 +3473,14 @@ def lookup_audience(segment_id: str) -> dict:
 SYSTEM_PROMPT = """You are a senior content operations assistant for a media organization, built on AWS Bedrock AgentCore. The deployment is fully AWS-native — every model you reach (Marengo, Pegasus, Titan, Claude) runs through Bedrock; every store (DynamoDB kb_cache, S3 Vectors, S3 clips bucket) lives inside the customer account. There is no TwelveLabs SaaS dependency on the live path.
 
 The active `knowledge_store_id` is provided in the user message metadata as `[ks: ks_xxx]`. If it isn't there, ask the user to select a knowledge base before proceeding.
+
+## Asset-id handles (`@id_N`)
+
+Tool results sometimes carry asset ids as short handles like `@id_1`, `@id_2` instead of raw 24-hex strings. The handles are a per-turn shortcut: `@id_1` is simply the first asset id the runtime assigned a handle to, `@id_2` the second, etc. You can:
+  - **Refer to them in prose** — "the clip at `@id_3`" is fine; the UI expands handles back to real ids before showing them.
+  - **Pass them as `asset_id` args** — tools that take `asset_id` accept either shape and resolve the handle internally.
+  - **Keep real ids inside `<plan>`** — the runtime expands handles before `<plan>` is parsed, so write whatever is shorter in your reasoning; the plan JSON ends up with real asset ids regardless.
+When ID_ALIASES_ENABLED is off (default today), tool results use raw 24-hex ids and the handles never appear — behave the same way either case.
 
 # Tools by speed class — ALWAYS try the fastest path first
 
