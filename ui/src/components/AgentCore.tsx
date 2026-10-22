@@ -10,6 +10,7 @@
 import { useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
 import { agentEnabled, errorLabel, streamAgentTurn } from "../lib/agent-api";
+import { fetchScores, type JudgeRow } from "../lib/api";
 import { ResponseMarkdown } from "../lib/vref";
 import { useStore, setState as setGlobal } from "../lib/store";
 import { LiveArchSidebar } from "./LiveArchSidebar";
@@ -39,6 +40,13 @@ type Turn = {
   // "rewoo", "in-process", "mcp-gateway"). Rendered as a small label
   // next to the elapsed time in the response header.
   toolPath?: string;
+  // Online judge rows (coherence + reference_validity) pulled from the
+  // /scores/{response_id} endpoint. Fetched a short delay after
+  // response.completed since judges run fire-and-forget. Rendered as a
+  // small panel under the trace strip; empty array means "no judges
+  // yet" (which may be legitimate if sampling or a judge failure).
+  responseId?: string;
+  judges?: JudgeRow[];
 };
 
 const enabled = agentEnabled();
@@ -119,6 +127,12 @@ export function AgentCore() {
 
         if (ev.type === "response.created") {
           if (!sessionId) setSessionId(ev.response.id);
+          // Stash the response_id on the current turn so the scores
+          // fetch (fired after completed) can hit the right row.
+          const rid = ev.response.id;
+          setTurns((ts) => ts.map((t) =>
+            t.id === aTurn.id ? { ...t, responseId: rid } : t
+          ));
         } else if (ev.type === "response.output_text.delta") {
           acc += ev.delta;
           setTurns((ts) => ts.map((t) => t.id === aTurn.id ? { ...t, text: acc } : t));
@@ -154,6 +168,22 @@ export function AgentCore() {
               t.id === aTurn.id ? { ...t, toolPath: tp } : t
             ));
           }
+          // Judges run fire-and-forget on the runtime side; give them a
+          // couple seconds to land in DDB before fetching. A single
+          // fetch is enough — Sonnet latency is well under 2s and the
+          // runtime awaits the dispatch (not the result) synchronously.
+          const rid = ev.response.id;
+          setTimeout(async () => {
+            try {
+              const { judges } = await fetchScores(rid);
+              setTurns((ts) => ts.map((t) =>
+                t.id === aTurn.id ? { ...t, judges } : t
+              ));
+            } catch {
+              // Scores are an observability nice-to-have — a failure
+              // here never breaks the chat turn.
+            }
+          }, 2000);
           setTimeout(() => setActiveNode(null), 1200);
         }
       }
@@ -355,6 +385,9 @@ export function AgentCore() {
               {heroTurn?.activity && heroTurn.activity.length > 0 && (
                 <ActivityStrip lines={heroTurn.activity} live={!!heroTurn.streaming} />
               )}
+              {heroTurn && heroTurn.judges !== undefined && !heroTurn.streaming && (
+                <JudgeStrip judges={heroTurn.judges} />
+              )}
               {heroTurn ? (
                 <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }}>
                   {heroTurn.text ? (
@@ -454,6 +487,97 @@ function ActivityStrip({ lines, live }: { lines: string[]; live: boolean }) {
           </li>
         ))}
       </ul>
+    </div>
+  );
+}
+
+// Shown under the trace strip once the fire-and-forget judges have
+// landed. Empty judges[] means the fetch succeeded but no rows exist
+// yet (sampling miss or a sub-2s judge write) — surface that explicitly
+// so the producer knows the UI isn't broken.
+function JudgeStrip({ judges }: { judges: JudgeRow[] }) {
+  if (judges.length === 0) {
+    return (
+      <div
+        className="mb-4 rounded-[var(--radius-card)] px-3 py-2 border font-mono"
+        style={{
+          borderColor: "var(--color-rule)",
+          background: "var(--color-surface)",
+          color: "var(--color-ink-faint)",
+          fontSize: 11,
+        }}
+      >
+        <span className="label" style={{ color: "var(--color-ink-faint)" }}>§ Judges</span>
+        <span className="ml-2">no scores yet (sampled out or judge still writing)</span>
+      </div>
+    );
+  }
+  return (
+    <div
+      className="mb-4 rounded-[var(--radius-card)] px-3 py-2 border"
+      style={{
+        borderColor: "var(--color-rule)",
+        background: "var(--color-surface)",
+      }}
+    >
+      <div className="flex items-baseline justify-between">
+        <span className="label" style={{ color: "var(--color-ink-faint)" }}>§ Judges</span>
+        <span className="label font-mono" style={{ color: "var(--color-ink-faint)" }}>
+          {judges.length}
+        </span>
+      </div>
+      <ul className="mt-1 space-y-1.5 text-[11px]" style={{ color: "var(--color-ink-soft)" }}>
+        {judges.map((j) => (
+          <li key={j.judge_name} className="flex items-start gap-2">
+            <JudgeScore score={j.score} />
+            <div className="flex-1 min-w-0">
+              <div className="font-mono text-[10px] uppercase tracking-wider" style={{ color: "var(--color-ink-faint)" }}>
+                {j.judge_name.replace(/_/g, " ")}
+                {j.latency_ms != null && ` · ${j.latency_ms}ms`}
+              </div>
+              {j.justification && (
+                <div className="mt-0.5" style={{ color: "var(--color-ink)" }}>
+                  {j.justification}
+                </div>
+              )}
+              {j.error && (
+                <div className="mt-0.5 font-mono" style={{ color: "var(--color-status-failed)" }}>
+                  error: {j.error}
+                </div>
+              )}
+              {j.missing_asset_ids && j.missing_asset_ids.length > 0 && (
+                <div className="mt-0.5 font-mono text-[10px]" style={{ color: "var(--color-status-failed)" }}>
+                  missing: {j.missing_asset_ids.length} asset{j.missing_asset_ids.length === 1 ? "" : "s"}
+                </div>
+              )}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function JudgeScore({ score }: { score?: number | null }) {
+  const display = score == null ? "—" : String(score);
+  const color = score == null
+    ? "var(--color-ink-faint)"
+    : score >= 4
+      ? "var(--color-cue)"
+      : score >= 3
+        ? "var(--color-ink-soft)"
+        : "var(--color-status-failed)";
+  return (
+    <div
+      className="shrink-0 w-6 h-6 rounded-full flex items-center justify-center font-mono text-[11px]"
+      style={{
+        background: "var(--color-bg)",
+        border: `1px solid ${color}`,
+        color,
+      }}
+      title={score == null ? "no score" : `${score}/5`}
+    >
+      {display}
     </div>
   );
 }
