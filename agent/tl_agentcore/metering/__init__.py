@@ -14,10 +14,12 @@ as a JSON blob {"input_per_mtok": float, "output_per_mtok": float}. The
 cache is per-process with a configurable TTL (default 15 min) so ops can
 bump a price without a redeploy. See prices.py.
 """
+from .categories import category_for
 from .ledger import record_model_invocation, record_tool_call
 from .prices import price_for_model
 
 __all__ = [
+    "category_for",
     "record_model_invocation",
     "record_tool_call",
     "price_for_model",

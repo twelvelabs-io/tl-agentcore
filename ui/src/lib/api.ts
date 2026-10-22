@@ -122,6 +122,7 @@ export type UsageEvent = {
   latency_ms?: number;
   // tool_call:
   tool_name?: string;
+  tool_category?: string;   // retrieval | analysis | kb_read | mutation | generation | web | other
   duration_ms?: number;
 };
 
@@ -149,6 +150,7 @@ export type UsagePayload = {
     unknown_cost_count: number;
     by_model: Record<string, UsageModelBucket>;
     by_tool: Record<string, UsageToolBucket>;
+    by_category: Record<string, UsageToolBucket>;
   };
   events: UsageEvent[];
 };

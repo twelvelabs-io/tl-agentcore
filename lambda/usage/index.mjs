@@ -24,10 +24,11 @@
 //     summary: {
 //       model_invocations, tool_calls,
 //       total_input_tokens, total_output_tokens,
-//       total_cost_usd,           // null when any invocation had unknown price
-//       unknown_cost_count,       // model invocations with price_source=none
-//       by_model: {[id]: {invocations, input_tokens, output_tokens, cost_usd}},
-//       by_tool:  {[name]: {calls, duration_ms_total}}
+//       total_cost_usd,              // null when any invocation had unknown price
+//       unknown_cost_count,          // model invocations with price_source=none
+//       by_model:    {[id]:   {invocations, input_tokens, output_tokens, cost_usd}},
+//       by_tool:     {[name]: {calls, duration_ms_total}},
+//       by_category: {[cat]:  {calls, duration_ms_total}}   // tool_category rollup
 //     },
 //     events: [...]               // raw rows, newest-first, truncated to limit
 //   }
@@ -129,6 +130,7 @@ export const handler = async (event) => {
     unknown_cost_count: 0,
     by_model: {},
     by_tool: {},
+    by_category: {},
   };
   let anyUnknownCost = false;
 
@@ -155,11 +157,20 @@ export const handler = async (event) => {
     } else if (r.event_type === "tool_call") {
       summary.tool_calls += 1;
       const toolKey = r.tool_name || "unknown";
-      const bucket = summary.by_tool[toolKey] ||= {
+      const toolBucket = summary.by_tool[toolKey] ||= {
         calls: 0, duration_ms_total: 0,
       };
-      bucket.calls += 1;
-      bucket.duration_ms_total += r.duration_ms || 0;
+      toolBucket.calls += 1;
+      toolBucket.duration_ms_total += r.duration_ms || 0;
+      // tool_category defaults to "unknown" on pre-split rows so the
+      // old events in a 7-day/30-day window still show up — just under
+      // the "unknown" bucket so the viewer can see the migration edge.
+      const catKey = r.tool_category || "unknown";
+      const catBucket = summary.by_category[catKey] ||= {
+        calls: 0, duration_ms_total: 0,
+      };
+      catBucket.calls += 1;
+      catBucket.duration_ms_total += r.duration_ms || 0;
     }
   }
 

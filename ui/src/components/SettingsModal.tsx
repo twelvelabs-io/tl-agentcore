@@ -649,6 +649,17 @@ function UsageBody({ data }: { data: UsagePayload }) {
     .sort((a, b) => b[1].invocations - a[1].invocations);
   const toolRows = Object.entries(summary.by_tool)
     .sort((a, b) => b[1].calls - a[1].calls);
+  // Fixed display order so retrieval always leads — makes the Jockey
+  // AGENT-4090 split visually obvious (how much of this tool traffic
+  // was retrieval vs analysis?). Unknown lands last; it covers rows
+  // written before the tool_category field existed.
+  const CATEGORY_ORDER = [
+    "retrieval", "analysis", "kb_read", "mutation",
+    "generation", "web", "other", "unknown",
+  ];
+  const categoryRows = CATEGORY_ORDER
+    .map((c) => [c, summary.by_category[c]] as const)
+    .filter(([, b]) => b && b.calls > 0);
 
   return (
     <div className="flex flex-col gap-6">
@@ -685,6 +696,38 @@ function UsageBody({ data }: { data: UsagePayload }) {
                   <td className="text-right py-1 tabular-nums">{fmtCount(b.output_tokens)}</td>
                   <td className="text-right py-1 tabular-nums">
                     {b.unknown_cost ? "—" : fmtUsd(b.cost_usd)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {categoryRows.length > 0 && (
+        <div>
+          <div className="label pb-2" style={{ color: "var(--color-cue)" }}>by category</div>
+          <table className="w-full font-mono text-xs">
+            <thead style={{ color: "var(--color-ink-faint)" }}>
+              <tr>
+                <th className="text-left py-1">category</th>
+                <th className="text-right py-1">calls</th>
+                <th className="text-right py-1">share</th>
+                <th className="text-right py-1">total ms</th>
+                <th className="text-right py-1">avg ms</th>
+              </tr>
+            </thead>
+            <tbody>
+              {categoryRows.map(([cat, b]) => (
+                <tr key={cat} className="border-t" style={{ borderColor: "var(--color-rule)" }}>
+                  <td className="py-1 pr-4">{cat}</td>
+                  <td className="text-right py-1 tabular-nums">{fmtCount(b.calls)}</td>
+                  <td className="text-right py-1 tabular-nums">
+                    {Math.round((b.calls / summary.tool_calls) * 100)}%
+                  </td>
+                  <td className="text-right py-1 tabular-nums">{fmtCount(b.duration_ms_total)}</td>
+                  <td className="text-right py-1 tabular-nums">
+                    {fmtCount(Math.round(b.duration_ms_total / b.calls))}
                   </td>
                 </tr>
               ))}
