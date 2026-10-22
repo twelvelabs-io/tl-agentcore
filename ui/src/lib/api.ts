@@ -196,6 +196,55 @@ export async function fetchUsage(opts: {
   if (!r.ok) throw new Error(`usage ${r.status}: ${await r.text().catch(() => "")}`);
   return r.json();
 }
+
+// ---- Plugins (Distribution-Readiness data sources) ----
+
+export type Plugin = {
+  plugin_id:   string;
+  name:        string;
+  description: string;
+  lambda_arn:  string;
+  target_id:   string;
+  enabled:     boolean;
+  created_by:  string;
+  created_at:  string;
+};
+
+export async function fetchPlugins(): Promise<Plugin[]> {
+  const headers = await authHeaders();
+  const r = await fetch(`/plugins`, { headers });
+  if (!r.ok) throw new Error(`plugins ${r.status}: ${await r.text().catch(() => "")}`);
+  const body = await r.json();
+  return body.plugins || [];
+}
+
+export async function createPlugin(input: {
+  name:        string;
+  description: string;
+  lambda_arn:  string;
+  tool_schema: unknown;
+}): Promise<Plugin> {
+  const headers = { ...(await authHeaders()), "content-type": "application/json" };
+  const r = await fetch(`/plugins`, {
+    method:  "POST",
+    headers,
+    body:    JSON.stringify(input),
+  });
+  if (!r.ok) throw new Error(`plugins ${r.status}: ${await r.text().catch(() => "")}`);
+  const body = await r.json();
+  return body.plugin;
+}
+
+export async function deletePlugin(pluginId: string): Promise<void> {
+  const headers = await authHeaders();
+  const r = await fetch(`/plugins/${encodeURIComponent(pluginId)}`, {
+    method:  "DELETE",
+    headers,
+  });
+  if (!r.ok && r.status !== 204) {
+    throw new Error(`plugins ${r.status}: ${await r.text().catch(() => "")}`);
+  }
+}
 async function authHeaders(): Promise<Record<string, string>> {
   const token = await getAccessToken();
   if (token) return { authorization: `Bearer ${token}` };

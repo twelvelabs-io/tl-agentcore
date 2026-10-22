@@ -24,10 +24,18 @@ import {
   resetPwd,
   type User,
 } from "../lib/users-api";
-import { fetchUsage, type FallbackSummary, type UsagePayload } from "../lib/api";
+import {
+  createPlugin,
+  deletePlugin,
+  fetchPlugins,
+  fetchUsage,
+  type FallbackSummary,
+  type Plugin,
+  type UsagePayload,
+} from "../lib/api";
 
 type Prompts = Record<PromptId, PromptInfo>;
-type TabId = "prompts" | "users" | "usage";
+type TabId = "prompts" | "users" | "usage" | "plugins";
 
 export default function SettingsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   return (
@@ -78,7 +86,10 @@ function SettingsModalContent({ onClose }: { onClose: () => void }) {
           <div>
             <div className="label" style={{ color: "var(--color-cue)" }}>settings</div>
             <h2 className="font-display text-2xl mt-1">
-              {tab === "prompts" ? "System prompts" : tab === "users" ? "Users" : "Usage"}
+              {tab === "prompts" ? "System prompts"
+                : tab === "users" ? "Users"
+                : tab === "plugins" ? "Data sources"
+                : "Usage"}
             </h2>
             {tab === "prompts" && (
               <p className="font-mono text-[11px] mt-1" style={{ color: "var(--color-ink-faint)" }}>
@@ -96,12 +107,14 @@ function SettingsModalContent({ onClose }: { onClose: () => void }) {
             <TabButton active={tab === "users"} onClick={() => setTab("users")}>Users</TabButton>
           )}
           <TabButton active={tab === "usage"} onClick={() => setTab("usage")}>Usage</TabButton>
+          <TabButton active={tab === "plugins"} onClick={() => setTab("plugins")}>Data sources</TabButton>
         </div>
 
         <div className="flex-1 min-h-0 overflow-y-auto">
           {tab === "prompts" && <PromptsTab />}
           {tab === "users" && showUsers && <UsersTab />}
           {tab === "usage" && <UsageTab />}
+          {tab === "plugins" && <PluginsTab />}
         </div>
       </motion.div>
     </motion.div>
@@ -954,4 +967,193 @@ function fmtRelative(unixSec: number): string {
 function unixOf(iso: string | number): number {
   if (typeof iso === "number") return iso;
   return Math.floor(new Date(iso).getTime() / 1000);
+}
+
+// ─── Data sources tab (plugin surface for Distribution-Readiness) ─────
+//
+// Lists every registered gateway target. Admins can add a new plugin
+// by pasting the Lambda ARN + an inline MCP tool_schema JSON blob;
+// non-admins see the list read-only. The seed plugin_echo target
+// (Terraform-owned) does NOT appear here — it lives on the gateway
+// but is not in the plugins DDB, so the admin surface stays focused
+// on customer-added sources.
+function PluginsTab() {
+  const admin = isAdmin();
+  const [plugins, setPlugins] = useState<Plugin[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  // "Add new" form state
+  const [showForm, setShowForm] = useState(false);
+  const [fName, setFName] = useState("");
+  const [fDesc, setFDesc] = useState("");
+  const [fArn, setFArn] = useState("");
+  const [fSchema, setFSchema] = useState("");
+  const [fErr, setFErr] = useState<string | null>(null);
+
+  async function reload() {
+    try {
+      setErr(null);
+      const p = await fetchPlugins();
+      setPlugins(p);
+    } catch (e: any) {
+      setErr(String(e?.message || e));
+      setPlugins([]);
+    }
+  }
+  useEffect(() => { reload(); }, []);
+
+  async function onAdd() {
+    setFErr(null);
+    let schema: unknown;
+    try {
+      schema = JSON.parse(fSchema);
+    } catch {
+      setFErr("tool_schema must be valid JSON");
+      return;
+    }
+    setBusy(true);
+    try {
+      await createPlugin({ name: fName.trim(), description: fDesc.trim(), lambda_arn: fArn.trim(), tool_schema: schema });
+      setFName(""); setFDesc(""); setFArn(""); setFSchema("");
+      setShowForm(false);
+      await reload();
+    } catch (e: any) {
+      setFErr(String(e?.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onDelete(id: string, name: string) {
+    if (!confirm(`Remove plugin "${name}"? This also deletes its gateway target.`)) return;
+    setBusy(true);
+    try {
+      await deletePlugin(id);
+      await reload();
+    } catch (e: any) {
+      setErr(String(e?.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="p-5">
+      <div className="flex items-baseline justify-between mb-4">
+        <p className="text-sm" style={{ color: "var(--color-ink-soft)" }}>
+          Pluggable data sources the agent calls over MCP. Each row is one AgentCore Gateway target.
+          A built-in <code>plugin_echo</code> target is always present for health checks.
+        </p>
+        {admin && (
+          <button
+            className="label hover:text-[var(--color-cue)]"
+            onClick={() => setShowForm((v) => !v)}
+          >
+            {showForm ? "cancel" : "+ add plugin"}
+          </button>
+        )}
+      </div>
+
+      {err && (
+        <div className="mb-3 p-3 text-xs font-mono" style={{ background: "#2a1818", color: "#ffb0b0" }}>
+          {err}
+        </div>
+      )}
+
+      {showForm && admin && (
+        <div className="mb-5 p-4" style={{ background: "var(--color-surface)", border: "1px solid var(--color-rule)" }}>
+          <div className="label mb-2">new plugin</div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+            <input
+              className="px-2 py-1.5 text-sm font-mono"
+              style={{ background: "var(--color-paper)", border: "1px solid var(--color-rule)" }}
+              placeholder="name (gateway target name, kebab/alnum)"
+              value={fName}
+              onChange={(e) => setFName(e.target.value)}
+            />
+            <input
+              className="px-2 py-1.5 text-sm font-mono"
+              style={{ background: "var(--color-paper)", border: "1px solid var(--color-rule)" }}
+              placeholder="description (optional)"
+              value={fDesc}
+              onChange={(e) => setFDesc(e.target.value)}
+            />
+          </div>
+          <input
+            className="w-full px-2 py-1.5 text-sm font-mono mb-3"
+            style={{ background: "var(--color-paper)", border: "1px solid var(--color-rule)" }}
+            placeholder="lambda_arn (arn:aws:lambda:...)"
+            value={fArn}
+            onChange={(e) => setFArn(e.target.value)}
+          />
+          <textarea
+            className="w-full px-2 py-1.5 text-xs font-mono mb-3"
+            style={{ background: "var(--color-paper)", border: "1px solid var(--color-rule)", minHeight: 160 }}
+            placeholder={`tool_schema (JSON — gateway inlinePayload shape, see plugin-echo-target.tf). Example:\n{\n  "name": "my_tool",\n  "description": "...",\n  "inputSchema": {"type": "object", "properties": [...]},\n  "outputSchema": {"type": "object", "properties": [...]}\n}`}
+            value={fSchema}
+            onChange={(e) => setFSchema(e.target.value)}
+          />
+          {fErr && (
+            <div className="mb-3 p-2 text-xs font-mono" style={{ background: "#2a1818", color: "#ffb0b0" }}>
+              {fErr}
+            </div>
+          )}
+          <button
+            className="px-4 py-1.5 text-sm"
+            style={{ background: "var(--color-cue)", color: "#000" }}
+            disabled={busy || !fName || !fArn || !fSchema}
+            onClick={onAdd}
+          >
+            {busy ? "creating…" : "create plugin"}
+          </button>
+        </div>
+      )}
+
+      {plugins === null ? (
+        <div className="text-sm" style={{ color: "var(--color-ink-faint)" }}>loading…</div>
+      ) : plugins.length === 0 ? (
+        <div className="text-sm" style={{ color: "var(--color-ink-faint)" }}>
+          No customer plugins yet. {admin && "Add one above to expose a new data source to the agent."}
+        </div>
+      ) : (
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="label" style={{ borderBottom: "1px solid var(--color-rule)" }}>
+              <th className="text-left py-2">name</th>
+              <th className="text-left py-2">description</th>
+              <th className="text-left py-2">lambda</th>
+              <th className="text-left py-2">added</th>
+              {admin && <th className="text-right py-2">·</th>}
+            </tr>
+          </thead>
+          <tbody>
+            {plugins.map((p) => (
+              <tr key={p.plugin_id} style={{ borderBottom: "1px solid var(--color-rule)" }}>
+                <td className="py-2 font-mono">{p.name}</td>
+                <td className="py-2" style={{ color: "var(--color-ink-soft)" }}>{p.description || "—"}</td>
+                <td className="py-2 font-mono text-xs" style={{ color: "var(--color-ink-faint)" }}>
+                  {p.lambda_arn.split(":").pop()}
+                </td>
+                <td className="py-2 text-xs" style={{ color: "var(--color-ink-faint)" }}>
+                  {p.created_at ? fmtEventWhen(p.created_at) : "—"}
+                </td>
+                {admin && (
+                  <td className="py-2 text-right">
+                    <button
+                      className="label hover:text-[#ffb0b0]"
+                      disabled={busy}
+                      onClick={() => onDelete(p.plugin_id, p.name)}
+                    >
+                      remove
+                    </button>
+                  </td>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
 }
