@@ -17,6 +17,8 @@ Row shape (one per metering event):
     "latency_ms":     <int>,
     # tool_call only:
     "tool_name":      <string>,
+    "tool_category":  <"retrieval" | "analysis" | "kb_read" |
+                       "mutation" | "generation" | "web" | "other">,
     "duration_ms":    <int>,
     # TTL:
     "expires_at":     <epoch_seconds, 90d>,
@@ -35,6 +37,7 @@ from typing import Any
 
 import boto3  # type: ignore
 
+from .categories import category_for
 from .prices import compute_cost_usd, price_for_model
 
 _REGION = os.environ.get("AWS_REGION", "us-east-1")
@@ -102,17 +105,25 @@ def record_tool_call(
     duration_ms: int,
     response_id: str,
     knowledge_store_id: str | None,
+    tool_category: str | None = None,
 ) -> None:
     """One row per in-process tool call. Cost is intentionally not
     computed here — tool-side spend (Bedrock embedding calls, Pegasus
     seconds, MediaConvert minutes) is already captured by whatever
     AWS service meters it; writing a zero would be misleading. Never
-    raises."""
+    raises.
+
+    `tool_category` splits retrieval traffic from analysis / mutation /
+    etc. so dashboards can tell "no retrieval happened" apart from "no
+    tool ran at all" — see metering/categories.py. Falls back to the
+    static map when not passed, so callers that don't know the
+    category can still record a usable row."""
     if not _TABLE:
         return
     try:
         sampled_at = _now_iso()
         expires_at = int(time.time()) + _TTL_DAYS * 86400
+        category = tool_category or category_for(tool_name)
         item: dict[str, Any] = {
             "user_id":            {"S": user_id or "anonymous"},
             "event_id":           {"S": _event_id(sampled_at)},
@@ -121,6 +132,7 @@ def record_tool_call(
             "response_id":        {"S": response_id or "unknown"},
             "knowledge_store_id": {"S": knowledge_store_id or ""},
             "tool_name":          {"S": tool_name or "unknown"},
+            "tool_category":      {"S": category},
             "duration_ms":        {"N": str(max(0, int(duration_ms)))},
             "expires_at":         {"N": str(expires_at)},
         }
