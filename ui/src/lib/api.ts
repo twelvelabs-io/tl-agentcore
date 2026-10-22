@@ -137,6 +137,23 @@ export type UsageToolBucket = {
   calls: number;
   duration_ms_total: number;
 };
+export type FallbackRecent = {
+  event_id: string;
+  sampled_at: string;
+  response_id?: string;
+  from_pipeline?: string;
+  to_pipeline?: string;
+  reason_class?: string;
+  stage?: string;
+  reason_text?: string;
+};
+export type FallbackSummary = {
+  total: number;
+  by_reason: Record<string, number>;
+  by_stage: Record<string, number>;
+  by_from_to: Record<string, number>;
+  recent: FallbackRecent[];
+};
 
 export type UsagePayload = {
   user_id: string;
@@ -144,6 +161,7 @@ export type UsagePayload = {
   summary: {
     model_invocations: number;
     tool_calls: number;
+    pipeline_fallbacks: number;
     total_input_tokens: number;
     total_output_tokens: number;
     total_cost_usd: number | null;   // null when any invocation had unknown price
@@ -151,6 +169,7 @@ export type UsagePayload = {
     by_model: Record<string, UsageModelBucket>;
     by_tool: Record<string, UsageToolBucket>;
     by_category: Record<string, UsageToolBucket>;
+    fallbacks: FallbackSummary;
   };
   events: UsageEvent[];
 };

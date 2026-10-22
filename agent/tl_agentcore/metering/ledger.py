@@ -20,6 +20,12 @@ Row shape (one per metering event):
     "tool_category":  <"retrieval" | "analysis" | "kb_read" |
                        "mutation" | "generation" | "web" | "other">,
     "duration_ms":    <int>,
+    # pipeline_fallback only:
+    "from_pipeline":  "rewoo",
+    "to_pipeline":    "react",
+    "reason_class":   <short slug — see fallback_reasons.py>,
+    "stage":          <"planner" | "plan_parse" | "executor" | "solver" | "unknown">,
+    "reason_text":    <full RewooFallback message, truncated to 600 chars>,
     # TTL:
     "expires_at":     <epoch_seconds, 90d>,
   }
@@ -38,6 +44,7 @@ from typing import Any
 import boto3  # type: ignore
 
 from .categories import category_for
+from .fallback_reasons import classify_fallback
 from .prices import compute_cost_usd, price_for_model
 
 _REGION = os.environ.get("AWS_REGION", "us-east-1")
@@ -139,6 +146,45 @@ def record_tool_call(
         _ddb.put_item(TableName=_TABLE, Item=item)
     except Exception as e:
         print(f"metering/ledger: record_tool_call failed: {e}")
+
+
+def record_pipeline_fallback(
+    *,
+    user_id: str | None,
+    response_id: str,
+    knowledge_store_id: str | None,
+    from_pipeline: str,
+    to_pipeline: str,
+    reason_message: str,
+) -> None:
+    """One row per pipeline-level fallback (today only ReWOO → ReAct).
+    Message is classified via `metering/fallback_reasons.classify_fallback`
+    into a short slug + stage so dashboards can group-by. Never raises."""
+    if not _TABLE:
+        return
+    try:
+        sampled_at = _now_iso()
+        expires_at = int(time.time()) + _TTL_DAYS * 86400
+        reason = classify_fallback(reason_message)
+        item: dict[str, Any] = {
+            "user_id":            {"S": user_id or "anonymous"},
+            "event_id":           {"S": _event_id(sampled_at)},
+            "event_type":         {"S": "pipeline_fallback"},
+            "sampled_at":         {"S": sampled_at},
+            "response_id":        {"S": response_id or "unknown"},
+            "knowledge_store_id": {"S": knowledge_store_id or ""},
+            "from_pipeline":      {"S": from_pipeline or "unknown"},
+            "to_pipeline":        {"S": to_pipeline or "unknown"},
+            "reason_class":       {"S": reason.reason_class},
+            "stage":              {"S": reason.stage},
+            # Full raw message for one-off debugging, truncated so we
+            # don't blow the DDB item size on a pathological traceback.
+            "reason_text":        {"S": (reason_message or "")[:600]},
+            "expires_at":         {"N": str(expires_at)},
+        }
+        _ddb.put_item(TableName=_TABLE, Item=item)
+    except Exception as e:
+        print(f"metering/ledger: record_pipeline_fallback failed: {e}")
 
 
 def _dec(x: float) -> str:

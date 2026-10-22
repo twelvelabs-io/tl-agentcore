@@ -24,7 +24,7 @@ import {
   resetPwd,
   type User,
 } from "../lib/users-api";
-import { fetchUsage, type UsagePayload } from "../lib/api";
+import { fetchUsage, type FallbackSummary, type UsagePayload } from "../lib/api";
 
 type Prompts = Record<PromptId, PromptInfo>;
 type TabId = "prompts" | "users" | "usage";
@@ -636,7 +636,8 @@ function UsageTab() {
 
 function UsageBody({ data }: { data: UsagePayload }) {
   const { summary, events } = data;
-  const nothing = summary.model_invocations === 0 && summary.tool_calls === 0;
+  const nothing = summary.model_invocations === 0 && summary.tool_calls === 0
+    && (summary.pipeline_fallbacks || 0) === 0;
   if (nothing) {
     return (
       <p className="font-mono text-sm py-6" style={{ color: "var(--color-ink-soft)" }}>
@@ -663,14 +664,23 @@ function UsageBody({ data }: { data: UsagePayload }) {
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="grid grid-cols-4 gap-4">
-        <Stat label="model turns"      value={fmtCount(summary.model_invocations)} />
-        <Stat label="tool calls"       value={fmtCount(summary.tool_calls)} />
+      <div className="grid grid-cols-5 gap-4">
+        <Stat label="model turns"       value={fmtCount(summary.model_invocations)} />
+        <Stat label="tool calls"        value={fmtCount(summary.tool_calls)} />
         <Stat label="tokens (in · out)" value={`${fmtCount(summary.total_input_tokens)} · ${fmtCount(summary.total_output_tokens)}`} />
         <Stat
           label="total cost"
           value={summary.total_cost_usd === null ? "—" : fmtUsd(summary.total_cost_usd)}
           hint={summary.unknown_cost_count > 0 ? `${summary.unknown_cost_count} unknown-price` : undefined}
+        />
+        <Stat
+          label="pipeline fallbacks"
+          value={fmtCount(summary.pipeline_fallbacks || 0)}
+          hint={
+            summary.model_invocations > 0 && (summary.pipeline_fallbacks || 0) > 0
+              ? `${Math.round(((summary.pipeline_fallbacks || 0) / summary.model_invocations) * 100)}% of turns`
+              : undefined
+          }
         />
       </div>
 
@@ -702,6 +712,10 @@ function UsageBody({ data }: { data: UsagePayload }) {
             </tbody>
           </table>
         </div>
+      )}
+
+      {summary.fallbacks && summary.fallbacks.total > 0 && (
+        <FallbacksPanel fb={summary.fallbacks} />
       )}
 
       {categoryRows.length > 0 && (
@@ -811,6 +825,88 @@ function UsageBody({ data }: { data: UsagePayload }) {
           </p>
         )}
       </div>
+    </div>
+  );
+}
+
+function FallbacksPanel({ fb }: { fb: FallbackSummary }) {
+  const reasonRows = Object.entries(fb.by_reason)
+    .sort((a, b) => b[1] - a[1]);
+  const stageRows = Object.entries(fb.by_stage)
+    .sort((a, b) => b[1] - a[1]);
+  return (
+    <div
+      className="px-4 py-3"
+      style={{
+        background: "var(--color-surface)",
+        border: "1px solid var(--color-status-failed)",
+      }}
+    >
+      <div className="label pb-2" style={{ color: "var(--color-status-failed)" }}>
+        pipeline fallbacks
+      </div>
+      <p className="font-mono text-[11px] pb-3" style={{ color: "var(--color-ink-faint)" }}>
+        rewoo→react fallbacks mean the planner, executor, or solver hit an error and the
+        turn restarted on ReAct. Not fatal to the user, but each row is a bug or classifier
+        miss waiting to be fixed.
+      </p>
+      <div className="grid grid-cols-2 gap-6">
+        <div>
+          <div className="label pb-1" style={{ color: "var(--color-ink-faint)" }}>by reason</div>
+          <table className="w-full font-mono text-xs">
+            <tbody>
+              {reasonRows.map(([k, n]) => (
+                <tr key={k} className="border-t" style={{ borderColor: "var(--color-rule)" }}>
+                  <td className="py-1 pr-4">{k}</td>
+                  <td className="text-right py-1 tabular-nums">{fmtCount(n)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div>
+          <div className="label pb-1" style={{ color: "var(--color-ink-faint)" }}>by stage</div>
+          <table className="w-full font-mono text-xs">
+            <tbody>
+              {stageRows.map(([k, n]) => (
+                <tr key={k} className="border-t" style={{ borderColor: "var(--color-rule)" }}>
+                  <td className="py-1 pr-4">{k}</td>
+                  <td className="text-right py-1 tabular-nums">{fmtCount(n)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {fb.recent.length > 0 && (
+        <div className="pt-4">
+          <div className="label pb-1" style={{ color: "var(--color-ink-faint)" }}>recent</div>
+          <table className="w-full font-mono text-[11px]">
+            <thead style={{ color: "var(--color-ink-faint)" }}>
+              <tr>
+                <th className="text-left py-1">when</th>
+                <th className="text-left py-1">reason</th>
+                <th className="text-left py-1">stage</th>
+                <th className="text-left py-1">response_id</th>
+              </tr>
+            </thead>
+            <tbody>
+              {fb.recent.map((r) => (
+                <tr key={r.event_id} className="border-t align-top" style={{ borderColor: "var(--color-rule)" }}>
+                  <td className="py-1 pr-4 whitespace-nowrap">{fmtEventWhen(r.sampled_at)}</td>
+                  <td className="py-1 pr-4">
+                    <span title={r.reason_text || ""}>{r.reason_class || "other"}</span>
+                  </td>
+                  <td className="py-1 pr-4">{r.stage || "unknown"}</td>
+                  <td className="py-1 pr-4 break-all" style={{ color: "var(--color-ink-faint)" }}>
+                    {r.response_id || "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
