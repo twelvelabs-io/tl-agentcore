@@ -131,6 +131,11 @@ resource "aws_bedrockagentcore_agent_runtime" "this" {
     USAGE_EVENTS_TABLE       = aws_dynamodb_table.usage_events.name
     PRICES_SSM_PREFIX        = "/tl-agentcore/prices"
     PRICES_CACHE_TTL_SECONDS = "900"
+    # Wave-2 PR #4: asset-id handles (`@id_N`) for tool fanout.
+    # Opt-in — default off until we validate token savings + solver
+    # fidelity on a few turns' trace in usage_events. Flip to "1" via
+    # a terraform apply (no redeploy of the agent image needed).
+    ID_ALIASES_ENABLED = "0"
     # v0.4 hybrid entity-reID: per-KS Rekognition collection id is
     # derived as `<STACK_FQNAME>-ks-<ks_id>`. Marengo image-embed
     # async-invoke needs the bucket owner for s3Location.bucketOwner.

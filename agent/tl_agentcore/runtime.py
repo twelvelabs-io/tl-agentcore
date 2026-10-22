@@ -69,6 +69,7 @@ from .agent import (
     set_user_id_from_token,
 )
 from .activity_narrator import narrate as narrate_activity
+from .aliases import expand_text as expand_id_aliases, reset_turn_aliases
 from .duration_enforcer import _extract_plan_block, enforce_duration_target
 from .error_taxonomy import classify as classify_error
 from .metering import record_model_invocation, record_tool_call
@@ -235,6 +236,12 @@ async def _semantic_stream(payload: dict) -> AsyncIterator[dict]:
     # before the request reached us.
     set_user_id_from_token(access_token)
 
+    # Wave-2 PR #4: install a fresh per-turn alias map so asset_id
+    # handles (`@id_N`) allocated during one tool call stay bound for
+    # the rest of this turn and get wiped before the next. No-op when
+    # ID_ALIASES_ENABLED is unset.
+    reset_turn_aliases()
+
     # Wave-2 PR #11: pipeline selection. ReWOO handles info-type turns
     # with a fixed planner+executor+solver round-trip; ReAct is the
     # default for structural / ambiguous turns and the fallback target
@@ -347,6 +354,12 @@ async def _semantic_stream(payload: dict) -> AsyncIterator[dict]:
                              "trace": traceback.format_exc()},
                    "tool_path": mode}
             return
+
+    # Wave-2 PR #4: expand any `@id_N` handles the model emitted in its
+    # final prose back to real 24-hex asset_ids BEFORE plan extraction.
+    # The UI, duration enforcer, session persist, and generate_video all
+    # need real ids inside the <plan> block. No-op when disabled.
+    final_text = expand_id_aliases(final_text)
 
     # EDL extraction. If the model's prose included a <plan>...</plan> block
     # with parseable JSON, emit it as a `custom` output item so the UI
