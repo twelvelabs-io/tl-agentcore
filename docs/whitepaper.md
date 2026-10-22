@@ -11,22 +11,28 @@ List (EDL) of clips; a follow-up question gets a grounded prose answer;
 a *"find me more of this person"* finds them across the entire library.
 Underneath, **every model and every store lives inside the customer's
 AWS account**. Marengo 3.0 (clip embeddings), Pegasus 1.5 (clip
-analysis), Titan Multimodal (image embeddings for Re-ID), and Claude 4
-(reasoning + clustering) are all invoked through Bedrock — the
-TwelveLabs models via Bedrock Marketplace, billed through the customer's
-AWS account with no separate SaaS sign-up. ANN retrieval is S3 Vectors.
-The agent runs on Bedrock AgentCore Runtime, which terminates the
-browser WebSocket **directly** — no chat-lambda hop, no API Gateway in
-the live path. The customer-deployed surface is a Strands agent
-container (arm64), six support lambdas (`kb_admin`, `kb_graph`,
-`presign_upload`, `embed_clip_start`, `asset_profile`, `ks_rollup`), a
-SageMaker Async Inference Endpoint for the Re-ID worker, a MediaConvert
-HLS transcode pipeline, and the S3 buckets / DynamoDB tables that hold
-the clips, the vectors, and the asset registry. **The full
-"upload-to-ready" pipeline is automatic** — no operator scripts
-required between dropping an MP4 in the UI and the agent having a
-Pegasus profile + cross-asset entity graph for it. Nothing — not even the knowledge-store catalog
-— talks to api.twelvelabs.io on the live path.
+analysis — the same model as SaaS Pegasus 1.6 under the hood), Claude
+Sonnet 4.6 (reasoning + online judges), and Rekognition Faces +
+Marengo image-embed (hybrid Re-ID) are all invoked through Bedrock —
+the TwelveLabs models via Bedrock Marketplace, billed through the
+customer's AWS account with no separate SaaS sign-up. ANN retrieval is
+S3 Vectors. The agent runs on Bedrock AgentCore Runtime, which
+terminates the browser WebSocket **directly** — no chat-lambda hop,
+no API Gateway in the live path. The customer-deployed surface is a
+Strands agent container (arm64), a handful of support lambdas
+(`kb_admin`, `kb_graph`, `presign_upload`, `embed_clip_start`,
+`embed_clip_finalize`, `hls_finalize`, `asset_profile`,
+`enrich_comprehend`, `enrich_transcribe_start`, `index_faces`,
+`ks_rollup`, `graph_backfill`, `mining_run`, `settings`, `stitch`,
+`users`, `scores`), a Neptune Analytics graph for the entity + event
+layer, a MediaConvert HLS transcode pipeline, and the S3 buckets /
+DynamoDB tables that hold the clips, the vectors, the asset registry,
+the per-asset profiles, the online judge rows, and the metering
+ledger. **The full "upload-to-ready" pipeline is automatic** — no
+operator scripts required between dropping an MP4 in the UI and the
+agent having a Pegasus profile + cross-asset entity graph for it.
+Nothing — not even the knowledge-store catalog — talks to
+api.twelvelabs.io on the live path.
 
 The worked example is a **Rough Cut / Highlight Reel studio**: a
 producer types a brief in natural language and the agent returns an
@@ -60,10 +66,15 @@ as `[CURRENT PLAN] <plan>{...}</plan> [FOLLOWUP] {...}`, so the agent
 always reasons over the current state of the cut. The browser
 WebSocket is now the AgentCore Runtime's native `/ws` endpoint
 (authenticated with a Cognito JWT carried in the
-`Sec-WebSocket-Protocol` subprotocol). Each agent yield becomes a JSON
-text frame — `tool_call`, `tool_result`, `text_delta`, `result` — so
-the producer sees the agent reason in wall-clock order rather than as
-a 60-second spinner.
+`Sec-WebSocket-Protocol` subprotocol). The wire format follows the
+OpenAI Open-Responses taxonomy — each yield becomes a JSON frame of
+one of `response.created`, `response.output_item.added`,
+`response.output_text.delta`, `response.output_text.done`,
+`response.output_item.done`, `response.activity` (human-readable
+"doing X now" narration for every tool call plus pipeline / preseed /
+rewoo stage lines), `response.keepalive`, `response.completed`, or
+`response.failed`. The producer sees the agent reason in wall-clock
+order rather than as a 60-second spinner.
 
 ---
 
@@ -453,6 +464,66 @@ the chat view and extracted onto the timeline when the turn finishes.
 A "new cut" button discards the conversation and starts a fresh
 session.
 
+### 4.5 Orchestration + observability layer
+
+A wave of 2026-10 additions moves the runtime up a layer: the agent
+is no longer a bare ReAct loop with a tool catalog, it carries its own
+pipeline selection, pre-flight context seeding, in-session identity
+compression, online quality scoring, and a per-call cost ledger. Each
+addition ships behind an env-var flag so a deployment can run with
+the baseline wave-1 shape and promote features incrementally after
+dev-stack trace evidence confirms them.
+
+- **Pipeline selection + ReWOO.** `pipelines/router.py` classifies
+  each turn into INFORMATIONAL (routed to a planner → executor →
+  solver ReWOO pipeline with a bounded round-trip count),
+  STRUCTURAL (classic ReAct for plan edits), or AMBIGUOUS (ReAct
+  with a clarifying question). ReWOO's executor transparently falls
+  back to ReAct on any error — the user never sees a failure. The
+  `response.completed.tool_path` field surfaces which pipeline ran.
+- **Synthetic tool-call injection.** When `PRESEED_TOOLS_ENABLED=1`,
+  the runtime pre-executes `get_kb_overview` + `list_kb_assets` for
+  the current KS in parallel and splices synthetic
+  tool_use + tool_result messages into `agent.messages` before
+  `stream_async`. The model's first move can then be the actual
+  answer instead of two near-reflex lookups.
+- **ID aliases.** When `ID_ALIASES_ENABLED=1`, 24-hex `asset_id`
+  values on tool fanout results get rewritten to short `@id_N`
+  handles bound per-turn via a `ContextVar`. Final text re-expands
+  the handles before the UI, duration enforcer, and judges see
+  them. Saves ~600 tokens per 25-clip retrieval.
+- **Online judges.** `scoring/judge_runner.py` dispatches a Sonnet
+  4.6 coherence judge + a deterministic reference-validity judge
+  fire-and-forget at end-of-turn. Rows land in a `scores` DDB table
+  keyed by `(response_id, judge_name)` with 90-day TTL. The SPA
+  reads them through the `/scores/{response_id}` lambda and renders
+  a judge panel under each turn. Sampling via `JUDGE_SAMPLE_RATE`
+  env var; default `"1.0"` during calibration, flip to `"0.1"`
+  once trends are stable.
+- **Metering ledger.** `metering/ledger.py` writes one row per
+  Bedrock model invocation + per in-process tool call to a
+  `usage_events` DDB table keyed by `(user_id, event_id)`. Prices
+  for the cost column live in SSM Parameter Store under
+  `/tl-agentcore/prices/<model_id>` (JSON blob with `input_per_mtok`
+  and `output_per_mtok`) with a 15 min per-process cache, so ops
+  bumps rates without a redeploy.
+- **Hosted web search.** The `web_search` tool wraps a provider
+  adapter picked by the `WEB_SEARCH_PROVIDER` env var: `none`
+  (default — returns a configuration error), `brave` (ready adapter
+  in `web_search/brave.py`), `google_cse` and `serpapi` (stubs with
+  wire-up docstrings). API keys live in SSM SecureStrings at
+  `/tl-agentcore/web-search/<provider>`.
+- **QA-item.** A per-asset question-answer tool with a kb_cache row
+  per `(asset_id, modality, window, normalized_question)`. Repeat
+  questions over the same clip collapse from a $0.001 Pegasus call
+  to a sub-10 ms DDB `GetItem`.
+
+The user-visible slice is the SPA's `§ Trace` and `§ Judges` strips
+under each agent turn: pipeline + preseed + rewoo stage lines plus
+per-tool "doing X" narration from `activity_narrator.py` on the
+trace side, coherence + reference-validity scores with a colored
+pill (4-5 cue / 3 soft / ≤2 failed / null faint) on the judges side.
+
 ---
 
 ## 5 · Offline tier — ingest pipelines
@@ -562,6 +633,18 @@ becomes a `kind = animal` query against `ENTITY#*` rows; *"who appears
 in this asset"* becomes a single `ASSET#<asset_id>` get.
 
 ### 5.3 Entity Re-ID — real CV on a SageMaker Async Inference Endpoint
+
+> **Note:** this section describes the v0.3-era pipeline. v0.4
+> replaced it with a Rekognition Faces + Marengo image-embed hybrid
+> (per the 4-way evaluation in `docs/v0.4-plan.md`: Rekognition Faces
+> hit MRR 0.77 on trailers vs. 0.50 for Titan, and Marengo image
+> queries against the already-populated clips index gave a free
+> fallback for non-face content). The current reference implementation
+> no longer ships the Grounding DINO + DeepSORT + Titan + SageMaker
+> stack described below — it's preserved here as a legitimate
+> AWS-native CV pattern worth remembering. See CLAUDE.md §
+> "Phase 3 v0.4: Rekognition + Marengo hybrid image search" for the
+> current `find_by_image` implementation.
 
 The Phase 3-proper path. A genuine computer-vision pipeline runs over
 every asset to extract person/animal/object identities at the pixel
@@ -840,33 +923,44 @@ tool catalog stay identical across verticals.
 
 The companion repository contains:
 
-- `agent/` — Strands agent and 14 tools (Python, packaged into the
-  arm64 AgentCore Runtime container). Single-source `runtime.py`
-  exposes both `@app.entrypoint` (SSE, legacy) and `@app.websocket`
-  (native, current) handlers sharing one event generator.
+- `agent/` — Strands agent and the full tool catalog (Python, packaged
+  into the arm64 AgentCore Runtime container). Single-source
+  `runtime.py` exposes both `@app.entrypoint` (SSE, legacy) and
+  `@app.websocket` (native, current) handlers sharing one event
+  generator. Pipeline selection (ReWOO / ReAct), preseed, aliases,
+  judges, metering, QA cache, and web search ship as sibling
+  modules under `agent/tl_agentcore/` and plug into the runtime's
+  stream loop.
 - `lambda/` — `kb_admin` (HTTP /kb/* · KS + assets CRUD over DDB),
-  `kb_graph` (HTTP /kb-graph · knowledge-graph payload),
+  `kb_graph` (HTTP /kb-graph · knowledge-graph payload from Neptune),
   `presign_upload` (HTTP /upload/presign · S3 PUT URL),
   `embed_clip_start` (HTTP /upload/embed · mints asset_id, kicks off
   MediaConvert + Marengo), `hls_finalize` (S3-triggered · flips asset
   row to "ready" + stamps size/duration/thumbnail when HLS lands),
   `embed_clip_finalize` (S3-triggered · writes Marengo vectors into
-  S3 Vectors), `asset_profile` (S3-triggered · runs Pegasus per upload,
-  writes kb_cache `ASSET#` row), `ks_rollup` (EventBridge 4h ·
-  cross-asset entity aggregation + OVERVIEW + event clustering),
-  `stitch` (HTTP /stitch · MediaConvert preview render), `chat` (legacy
-  WS relay, scheduled for removal in a follow-up), and the two Re-ID
-  pipeline lambdas (`entity_reid_invoke_async`,
-  `entity_reid_embed_patches`).
-- `expert-models/gdino/` — Triton 22.12 + HF GroundingDINO + DeepSORT
-  + Re-ID Triton container for the SageMaker Async Inference Endpoint.
+  S3 Vectors), `asset_profile` (S3-triggered · runs Pegasus per
+  upload, writes kb_cache `ASSET#` row), `enrich_comprehend` and
+  `enrich_transcribe_start` (S3-triggered · entity + ASR enrichment,
+  writes to the Neptune graph), `index_faces` (per-KS Rekognition
+  face indexing), `ks_rollup` (EventBridge 4h · cross-asset entity
+  aggregation + OVERVIEW + event clustering), `graph_backfill`
+  (one-shot backfill of the Neptune graph from kb_cache),
+  `mining_run` (EventBridge Scheduler · runs saved jockey plans on
+  cron), `settings` (HTTP /settings/* · system-prompt view/edit),
+  `stitch` (HTTP /stitch* · MediaConvert preview render), `users`
+  (HTTP /users* · Cognito user management), and `scores` (HTTP
+  /scores/{response_id} · surfaces online judge rows for the SPA
+  trace panel).
 - `infra/` — Terraform stack: AgentCore Runtime + JWT authorizer,
-  S3 Vectors indexes (clips · entity-thumbs · entity-patches),
-  DynamoDB tables (knowledge_stores · assets · kb_cache · rights ·
-  audiences), Cognito user pool + hosted UI, CloudFront + S3 bucket
-  for the SPA, MediaConvert HLS service role, HTTP API Gateways
-  for the support lambdas, Step Functions + SageMaker Async Endpoint
-  + ECR + CodeBuild for the Re-ID pipeline.
+  S3 Vectors indexes (clips with per-modality visual/audio/
+  transcription embeddings), DynamoDB tables (knowledge_stores ·
+  assets · kb_cache · rights · audiences · sessions · memories ·
+  artifacts · jockey_plans · jockey_runs · scores · usage_events),
+  Neptune Analytics graph for the entity + event layer, SSM
+  Parameter Store paths for pricing and web-search keys, Cognito
+  user pool + hosted UI, CloudFront + S3 bucket for the SPA,
+  MediaConvert HLS service role, and HTTP API Gateway routes for
+  every support lambda above.
 - `ui/` — React + Vite SPA with the Rough Cut tab, the Agent tab
   (live tool-lane diagram), the Library tab (asset CRUD + upload),
   the Graph tab (3D force-directed knowledge graph), and a Playwright
