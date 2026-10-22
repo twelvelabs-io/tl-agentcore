@@ -72,6 +72,7 @@ import httpx
 from strands import Agent, tool
 
 from .aliases import aliasify_result, dealias_dict, resolve_alias
+from .web_search import search as _web_search
 
 # ─── Configuration via env ──────────────────────────────────────────────────
 MODEL_ID = os.environ.get(
@@ -1857,6 +1858,42 @@ def execute_code(code: str) -> dict:
     except (TypeError, ValueError):
         serializable = rendered
     return {"result": serializable, "repr": rendered, "mode": mode}
+
+
+# ═══ Wave-2 PR #7: Hosted web search + citations ═════════════════════════════
+
+@tool
+def web_search(query: str, max_results: int = 5) -> dict:
+    """Query a hosted web-search provider and return citation-shaped
+    results. Use when the user asks about current events, recent product
+    releases, specific people / titles / dates the KB can't ground, or
+    any question whose answer sits outside the uploaded video corpus.
+
+    The specific provider (Brave, Google CSE, SerpAPI, ...) is picked by
+    the deployment's `WEB_SEARCH_PROVIDER` env var. The tool is callable
+    even when no provider is configured; in that case it returns
+    `configured: false` with an explanation, so you can tell the user
+    that web search isn't available on this deployment.
+
+    Args:
+        query: free-text search string.
+        max_results: 1-10 (clamped). Default 5.
+
+    Returns:
+        {query, provider, configured, results: [{title, url, snippet,
+         published_at?, source}], error?}
+
+    Guidance:
+        - Always include the `url` of every result you cite in your reply
+          so the producer can click through to verify.
+        - If `configured` is false, surface that limitation to the user
+          instead of hallucinating facts.
+        - If `error` is set with `configured: true`, the provider is
+          wired but momentarily failed (rate limit, 5xx) — retry once
+          or fall back to an answer based on the agent's own knowledge
+          with a caveat.
+    """
+    return _web_search(query, max_results)
 
 
 # ═══ Phase 3 v0.4: Rekognition + Marengo hybrid image search ═════════════════
@@ -3776,6 +3813,10 @@ def build_agent(access_token: Optional[str] = None) -> tuple[Agent, str]:
             list_my_sessions,
             # Generation (PR #11): HTML app via Claude, stitched video, safe eval
             generate_html_app, generate_video, execute_code,
+            # Hosted web search + citations (wave-2 PR #7). Provider
+            # resolved from WEB_SEARCH_PROVIDER; null-by-default so the
+            # tool explains itself when unconfigured.
+            web_search,
             # Per-user artifact store (saved plans / html-1 apps / rendered videos / blobs)
             save_artifact, open_artifact, list_artifacts,
             # Jockey-parity wave-2 additions: user-facing render URL, bulk

@@ -90,6 +90,7 @@ def _build() -> dict[str, Any]:
         _a.manage_memory, _a.save_tref_to_memory,
         _a.list_my_sessions,
         _a.generate_html_app, _a.generate_video, _a.execute_code,
+        _a.web_search,
         _a.save_artifact, _a.open_artifact, _a.list_artifacts,
         _a.render, _a.manage_artifacts, _a.list_filterable_fields,
         _a.feedback,
