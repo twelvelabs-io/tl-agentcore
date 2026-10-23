@@ -1,0 +1,74 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Social sentiment / buzz index (fake demo API)",
+    "version": "1.0.0",
+    "description": "Returns forward-looking social-buzz signal per (title, territory) so the distribution-readiness agent can rank cleared assets by pre-release demand. Fake data; demo only."
+  },
+  "servers": [
+    { "url": "https://REPLACE_ME.lambda-url.us-east-1.on.aws", "description": "Lambda Function URL — replace with the terraform output `fakeapi_sentiment_url` at registration time." }
+  ],
+  "paths": {
+    "/sentiment": {
+      "get": {
+        "operationId": "get_sentiment",
+        "summary": "Social buzz index + sentiment for one (title, territory).",
+        "parameters": [
+          { "name": "title",     "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "territory", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Buzz stats for the requested (title, territory), with a cold-start fallback when unknown.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "title":      { "type": "string" },
+                    "territory":  { "type": "string" },
+                    "found":      { "type": "boolean" },
+                    "buzz_index": { "type": "number", "description": "0.0–10.0 normalized attention score." },
+                    "delta_30d":  { "type": "integer", "description": "Percent change over last 30 days." },
+                    "sentiment":  { "type": "string", "enum": ["positive", "mixed", "negative"] },
+                    "sources":    { "type": "array", "items": { "type": "string" } },
+                    "source":     { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "description": "Missing or wrong Basic auth header." }
+        }
+      }
+    },
+    "/trending": {
+      "get": {
+        "operationId": "get_trending",
+        "summary": "Top trending titles in a territory, ranked by (buzz_index, delta_30d).",
+        "parameters": [
+          { "name": "territory", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Trending titles for the territory.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "territory": { "type": "string" },
+                    "trending":  { "type": "array", "items": { "type": "object" } },
+                    "method":    { "type": "string" },
+                    "source":    { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "description": "Missing or wrong Basic auth header." }
+        }
+      }
+    }
+  }
+}
