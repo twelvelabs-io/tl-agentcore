@@ -16,7 +16,12 @@
 //   │             chips · rights windows · notes      │
 //   └─────────────────────────────────────────────────┘
 
-import type { DistributionAsset, DistributionCard as Card } from "../lib/distribution-card";
+import type {
+  AudienceEvidence,
+  DataSourceRow,
+  DistributionAsset,
+  DistributionCard as Card,
+} from "../lib/distribution-card";
 
 export function DistributionCard({ card }: { card: Card }) {
   const asOf = formatAsOf(card.as_of);
@@ -109,6 +114,16 @@ export function DistributionCard({ card }: { card: Card }) {
               </li>
             ))}
           </ul>
+          {card.audience_fit.evidence && card.audience_fit.evidence.length > 0 && (
+            <ul
+              className="mt-3 pt-3 border-t space-y-1.5"
+              style={{ borderColor: "var(--color-rule)" }}
+            >
+              {card.audience_fit.evidence.map((e, i) => (
+                <EvidenceRow key={`${e.source}-${e.metric}-${i}`} evidence={e} />
+              ))}
+            </ul>
+          )}
         </Section>
       )}
 
@@ -129,6 +144,20 @@ export function DistributionCard({ card }: { card: Card }) {
           </ul>
         )}
       </Section>
+
+      {/* DATA SOURCES (PR 9+) */}
+      {card.data_sources && card.data_sources.length > 0 && (
+        <Section
+          title="Data sources"
+          subtitle={`${card.data_sources.length} capabilit${card.data_sources.length === 1 ? "y" : "ies"}`}
+        >
+          <ul className="space-y-1.5">
+            {card.data_sources.map((row, i) => (
+              <DataSourceRowLine key={`${row.capability}-${row.tool}-${i}`} row={row} />
+            ))}
+          </ul>
+        </Section>
+      )}
     </div>
   );
 }
@@ -342,4 +371,90 @@ function windowDate(iso: string | null | undefined): string | null {
 
 function truncate(s: string, n: number): string {
   return s.length > n ? s.slice(0, n - 1) + "…" : s;
+}
+
+function EvidenceRow({ evidence }: { evidence: AudienceEvidence }) {
+  const valueText =
+    typeof evidence.value === "number"
+      ? Number.isInteger(evidence.value)
+        ? evidence.value.toString()
+        : evidence.value.toFixed(2)
+      : typeof evidence.value === "string"
+        ? evidence.value
+        : JSON.stringify(evidence.value);
+  return (
+    <li className="flex items-baseline gap-2 text-[11px]">
+      <span
+        className="font-mono shrink-0 px-1.5 py-px rounded"
+        style={{
+          color: "var(--color-ink-soft)",
+          background: "var(--color-surface)",
+          border: "1px solid var(--color-rule)",
+        }}
+      >
+        {evidence.source}
+      </span>
+      <span style={{ color: "var(--color-ink-soft)" }}>
+        {evidence.territory} · {evidence.metric}
+      </span>
+      <span
+        className="font-mono"
+        style={{ color: "var(--color-ink)" }}
+      >
+        {valueText}
+      </span>
+      {evidence.notes && (
+        <span
+          className="truncate italic"
+          style={{ color: "var(--color-ink-faint)" }}
+        >
+          {evidence.notes}
+        </span>
+      )}
+    </li>
+  );
+}
+
+function DataSourceRowLine({ row }: { row: DataSourceRow }) {
+  const toneColor =
+    row.status === "ok"
+      ? "var(--color-cue)"
+      : row.status === "error"
+        ? "var(--color-status-failed)"
+        : "var(--color-ink-faint)";
+  return (
+    <li className="flex items-baseline gap-2 text-xs">
+      <span
+        className="font-mono text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full shrink-0"
+        style={{
+          border: `1px solid ${toneColor}`,
+          color: toneColor,
+          minWidth: 54,
+          textAlign: "center",
+        }}
+      >
+        {row.status}
+      </span>
+      <span
+        className="font-mono text-[10px] shrink-0"
+        style={{ color: "var(--color-ink-faint)" }}
+      >
+        {row.capability}
+      </span>
+      <span
+        className="font-mono truncate"
+        style={{ color: "var(--color-ink-soft)" }}
+      >
+        {row.tool}
+      </span>
+      {row.detail && (
+        <span
+          className="truncate text-[11px] italic"
+          style={{ color: "var(--color-ink-faint)" }}
+        >
+          — {row.detail}
+        </span>
+      )}
+    </li>
+  );
 }

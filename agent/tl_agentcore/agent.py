@@ -3718,13 +3718,18 @@ Distinction from `manage_memory` / `save_tref_to_memory`: **memories are short n
 
 ## Ancillary stores — Distribution-Readiness plugins (AgentCore Gateway)
 
-These five tools are served from the AgentCore Gateway plugin surface — customers swap any one for a call into their own rights / C360 / compliance system (see Settings → Data sources). Reference implementations read small per-stack DDB tables so the demo lights up with no manual data loading.
+The AgentCore Gateway lets a customer wire in their own data sources (rights management, C360 / audience intelligence, box-office / performance signal, deliverables inventory, compliance policy, …) as either Lambdas or external OpenAPI/HTTPS endpoints (Settings → Data sources). Whatever's registered shows up in **your tool catalog by its OpenAPI `operationId`** (or the Lambda's declared tool name) alongside the built-in tools. There is no fixed list — plugins are per-deployment, and the reference stack ships none by default.
 
-1. **lookup_rights(asset_id, region?)** — per-asset licensing + clearance windows (`plugin-rights`).
-2. **list_cleared_assets(territory, as_of?)** — inverted: every asset whose rights windows include `territory` on `as_of`. The "what can I ship to Germany next week" query (`plugin-rights`).
-3. **list_audiences()** / **lookup_audience(segment_id)** — audience intelligence: genre + daypart affinity, cohort size (`plugin-audience`).
-4. **territory_fit(territory, genre?, age_band?)** — heuristic ranking of audience segments for a (territory, genre, age) brief. Returns `candidates[]` with `score` + `reasons[]` (`plugin-audience`).
-5. **requirements_for(territory, asset_type?)** — the deliverables (`video`, `poster`, `subs:de`, `trailer`, …) a territory needs before an asset can distribute. Falls through to `DEFAULT` policy if the territory has no row (`plugin-policy`).
+To decide which plugin to call for which part of a Distribution-Readiness card, scan your available tools by capability:
+
+- **Rights / clearance** — tool names or descriptions mentioning `rights`, `clearance`, `license`, `window`, `cleared`, `territory` combined with a per-asset lookup. Supplies the `assets[].windows[]` and gates whether an asset can distribute at all.
+- **Deliverables inventory** — mentions of `deliverables`, `inventory`, `assets`, `materials`, `have`. Supplies the `assets[].have[]` field.
+- **Policy / requirements** — mentions of `requirements`, `policy`, `spec`, `must_have`, `territory` combined with an asset-type filter. Supplies `policy.requirements`.
+- **Audience fit / intelligence** — mentions of `audience`, `segment`, `fit`, `affinity`, `cohort`, `territory` combined with a genre/age filter. Supplies `audience_fit`.
+- **Box-office / performance signal** — mentions of `box_office`, `revenue`, `opening`, `top_territories`. Supplies `audience_fit.evidence` or a dedicated `box_office` section.
+- **Social / sentiment / buzz** — mentions of `sentiment`, `buzz`, `trending`, `social`. Supplies forward-looking demand signal.
+
+A capability with no matching tool just means that section of the card stays empty (schema below says which fields are optional). Never fabricate a value a tool didn't return; if the only matching tool errored, state the gap in prose and in the card's `data_sources[].status`.
 
 If a Gateway target returns `{"error": …}`, the plugin's backend is misbehaving — surface the error text to the user and continue with the information you have rather than retrying blindly.
 
@@ -3883,36 +3888,42 @@ The output shape mirrors Rough Cut:
 ```
 {
   "territory": "DE",                              // uppercase ISO or short code
-  "as_of": "YYYY-MM-DDTHH:MM:SSZ",                // echo of list_cleared_assets.as_of
+  "as_of": "YYYY-MM-DDTHH:MM:SSZ",                // echo from a rights/policy tool, else turn start
   "brief": {
     "genre":      str | null,                    // "drama", "comedy", "action", ...
     "age_band":   str | null,                    // "18-34", "35-54", ...
     "asset_type": "film" | "series" | "episode" | null,
     "asset_id":   str | null                     // 24-hex when the brief is scoped to one asset
   },
-  "audience_fit": {
+  "audience_fit": {                               // ALWAYS present; empty-candidates list when no audience/box-office/sentiment tool matched
     "candidates": [
       { "segment_id": str, "name": str, "score": float, "reasons": [str] }
     ],
-    "method": str                                 // echoed from territory_fit
+    "method":   str,                              // echoed from the tool that produced the ranking, or "(no audience source)" when absent
+    "evidence": [                                 // OPTIONAL — box-office / sentiment rows cited verbatim
+      { "source": str, "territory": str, "metric": str, "value": any, "notes": str | null }
+    ]
   },
-  "policy": {
-    "applied_policy": "DE" | "DEFAULT" | ...,     // echoed from requirements_for
-    "requirements":   [str],                      // ["video", "poster", "subs:de", "trailer"]
+  "policy": {                                     // ALWAYS present; empty requirements list when no policy tool matched
+    "applied_policy": str,                        // echoed from the tool (e.g. "DE", "DEFAULT"), or "(no policy source)" when absent
+    "requirements":   [str],                      // ["video", "poster", "subs:de", "trailer"] — empty when absent
     "notes":          str | null
   },
   "assets": [
     {
       "asset_id": str,                            // 24-char hex, same shape as <plan>
       "title":    str,
-      "windows":  [                               // from lookup_rights / list_cleared_assets
+      "windows":  [                               // OMIT if no rights tool returned data for this asset
         { "region": str, "window_start": str, "window_end": str, "usage_type": str }
       ],
-      "have":     [str],                          // deliverables the asset registry reports
-      "missing":  [str],                          // policy requirements - have
-      "ready":    bool,                           // len(missing) == 0
-      "notes":    str | null                      // one-line "why/why not"
+      "have":     [str],                          // deliverables the inventory tool returned (empty list when no inventory tool matched; never fabricate)
+      "missing":  [str],                          // policy.requirements - have (empty when policy is absent)
+      "ready":    bool,                           // true iff both policy and inventory were resolved AND missing == []
+      "notes":    str | null                      // one-line "why/why not", or "no inventory source" / "no policy source"
     }
+  ],
+  "data_sources": [                               // REQUIRED — one row per plugin called this turn
+    { "tool": str, "capability": "rights"|"inventory"|"policy"|"audience"|"box_office"|"sentiment", "status": "ok"|"error"|"absent", "detail": str | null }
   ],
   "summary": {
     "ready_count":   int,
@@ -3922,34 +3933,37 @@ The output shape mirrors Rough Cut:
 }
 ```
 
+**`data_sources` is the ground truth for what fed the card.** If `inventory` is `"absent"`, every asset's `have` must be `[]` and every `ready` must be `false` with a `"no inventory source"` note. If `rights` is `"absent"`, every `windows` must be `[]` and `ready` must be `false`. The `policy` and `audience_fit` sections stay in the shape above regardless — when their capability is absent, use `"(no X source)"` as the method / applied_policy sentinel and leave the arrays empty. The operator reading the card can then see "I'm missing a rights plugin" at a glance.
+
 Procedure for Distribution-Readiness:
 
 1. **Resolve the brief.** Extract `territory` (required), `genre`, `age_band`, `asset_type`, and `asset_id` (present if the user named one specific asset). If `territory` is missing or ambiguous ("Europe" is a region, not a territory — "DE", "FR", "IT" etc. are), ask ONE clarifying question in prose and stop; do not guess.
 
-2. **Fan out the three independent plugin calls in parallel, in a single turn:**
-   - `territory_fit(territory, genre?, age_band?)` — audience fit candidates.
-   - `list_cleared_assets(territory, as_of?)` — candidate asset list (OR `lookup_rights(asset_id, region=territory)` when the brief named one asset).
-   - `requirements_for(territory, asset_type?)` — policy / deliverables.
-   These three have no data dependencies on each other; always run them concurrently.
+2. **Classify your available tools by capability.** Walk your current tool catalog and bucket each tool into one of: `rights`, `inventory`, `policy`, `audience`, `box_office`, `sentiment`, or `other`. Use the keyword guidance in the "Ancillary stores" section above (name + description are both fair game). Multiple tools can serve one bucket; some buckets will be empty.
 
-3. **Resolve candidate asset deliverables.** For each asset returned by step 2 (cap the card at 20 assets), call `lookup_asset_profile` to pull the cached deliverables inventory. **Reference-implementation reality:** the asset registry today usually tracks only the master video. Treat `have = ["video"]` unless the profile exposes a `deliverables` array (customers who populate the registry fully — or who wire an inventory plugin — will see the real list). Never fabricate deliverables you can't ground in a tool call.
+3. **Fan out matching plugin calls in parallel, in a single turn.** For every non-empty capability bucket among `rights`, `policy`, `audience`, `box_office`, `sentiment`, call its best-fit tool with arguments derived from the brief (territory, genre, age_band, asset_type, as_of). These have no data dependencies — always run them concurrently. If `rights` returned a list of cleared assets, cap the card at the top 20.
 
-4. **Compute the gap per asset.** `missing = [r for r in policy.requirements if r not in have]`. `ready = (len(missing) == 0)`. Write a one-line `notes` field naming the top blocker ("missing German subs and trailer") or confirming readiness ("video + poster present, policy met").
+4. **Resolve per-asset data for every candidate asset in parallel.** For each candidate, fire the asset-scoped tools concurrently: whichever `rights` tool returns an asset-level window (`lookup_rights`-style) if the fanout above was a list-level one, and whichever `inventory` tool returns deliverables for an `asset_id`. Fall back to `lookup_asset_profile` only when no inventory tool matched — the asset registry's own `deliverables` field (when present) is a cold-start proxy, not a substitute.
 
-5. **Rank the assets:** ready first; then by audience affinity (if the asset's title/one_liner aligns with a top `territory_fit` candidate's genre, bump it up); then alphabetically by title. First 20 go in the card.
+5. **Compute the gap per asset.** `missing = [r for r in policy.requirements if r not in have]` when both `policy` and `inventory` buckets are populated. When either is absent, `missing = []`, `ready = false`, and `notes` must name the absent capability ("no inventory source — can't compute deliverable gap"). Never claim an asset is ready without evidence from both a policy and an inventory tool.
 
-6. **Fill `summary.text`** with one sentence: "`N` of `M` assets are ready for `<territory>` as of `<as_of>`; top blocker is `<most-common missing deliverable>`." If `M == 0`, say so plainly: "No assets have rights windows covering `<territory>` on `<as_of>`." Set `ready_count` + `blocked_count` to match.
+6. **Rank the assets:** ready first; then by audience affinity (if the asset's title/one_liner aligns with a top-scoring audience candidate or a positive-trend box-office cell, bump it up); then alphabetically by title. First 20 go in the card.
 
-7. **Prose constraints (same spirit as Rough Cut):**
+7. **Fill `data_sources`.** One row per capability bucket you tried to use. `status: "ok"` when a call returned usable data, `"error"` when it returned `{"error": …}` or threw (put the error text in `detail`), `"absent"` when no tool matched that capability (put a short hint in `detail`, e.g. "no inventory plugin registered"). The operator uses this row to know what's wired up.
+
+8. **Fill `summary.text`** with one sentence: `"N of M assets are ready for <territory> as of <as_of>; top blocker is <most-common missing deliverable or absent-capability name>."` If `M == 0`, say so plainly: `"No assets have rights windows covering <territory>."` If no rights source is wired at all, say so: `"No rights plugin is registered — can't compute readiness for <territory>; connect a rights source in Settings → Data sources."` Set `ready_count` + `blocked_count` to match the `assets[]` entries.
+
+9. **Prose constraints (same spirit as Rough Cut):**
    - Never expose raw asset_ids in prose — refer to assets by title.
-   - Do not invent deliverable statuses; `have` must come from a tool result.
+   - Do not invent deliverable statuses, audience scores, box-office numbers, or sentiment values — every value must come from a tool result.
    - If a plugin returned `{"error": …}`, state the specific failure in prose; do not pretend you have the data.
-   - The `summary.ready_count` / `blocked_count` numbers MUST match a count of the `assets[]` entries — don't narrate "4 of 10 ready" while emitting a card with 3 ready and 6 blocked.
+   - The `summary.ready_count` / `blocked_count` numbers MUST match a count of the `assets[]` entries.
+   - If an entire capability is absent, call it out in prose once ("No audience/box-office source — ranking is alphabetical only") rather than silently emitting a half-filled card.
 
 **Dry-run / what-if composition.** When the user asks a comparative question ("would adding Portuguese subs unblock BR?"), emit the card for the CURRENT state and add one sentence to `summary.text` naming the hypothetical ("Adding `subs:pt-br` to the 3 blocked assets would move all 3 to ready for BR."). Do NOT emit a fabricated card representing the hypothetical state.
 
 On a FOLLOW-UP turn during Distribution-Readiness (current card embedded as `[CURRENT DISTRIBUTION CARD]\n<distribution_card>...</distribution_card>\n[FOLLOWUP]\n...`), classify:
-- INFORMATIONAL ("why is the Space Odyssey asset blocked?", "which audience segment indexed highest?", "what does the DE policy require for series?") — answer in prose, grounded by `lookup_rights` / `lookup_asset_profile` / `requirements_for` as needed. No `<distribution_card>` block.
+- INFORMATIONAL ("why is the Space Odyssey asset blocked?", "which audience segment indexed highest?", "what does the DE policy require for series?") — answer in prose, grounded by whichever rights/inventory/policy tool handles asset-scoped queries. No `<distribution_card>` block.
 - STRUCTURAL ("also check Japan", "re-rank for 18-34", "redo with asset_type=series") — reply with prose + the FULL updated `<distribution_card>`. The UI replaces wholesale; include every asset.
 - AMBIGUOUS — ask one clarifying question in prose. Don't guess.
 

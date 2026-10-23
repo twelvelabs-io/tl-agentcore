@@ -3,12 +3,13 @@
 //
 // Drives the deployed agent → Gateway → plugin tools → card emission →
 // UI parse → render path end-to-end. Costs one agent turn (~$0.03-0.05)
-// per run. The seeded `plugin_policies` DDB table has DE / JP / BR /
-// DEFAULT rows (see infra/plugin-policy-target.tf), so the policy
-// section always renders; the assets/audience sections may be empty if
-// the stack doesn't have rights/audience rows populated — the test
-// tolerates that and only asserts the card shell + policy section
-// render, which is enough to prove the wire holds.
+// per run. Post-PR 9 the recipe is plugin-shape-agnostic: whichever
+// capability plugins happen to be registered on this stack feed the
+// corresponding card sections, absent capabilities render as empty with
+// a `(no X source)` sentinel. The test only asserts the structural
+// invariants that must hold regardless: the card shell, the Policy
+// section header, and the Data sources section header (always rendered
+// post-PR 9 since the agent always emits a `data_sources` array).
 import { test, expect } from "./fixtures";
 import { goToTab, selectKs } from "./comprehensive/helpers/nav";
 
@@ -23,15 +24,18 @@ test.describe("Distribution-Readiness card", () => {
       await ta.press("Control+Enter");
     });
 
-    // Card shell lands within 2 min (agent fans out three plugin calls
-    // in parallel, then lookup_asset_profile per candidate).
+    // Card shell lands within 3 min (agent fans out whichever capability
+    // tools match, then per-asset lookups).
     const card = signedInPage.locator('[data-testid="distribution-card"]').first();
     await expect(card).toBeVisible({ timeout: 180_000 });
 
-    // Section headers landed. The policy section always has content —
-    // DE is seeded in Terraform — so look for a few known deliverables.
+    // Section headers that are always rendered regardless of which
+    // plugins are deployed: Policy (empty when no policy source matched;
+    // the renderer prints "no deliverables required" rather than
+    // hiding), and Data sources (post-PR 9 the agent always emits the
+    // array, so the section always shows).
     await expect(card.locator("text=/§ Policy/i")).toBeVisible();
-    await expect(card.locator("text=/video|poster/i").first()).toBeVisible();
+    await expect(card.locator("text=/§ Data sources/i")).toBeVisible();
 
     // Regression guard: the raw JSON must NOT leak into the markdown
     // prose underneath (stripStructuredBlocks in vref.tsx handles this).
