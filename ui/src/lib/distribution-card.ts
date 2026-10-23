@@ -37,6 +37,32 @@ export type DistributionAsset = {
   notes: string | null;
 };
 
+/** Capability bucket a data_sources row maps to. Mirrors the keyword
+ *  taxonomy in SYSTEM_PROMPT's "Ancillary stores" section. */
+export type DataSourceCapability =
+  | "rights"
+  | "inventory"
+  | "policy"
+  | "audience"
+  | "box_office"
+  | "sentiment"
+  | "other";
+
+export type DataSourceRow = {
+  tool: string;
+  capability: DataSourceCapability;
+  status: "ok" | "error" | "absent";
+  detail: string | null;
+};
+
+export type AudienceEvidence = {
+  source: string;
+  territory: string;
+  metric: string;
+  value: unknown;
+  notes: string | null;
+};
+
 export type DistributionCard = {
   territory: string;
   as_of: string;
@@ -44,6 +70,7 @@ export type DistributionCard = {
   audience_fit: {
     candidates: AudienceCandidate[];
     method: string;
+    evidence?: AudienceEvidence[];
   };
   policy: {
     applied_policy: string;
@@ -51,6 +78,9 @@ export type DistributionCard = {
     notes: string | null;
   };
   assets: DistributionAsset[];
+  /** Added in PR 9: one row per capability bucket the agent tried to
+   *  use this turn. Optional for cards emitted by pre-PR-9 agents. */
+  data_sources?: DataSourceRow[];
   summary: {
     ready_count: number;
     blocked_count: number;
