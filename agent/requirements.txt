@@ -25,4 +25,4 @@ python-multipart>=0.0.31
 # in-process tools only and no plugin registered via Settings → Data
 # sources ever reaches the agent. 1.27.0 matches the sibling Jocky
 # repo where the same gateway handshake succeeds.
-mcp==1.27.0
+mcp==1.30.0
