@@ -69,6 +69,37 @@ data "aws_iam_policy_document" "plugins_perms" {
       "${aws_bedrockagentcore_gateway.plugins.gateway_arn}/target/*",
     ]
   }
+  # Credential-provider CRUD. Needed when a customer registers an
+  # OpenAPI target with api_key / bearer / basic auth — the lambda
+  # provisions a per-plugin api_key_credential_provider holding the
+  # stored secret, and tears it down on DELETE.
+  statement {
+    sid = "CredentialProviderCRUD"
+    actions = [
+      "bedrock-agentcore:CreateApiKeyCredentialProvider",
+      "bedrock-agentcore:DeleteApiKeyCredentialProvider",
+      "bedrock-agentcore:GetApiKeyCredentialProvider",
+      "bedrock-agentcore:ListApiKeyCredentialProviders",
+    ]
+    resources = ["*"]
+  }
+  # Create/DeleteApiKeyCredentialProvider internally creates a
+  # Secrets Manager secret under `bedrock-agentcore-identity!*` to
+  # back the stored key. Give the lambda just enough to let the
+  # control-plane call succeed — the lambda never reads or writes the
+  # secret directly, Gateway's control plane does.
+  statement {
+    sid = "CredentialProviderSecret"
+    actions = [
+      "secretsmanager:CreateSecret",
+      "secretsmanager:TagResource",
+      "secretsmanager:PutSecretValue",
+      "secretsmanager:UpdateSecret",
+      "secretsmanager:DeleteSecret",
+      "secretsmanager:DescribeSecret",
+    ]
+    resources = ["arn:aws:secretsmanager:*:*:secret:bedrock-agentcore-identity!*"]
+  }
   # The lambda hands the gateway a role_arn (the gateway's own role,
   # via GATEWAY_IAM_ROLE credential provider), so no iam:PassRole here.
 }

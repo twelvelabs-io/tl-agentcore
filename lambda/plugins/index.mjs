@@ -7,26 +7,70 @@
 //
 // Browser → CloudFront `/plugins*` → HTTP API Gateway → this lambda → DDB + Gateway.
 //
+// Two target types are supported:
+//
+//   LAMBDA   — target_type: "lambda". Original PR 1 shape. Caller
+//              supplies lambda_arn + inlinePayload tool_schema. Gateway
+//              invokes the Lambda directly using the gateway's IAM
+//              role (no secret storage needed).
+//
+//   OPENAPI  — target_type: "openapi". Caller supplies endpoint_url +
+//              openapi_schema (an OpenAPI 3.x JSON blob) + an auth
+//              bundle. The lambda provisions an
+//              aws_bedrockagentcore_api_key_credential_provider
+//              (unless auth_type is "none"), configures the gateway
+//              target to inject the credential on every outbound call,
+//              and records the credential provider's ARN on the DDB
+//              row so DELETE can tear it down.
+//
+// Four auth modes are supported on OpenAPI targets:
+//
+//   none        → no credential provider; endpoint must be publicly
+//                 reachable (Function URL AuthType=NONE, etc.).
+//   api_key     → header `{auth_header_name}: {value}`. Default
+//                 auth_header_name is "X-API-Key".
+//   bearer      → header `Authorization: Bearer {value}`. The gateway
+//                 injects the "Bearer " prefix; the stored secret is
+//                 just the token.
+//   basic       → header `Authorization: Basic {base64(user:password)}`.
+//                 The caller supplies auth_credential as a raw
+//                 "user:password" string; the lambda base64-encodes it
+//                 before storing. Gateway injects the "Basic " prefix.
+//
+// OAuth 2.0 lives behind a separate credential-provider resource
+// (aws_bedrockagentcore_oauth2_credential_provider) and is not wired
+// in this PR — follow-up.
+//
 // GET /plugins
-//   Any authenticated user. Returns {plugins: [{plugin_id, name,
-//   description, lambda_arn, enabled, created_by, created_at, target_id?}]}.
+//   Any authenticated user. Returns {plugins: [...]}. Secrets are
+//   never returned; the credential_provider_arn is present (admins
+//   can audit which Secrets Manager entry backs each row) but the
+//   stored value is write-only.
 //
 // POST /plugins
-//   Admin only. Body: {name, description, lambda_arn, tool_schema}.
-//   `tool_schema` is the gateway-target inlinePayload shape, passed
-//   through to CreateGatewayTarget verbatim (see
-//   infra/plugin-echo-target.tf for an example). Response: 201 with
-//   the created row, including the gateway's target_id.
+//   Admin only. Body shape:
+//     {
+//       name, description,
+//       target_type: "lambda" | "openapi",
+//       // when lambda:
+//       lambda_arn, tool_schema,
+//       // when openapi:
+//       endpoint_url, openapi_schema,
+//       auth_type: "none" | "api_key" | "bearer" | "basic",
+//       auth_credential?,            // required unless none
+//       auth_header_name?,           // only used for api_key; defaults
+//     }
 //
 // DELETE /plugins/{id}
-//   Admin only. Removes the gateway target (if present) and then the
-//   DDB row. Idempotent: a missing target is not an error.
+//   Admin only. Removes gateway target (if present), credential
+//   provider (if present), and then the DDB row. Idempotent.
 //
-// Admin is group membership in `ADMIN_GROUP_NAME` (default "admins")
-// on the Cognito pool.
+// Admin is group membership in `ADMIN_GROUP_NAME` (default "admins").
 import {
   BedrockAgentCoreControlClient,
+  CreateApiKeyCredentialProviderCommand,
   CreateGatewayTargetCommand,
+  DeleteApiKeyCredentialProviderCommand,
   DeleteGatewayTargetCommand,
 } from "@aws-sdk/client-bedrock-agentcore-control";
 import {
@@ -121,12 +165,28 @@ async function createPlugin(event, identity) {
 
   const name        = String(body.name || "").trim();
   const description = String(body.description || "").trim();
-  const lambdaArn   = String(body.lambda_arn || "").trim();
-  const toolSchema  = body.tool_schema;
+  const targetType  = String(body.target_type || "lambda").trim();
 
   if (!name || !/^[0-9a-zA-Z][-0-9a-zA-Z]{0,99}$/.test(name)) {
     return reply(400, { error: "name must match ^[0-9a-zA-Z][-0-9a-zA-Z]{0,99}$ (gateway target naming rule)" });
   }
+  if (!["lambda", "openapi"].includes(targetType)) {
+    return reply(400, { error: "target_type must be 'lambda' or 'openapi'" });
+  }
+
+  const pluginId  = randomUUID();
+  const createdAt = new Date().toISOString();
+
+  if (targetType === "lambda") {
+    return await createLambdaPlugin({ pluginId, name, description, body, identity, createdAt });
+  }
+  return await createOpenApiPlugin({ pluginId, name, description, body, identity, createdAt });
+}
+
+async function createLambdaPlugin({ pluginId, name, description, body, identity, createdAt }) {
+  const lambdaArn  = String(body.lambda_arn || "").trim();
+  const toolSchema = body.tool_schema;
+
   if (!lambdaArn.startsWith("arn:aws:lambda:")) {
     return reply(400, { error: "lambda_arn must be a Lambda ARN" });
   }
@@ -134,11 +194,8 @@ async function createPlugin(event, identity) {
     return reply(400, { error: "tool_schema must be an object (gateway inlinePayload shape)" });
   }
 
-  const pluginId = randomUUID();
-  const createdAt = new Date().toISOString();
-
-  // Register the gateway target FIRST — if the SDK rejects the
-  // schema, we don't want a dangling DDB row.
+  // Register the gateway target FIRST — if the SDK rejects the schema,
+  // we don't want a dangling DDB row.
   const tgt = await gw.send(new CreateGatewayTargetCommand({
     gatewayIdentifier: GATEWAY_ID,
     name,
@@ -158,12 +215,142 @@ async function createPlugin(event, identity) {
     plugin_id:   { S: pluginId },
     name:        { S: name },
     description: { S: description || "" },
+    target_type: { S: "lambda" },
     lambda_arn:  { S: lambdaArn },
     target_id:   { S: tgt.targetId },
     enabled:     { BOOL: true },
     created_by:  { S: identity.sub },
     created_at:  { S: createdAt },
   };
+  await ddb.send(new PutItemCommand({ TableName: PLUGINS_TABLE, Item: item }));
+
+  return reply(201, { plugin: rowToPlugin(item) });
+}
+
+// Auth-mode → (header name, prefix) mapping. The stored secret is just
+// the credential value; Gateway concatenates `{prefix}{value}` into the
+// outbound header on every call. For Basic, the caller supplies raw
+// "user:password" and we base64-encode before storing so the stored
+// value is already in header-ready form.
+function authConfig(authType, body) {
+  const t = String(authType || "none").toLowerCase();
+  if (t === "none") {
+    return { ok: true, mode: "none" };
+  }
+  if (t === "api_key") {
+    const header = String(body.auth_header_name || "X-API-Key").trim();
+    if (!/^[A-Za-z0-9-]{1,80}$/.test(header)) {
+      return { ok: false, status: 400, message: "auth_header_name must be a plain HTTP header token" };
+    }
+    const cred = String(body.auth_credential || "");
+    if (!cred) return { ok: false, status: 400, message: "auth_credential is required for api_key" };
+    return { ok: true, mode: "api_key", header, prefix: "", stored: cred };
+  }
+  if (t === "bearer") {
+    const cred = String(body.auth_credential || "");
+    if (!cred) return { ok: false, status: 400, message: "auth_credential is required for bearer" };
+    return { ok: true, mode: "bearer", header: "Authorization", prefix: "Bearer ", stored: cred };
+  }
+  if (t === "basic") {
+    const cred = String(body.auth_credential || "");
+    if (!cred.includes(":")) {
+      return { ok: false, status: 400, message: "auth_credential for basic must be 'user:password'" };
+    }
+    const encoded = Buffer.from(cred, "utf8").toString("base64");
+    return { ok: true, mode: "basic", header: "Authorization", prefix: "Basic ", stored: encoded };
+  }
+  return { ok: false, status: 400, message: `auth_type must be none|api_key|bearer|basic (got ${JSON.stringify(t)})` };
+}
+
+async function createOpenApiPlugin({ pluginId, name, description, body, identity, createdAt }) {
+  const endpointUrl    = String(body.endpoint_url || "").trim();
+  const openapiSchema  = body.openapi_schema;
+
+  if (!/^https:\/\/[^\s]+$/i.test(endpointUrl)) {
+    return reply(400, { error: "endpoint_url must be https://..." });
+  }
+  if (!openapiSchema || (typeof openapiSchema !== "string" && typeof openapiSchema !== "object")) {
+    return reply(400, { error: "openapi_schema must be a JSON string or object (OpenAPI 3.x)" });
+  }
+  const payload = typeof openapiSchema === "string" ? openapiSchema : JSON.stringify(openapiSchema);
+  if (payload.length > 100_000) {
+    return reply(400, { error: "openapi_schema payload exceeds 100 KB (gateway inline limit)" });
+  }
+
+  const authCfg = authConfig(body.auth_type, body);
+  if (!authCfg.ok) return reply(authCfg.status, { error: authCfg.message });
+
+  // Provision the credential provider FIRST (if any), so a Gateway
+  // CreateTarget failure doesn't leave a dangling provider.
+  let credentialProviderArn = null;
+  let credentialProviderName = null;
+  if (authCfg.mode !== "none") {
+    credentialProviderName = `${name}-${pluginId.slice(0, 8)}`;
+    const cp = await gw.send(new CreateApiKeyCredentialProviderCommand({
+      name: credentialProviderName,
+      apiKey: authCfg.stored,
+    }));
+    credentialProviderArn = cp.credentialProviderArn;
+  }
+
+  const credentialProviderConfigurations = authCfg.mode === "none"
+    ? [{ credentialProviderType: "GATEWAY_IAM_ROLE" }]
+    : [{
+        credentialProviderType: "API_KEY",
+        credentialProvider: {
+          apiKeyCredentialProvider: {
+            providerArn:                credentialProviderArn,
+            credentialLocation:         "HEADER",
+            credentialParameterName:    authCfg.header,
+            ...(authCfg.prefix ? { credentialPrefix: authCfg.prefix } : {}),
+          },
+        },
+      }];
+
+  let targetId;
+  try {
+    const tgt = await gw.send(new CreateGatewayTargetCommand({
+      gatewayIdentifier: GATEWAY_ID,
+      name,
+      description: description || undefined,
+      credentialProviderConfigurations,
+      targetConfiguration: {
+        mcp: {
+          openApiSchema: {
+            inlinePayload: payload,
+          },
+        },
+      },
+    }));
+    targetId = tgt.targetId;
+  } catch (e) {
+    // Roll back the credential provider so a schema-reject doesn't
+    // leave a floating secret in Secrets Manager.
+    if (credentialProviderArn) {
+      try {
+        await gw.send(new DeleteApiKeyCredentialProviderCommand({ name: credentialProviderName }));
+      } catch (del) {
+        console.warn(`rollback DeleteApiKeyCredentialProvider(${credentialProviderName}) failed:`, del?.message || del);
+      }
+    }
+    throw e;
+  }
+
+  const item = {
+    plugin_id:               { S: pluginId },
+    name:                    { S: name },
+    description:             { S: description || "" },
+    target_type:             { S: "openapi" },
+    endpoint_url:            { S: endpointUrl },
+    auth_type:               { S: authCfg.mode },
+    target_id:               { S: targetId },
+    enabled:                 { BOOL: true },
+    created_by:              { S: identity.sub },
+    created_at:              { S: createdAt },
+  };
+  if (credentialProviderArn)  item.credential_provider_arn  = { S: credentialProviderArn };
+  if (credentialProviderName) item.credential_provider_name = { S: credentialProviderName };
+  if (authCfg.header)         item.auth_header_name = { S: authCfg.header };
   await ddb.send(new PutItemCommand({ TableName: PLUGINS_TABLE, Item: item }));
 
   return reply(201, { plugin: rowToPlugin(item) });
@@ -186,11 +373,20 @@ async function deletePlugin(pluginId) {
         targetId:          row.target_id,
       }));
     } catch (e) {
-      // Already gone? Fine. Anything else is logged but doesn't
-      // block cleanup of the DDB row — orphan targets are a bigger
-      // problem than orphan rows and we want the UI's delete to feel
-      // deterministic.
+      // Already gone? Fine. Anything else is logged but doesn't block
+      // cleanup of downstream resources — orphan targets are a bigger
+      // problem than orphan rows and we want delete to feel deterministic.
       console.warn(`DeleteGatewayTarget(${row.target_id}) failed:`, e?.message || e);
+    }
+  }
+
+  if (row.credential_provider_name) {
+    try {
+      await gw.send(new DeleteApiKeyCredentialProviderCommand({
+        name: row.credential_provider_name,
+      }));
+    } catch (e) {
+      console.warn(`DeleteApiKeyCredentialProvider(${row.credential_provider_name}) failed:`, e?.message || e);
     }
   }
 

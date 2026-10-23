@@ -199,31 +199,78 @@ export async function fetchUsage(opts: {
 
 // ---- Plugins (Distribution-Readiness data sources) ----
 
-export type Plugin = {
+export type PluginAuthType = "none" | "api_key" | "bearer" | "basic";
+
+/** Common fields on every plugin row. */
+type PluginBase = {
   plugin_id:   string;
   name:        string;
   description: string;
-  lambda_arn:  string;
   target_id:   string;
   enabled:     boolean;
   created_by:  string;
   created_at:  string;
 };
 
+/** Lambda-backed target — gateway invokes the Lambda directly. */
+export type LambdaPlugin = PluginBase & {
+  target_type: "lambda";
+  lambda_arn:  string;
+};
+
+/** OpenAPI-backed target — gateway proxies HTTPS calls to `endpoint_url`,
+ *  injecting the auth header configured at registration time. */
+export type OpenApiPlugin = PluginBase & {
+  target_type:              "openapi";
+  endpoint_url:             string;
+  auth_type:                PluginAuthType;
+  auth_header_name?:        string;
+  credential_provider_arn?: string;
+  credential_provider_name?: string;
+};
+
+export type Plugin = LambdaPlugin | OpenApiPlugin;
+
 export async function fetchPlugins(): Promise<Plugin[]> {
   const headers = await authHeaders();
   const r = await fetch(`/plugins`, { headers });
   if (!r.ok) throw new Error(`plugins ${r.status}: ${await r.text().catch(() => "")}`);
   const body = await r.json();
-  return body.plugins || [];
+  const plugins: Plugin[] = (body.plugins || []).map((p: Record<string, unknown>) => ({
+    ...p,
+    // Backfill target_type on legacy rows written before the OpenAPI
+    // extension landed — those predate the field but are always Lambda.
+    target_type: (p.target_type as string) || "lambda",
+  }));
+  return plugins;
 }
 
-export async function createPlugin(input: {
+/** Register a Lambda-backed plugin. Same shape as PR 1. */
+export type CreateLambdaPluginInput = {
+  target_type: "lambda";
   name:        string;
   description: string;
   lambda_arn:  string;
   tool_schema: unknown;
-}): Promise<Plugin> {
+};
+
+/** Register an OpenAPI-backed plugin with optional auth. For `basic`,
+ *  pass `auth_credential` as raw "user:password" — the lambda
+ *  base64-encodes before handing to Gateway. */
+export type CreateOpenApiPluginInput = {
+  target_type:       "openapi";
+  name:              string;
+  description:       string;
+  endpoint_url:      string;
+  openapi_schema:    string | Record<string, unknown>;
+  auth_type:         PluginAuthType;
+  auth_credential?:  string;
+  auth_header_name?: string;
+};
+
+export type CreatePluginInput = CreateLambdaPluginInput | CreateOpenApiPluginInput;
+
+export async function createPlugin(input: CreatePluginInput): Promise<Plugin> {
   const headers = { ...(await authHeaders()), "content-type": "application/json" };
   const r = await fetch(`/plugins`, {
     method:  "POST",
