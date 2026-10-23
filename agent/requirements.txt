@@ -17,4 +17,12 @@ python-multipart>=0.0.31
 # FastMCP under mcp.server.fastmcp; it is imported lazily so the
 # AgentCore Runtime path does not pay the import cost unless the
 # `python -m tl_agentcore.mcp_server` entrypoint is actually invoked.
-mcp>=1.0
+#
+# PR #10: pinned to 1.27.0 — 1.29.1's `JSONRPCMessage` RootModel
+# fails validation (11 variant errors; `JSONRPCRequest.method` missing)
+# on the first frame AgentCore Gateway sends during the handshake,
+# which kills `fetch_mcp_tools` → the agent silently falls back to
+# in-process tools only and no plugin registered via Settings → Data
+# sources ever reaches the agent. 1.27.0 matches the sibling Jocky
+# repo where the same gateway handshake succeeds.
+mcp==1.27.0
