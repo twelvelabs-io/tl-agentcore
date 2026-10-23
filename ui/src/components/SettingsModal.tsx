@@ -983,13 +983,23 @@ function PluginsTab() {
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  // "Add new" form state
+  // "Add new" form state — common
   const [showForm, setShowForm] = useState(false);
-  const [fName, setFName] = useState("");
-  const [fDesc, setFDesc] = useState("");
-  const [fArn, setFArn] = useState("");
-  const [fSchema, setFSchema] = useState("");
-  const [fErr, setFErr] = useState<string | null>(null);
+  const [fName, setFName]       = useState("");
+  const [fDesc, setFDesc]       = useState("");
+  const [fTargetType, setFTargetType] = useState<"lambda" | "openapi">("openapi");
+  const [fErr, setFErr]         = useState<string | null>(null);
+
+  // Lambda-target state
+  const [fArn, setFArn]         = useState("");
+  const [fSchema, setFSchema]   = useState("");
+
+  // OpenAPI-target state
+  const [fUrl, setFUrl]           = useState("");
+  const [fOpenapi, setFOpenapi]   = useState("");
+  const [fAuthType, setFAuthType] = useState<"none" | "api_key" | "bearer" | "basic">("none");
+  const [fAuthCred, setFAuthCred] = useState("");
+  const [fAuthHdr, setFAuthHdr]   = useState("X-API-Key");
 
   async function reload() {
     try {
@@ -1003,19 +1013,61 @@ function PluginsTab() {
   }
   useEffect(() => { reload(); }, []);
 
+  function resetForm() {
+    setFName(""); setFDesc("");
+    setFArn(""); setFSchema("");
+    setFUrl(""); setFOpenapi("");
+    setFAuthType("none"); setFAuthCred(""); setFAuthHdr("X-API-Key");
+    setFErr(null);
+  }
+
   async function onAdd() {
     setFErr(null);
-    let schema: unknown;
-    try {
-      schema = JSON.parse(fSchema);
-    } catch {
-      setFErr("tool_schema must be valid JSON");
-      return;
-    }
     setBusy(true);
     try {
-      await createPlugin({ name: fName.trim(), description: fDesc.trim(), lambda_arn: fArn.trim(), tool_schema: schema });
-      setFName(""); setFDesc(""); setFArn(""); setFSchema("");
+      if (fTargetType === "lambda") {
+        let schema: unknown;
+        try {
+          schema = JSON.parse(fSchema);
+        } catch {
+          setFErr("tool_schema must be valid JSON");
+          setBusy(false);
+          return;
+        }
+        await createPlugin({
+          target_type: "lambda",
+          name:        fName.trim(),
+          description: fDesc.trim(),
+          lambda_arn:  fArn.trim(),
+          tool_schema: schema,
+        });
+      } else {
+        // OpenAPI mode — parse schema (JSON), validate shape loosely.
+        let schema: Record<string, unknown>;
+        try {
+          schema = JSON.parse(fOpenapi);
+        } catch {
+          setFErr("openapi_schema must be valid JSON");
+          setBusy(false);
+          return;
+        }
+        if (fAuthType !== "none" && !fAuthCred.trim()) {
+          setFErr(`auth_credential is required for ${fAuthType}`);
+          setBusy(false);
+          return;
+        }
+        await createPlugin({
+          target_type:      "openapi",
+          name:             fName.trim(),
+          description:      fDesc.trim(),
+          endpoint_url:     fUrl.trim(),
+          openapi_schema:   schema,
+          auth_type:        fAuthType,
+          auth_credential:  fAuthType === "none" ? undefined : fAuthCred,
+          auth_header_name: fAuthType === "api_key" ? fAuthHdr.trim() : undefined,
+        });
+      }
+      resetForm();
       setShowForm(false);
       await reload();
     } catch (e: any) {
@@ -1026,7 +1078,7 @@ function PluginsTab() {
   }
 
   async function onDelete(id: string, name: string) {
-    if (!confirm(`Remove plugin "${name}"? This also deletes its gateway target.`)) return;
+    if (!confirm(`Remove plugin "${name}"? This also deletes its gateway target and any stored credential.`)) return;
     setBusy(true);
     try {
       await deletePlugin(id);
@@ -1038,12 +1090,16 @@ function PluginsTab() {
     }
   }
 
+  const inputCls = "px-2 py-1.5 text-sm font-mono";
+  const inputStyle = { background: "var(--color-paper)", border: "1px solid var(--color-rule)" } as const;
+
   return (
     <div className="p-5">
       <div className="flex items-baseline justify-between mb-4">
         <p className="text-sm" style={{ color: "var(--color-ink-soft)" }}>
-          Pluggable data sources the agent calls over MCP. Each row is one AgentCore Gateway target.
-          A built-in <code>plugin_echo</code> target is always present for health checks.
+          Pluggable data sources the agent calls over MCP. Each row is one AgentCore Gateway target —
+          an in-account Lambda, or an external HTTPS API registered with its OpenAPI schema and the
+          auth header Gateway should inject on every call.
         </p>
         {admin && (
           <button
@@ -1064,36 +1120,119 @@ function PluginsTab() {
       {showForm && admin && (
         <div className="mb-5 p-4" style={{ background: "var(--color-surface)", border: "1px solid var(--color-rule)" }}>
           <div className="label mb-2">new plugin</div>
+
+          {/* Target type picker */}
+          <div className="mb-3 flex gap-2 text-xs">
+            {(["openapi", "lambda"] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => setFTargetType(t)}
+                className="px-3 py-1 font-mono"
+                style={{
+                  background: fTargetType === t ? "var(--color-cue)" : "var(--color-paper)",
+                  color: fTargetType === t ? "#000" : "var(--color-ink-soft)",
+                  border: "1px solid var(--color-rule)",
+                }}
+              >
+                {t === "openapi" ? "OpenAPI / HTTPS" : "Lambda (in-account)"}
+              </button>
+            ))}
+          </div>
+
+          {/* Common fields */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
             <input
-              className="px-2 py-1.5 text-sm font-mono"
-              style={{ background: "var(--color-paper)", border: "1px solid var(--color-rule)" }}
+              className={inputCls} style={inputStyle}
               placeholder="name (gateway target name, kebab/alnum)"
               value={fName}
               onChange={(e) => setFName(e.target.value)}
             />
             <input
-              className="px-2 py-1.5 text-sm font-mono"
-              style={{ background: "var(--color-paper)", border: "1px solid var(--color-rule)" }}
+              className={inputCls} style={inputStyle}
               placeholder="description (optional)"
               value={fDesc}
               onChange={(e) => setFDesc(e.target.value)}
             />
           </div>
-          <input
-            className="w-full px-2 py-1.5 text-sm font-mono mb-3"
-            style={{ background: "var(--color-paper)", border: "1px solid var(--color-rule)" }}
-            placeholder="lambda_arn (arn:aws:lambda:...)"
-            value={fArn}
-            onChange={(e) => setFArn(e.target.value)}
-          />
-          <textarea
-            className="w-full px-2 py-1.5 text-xs font-mono mb-3"
-            style={{ background: "var(--color-paper)", border: "1px solid var(--color-rule)", minHeight: 160 }}
-            placeholder={`tool_schema (JSON — gateway inlinePayload shape, see plugin-echo-target.tf). Example:\n{\n  "name": "my_tool",\n  "description": "...",\n  "inputSchema": {"type": "object", "properties": [...]},\n  "outputSchema": {"type": "object", "properties": [...]}\n}`}
-            value={fSchema}
-            onChange={(e) => setFSchema(e.target.value)}
-          />
+
+          {fTargetType === "lambda" ? (
+            <>
+              <input
+                className={`w-full mb-3 ${inputCls}`} style={inputStyle}
+                placeholder="lambda_arn (arn:aws:lambda:...)"
+                value={fArn}
+                onChange={(e) => setFArn(e.target.value)}
+              />
+              <textarea
+                className={`w-full mb-3 ${inputCls} text-xs`}
+                style={{ ...inputStyle, minHeight: 160 }}
+                placeholder={`tool_schema (JSON — gateway inlinePayload shape, see plugin-echo-target.tf). Example:\n{\n  "name": "my_tool",\n  "description": "...",\n  "inputSchema": {"type": "object", "properties": [...]},\n  "outputSchema": {"type": "object", "properties": [...]}\n}`}
+                value={fSchema}
+                onChange={(e) => setFSchema(e.target.value)}
+              />
+            </>
+          ) : (
+            <>
+              <input
+                className={`w-full mb-3 ${inputCls}`} style={inputStyle}
+                placeholder="endpoint_url (https://api.example.com — ignored when the OpenAPI 'servers' list is set)"
+                value={fUrl}
+                onChange={(e) => setFUrl(e.target.value)}
+              />
+              <textarea
+                className={`w-full mb-3 ${inputCls} text-xs`}
+                style={{ ...inputStyle, minHeight: 180 }}
+                placeholder={`openapi_schema (JSON — OpenAPI 3.x spec). The agent discovers one tool per operation. Example:\n{\n  "openapi": "3.0.0",\n  "info": {"title": "Deliverables inventory", "version": "1.0"},\n  "servers": [{"url": "https://..."}],\n  "paths": {\n    "/deliverables": {\n      "get": {\n        "operationId": "list_deliverables",\n        "parameters": [...],\n        "responses": {"200": {"description": "...", "content": {...}}}\n      }\n    }\n  }\n}`}
+                value={fOpenapi}
+                onChange={(e) => setFOpenapi(e.target.value)}
+              />
+
+              {/* Auth picker */}
+              <div className="label mb-1">auth</div>
+              <div className="mb-3 flex gap-2 text-xs flex-wrap">
+                {(["none", "api_key", "bearer", "basic"] as const).map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => setFAuthType(t)}
+                    className="px-3 py-1 font-mono"
+                    style={{
+                      background: fAuthType === t ? "var(--color-cue)" : "var(--color-paper)",
+                      color: fAuthType === t ? "#000" : "var(--color-ink-soft)",
+                      border: "1px solid var(--color-rule)",
+                    }}
+                  >
+                    {t === "none" ? "none" : t.replace("_", "-")}
+                  </button>
+                ))}
+              </div>
+
+              {fAuthType === "api_key" && (
+                <input
+                  className={`w-full mb-2 ${inputCls}`} style={inputStyle}
+                  placeholder="auth_header_name (default: X-API-Key)"
+                  value={fAuthHdr}
+                  onChange={(e) => setFAuthHdr(e.target.value)}
+                />
+              )}
+              {fAuthType !== "none" && (
+                <input
+                  className={`w-full mb-3 ${inputCls}`} style={inputStyle}
+                  type="password"
+                  autoComplete="off"
+                  placeholder={
+                    fAuthType === "basic"
+                      ? "credential (user:password — base64-encoded before storage)"
+                      : fAuthType === "bearer"
+                        ? "credential (bearer token — 'Bearer ' prefix added by gateway)"
+                        : "credential (api key — injected verbatim)"
+                  }
+                  value={fAuthCred}
+                  onChange={(e) => setFAuthCred(e.target.value)}
+                />
+              )}
+            </>
+          )}
+
           {fErr && (
             <div className="mb-3 p-2 text-xs font-mono" style={{ background: "#2a1818", color: "#ffb0b0" }}>
               {fErr}
@@ -1102,7 +1241,12 @@ function PluginsTab() {
           <button
             className="px-4 py-1.5 text-sm"
             style={{ background: "var(--color-cue)", color: "#000" }}
-            disabled={busy || !fName || !fArn || !fSchema}
+            disabled={
+              busy || !fName ||
+              (fTargetType === "lambda"
+                ? (!fArn || !fSchema)
+                : (!fUrl || !fOpenapi))
+            }
             onClick={onAdd}
           >
             {busy ? "creating…" : "create plugin"}
@@ -1121,8 +1265,9 @@ function PluginsTab() {
           <thead>
             <tr className="label" style={{ borderBottom: "1px solid var(--color-rule)" }}>
               <th className="text-left py-2">name</th>
-              <th className="text-left py-2">description</th>
-              <th className="text-left py-2">lambda</th>
+              <th className="text-left py-2">kind</th>
+              <th className="text-left py-2">endpoint</th>
+              <th className="text-left py-2">auth</th>
               <th className="text-left py-2">added</th>
               {admin && <th className="text-right py-2">·</th>}
             </tr>
@@ -1131,9 +1276,16 @@ function PluginsTab() {
             {plugins.map((p) => (
               <tr key={p.plugin_id} style={{ borderBottom: "1px solid var(--color-rule)" }}>
                 <td className="py-2 font-mono">{p.name}</td>
-                <td className="py-2" style={{ color: "var(--color-ink-soft)" }}>{p.description || "—"}</td>
+                <td className="py-2 text-xs font-mono" style={{ color: "var(--color-ink-faint)" }}>
+                  {p.target_type}
+                </td>
                 <td className="py-2 font-mono text-xs" style={{ color: "var(--color-ink-faint)" }}>
-                  {p.lambda_arn.split(":").pop()}
+                  {p.target_type === "lambda"
+                    ? p.lambda_arn.split(":").pop()
+                    : (p.endpoint_url.length > 56 ? p.endpoint_url.slice(0, 55) + "…" : p.endpoint_url)}
+                </td>
+                <td className="py-2 text-xs font-mono" style={{ color: "var(--color-ink-faint)" }}>
+                  {p.target_type === "lambda" ? "iam" : p.auth_type}
                 </td>
                 <td className="py-2 text-xs" style={{ color: "var(--color-ink-faint)" }}>
                   {p.created_at ? fmtEventWhen(p.created_at) : "—"}
