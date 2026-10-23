@@ -270,6 +270,7 @@ async def _semantic_stream(payload: dict) -> AsyncIterator[dict]:
                 knowledge_store_id=ks,
                 response_id=response_id,
                 selections=selections,
+                access_token=access_token,
             ):
                 kind = ev.get("__kind__")
                 if kind == "text_begin":

@@ -44,7 +44,7 @@ from typing import Any, AsyncIterator
 import boto3  # type: ignore
 
 from ..metering import record_model_invocation
-from .tool_registry import get_tool_catalog, get_tool_registry
+from .tool_registry import build_merged
 
 _REGION = os.environ.get("AWS_REGION", "us-east-1")
 _bedrock = boto3.client("bedrock-runtime", region_name=_REGION)
@@ -127,6 +127,7 @@ async def run_rewoo(
     knowledge_store_id: str | None,
     response_id: str,
     selections: list[dict[str, Any]] | None,
+    access_token: str | None = None,
 ) -> AsyncIterator[dict]:
     """Semantic-event async generator. Yields the same `__kind__`-
     tagged dicts the runtime's ReAct path emits:
@@ -139,10 +140,14 @@ async def run_rewoo(
 
     On an executor error, raises RewooFallback — the caller must catch
     this and re-run the turn through ReAct."""
-    catalog = get_tool_catalog()
-    registry = get_tool_registry()
     from .. import agent as _a
     user_id = _a._current_user_id()
+    # Per-invocation: pull whatever plugins are live on the Gateway
+    # right now and merge them onto the stable in-process base. A plugin
+    # registered via Settings → Data sources shows up on the next turn
+    # without a container restart.
+    mcp_tools = _a.fetch_mcp_tools(access_token)
+    registry, catalog = build_merged(mcp_tools)
 
     # ─── Planner ────────────────────────────────────────────────────
     plan_t0 = time.perf_counter()
