@@ -1,0 +1,75 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Box-office intelligence (fake demo API)",
+    "version": "1.0.0",
+    "description": "Returns per-(territory, genre) box-office stats so the distribution-readiness agent can ground 'is this worth distributing' with revenue evidence. Fake data; demo only."
+  },
+  "servers": [
+    { "url": "https://REPLACE_ME.lambda-url.us-east-1.on.aws", "description": "Lambda Function URL — replace with the terraform output `fakeapi_boxoffice_url` at registration time." }
+  ],
+  "paths": {
+    "/box_office": {
+      "get": {
+        "operationId": "get_box_office",
+        "summary": "Opening-week box office + trend for one (territory, genre) pair.",
+        "parameters": [
+          { "name": "territory", "in": "query", "required": true, "schema": { "type": "string" }, "description": "ISO territory code (DE, JP, BR, US, …)." },
+          { "name": "genre",     "in": "query", "required": true, "schema": { "type": "string" }, "description": "Genre label (drama, action, comedy, …)." }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stats for the requested cell, or a found=false stub when no backing data.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "territory":     { "type": "string" },
+                    "genre":         { "type": "string" },
+                    "found":         { "type": "boolean" },
+                    "avg_opening_m": { "type": "number", "description": "Average opening-week box office in USD millions." },
+                    "trend":         { "type": "string", "enum": ["up", "flat", "down"] },
+                    "confidence":    { "type": "number", "description": "0.0–1.0 confidence in the signal." },
+                    "notes":         { "type": "string" },
+                    "source":        { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "description": "Missing or wrong bearer token." }
+        }
+      }
+    },
+    "/top_territories": {
+      "get": {
+        "operationId": "get_top_territories",
+        "summary": "Rank every known territory for a given genre.",
+        "description": "Score formula: avg_opening_m × trend_bonus(up=1.15, flat=1.0, down=0.85) × confidence. Returned sorted descending by score — the agent uses the top rows to recommend where to distribute first.",
+        "parameters": [
+          { "name": "genre", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ranked territories for the genre.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "genre":  { "type": "string" },
+                    "top":    { "type": "array", "items": { "type": "object" } },
+                    "method": { "type": "string" },
+                    "source": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "description": "Missing or wrong bearer token." }
+        }
+      }
+    }
+  }
+}

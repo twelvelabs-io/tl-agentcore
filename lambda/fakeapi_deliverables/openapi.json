@@ -1,0 +1,75 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Deliverables inventory (fake demo API)",
+    "version": "1.0.0",
+    "description": "Returns the per-asset deliverable inventory the distribution-readiness agent uses to compute the `have` field. Fake data; demo only."
+  },
+  "servers": [
+    { "url": "https://REPLACE_ME.lambda-url.us-east-1.on.aws", "description": "Lambda Function URL — replace with the terraform output `fakeapi_deliverables_url` at registration time." }
+  ],
+  "paths": {
+    "/deliverables": {
+      "get": {
+        "operationId": "get_asset_deliverables",
+        "summary": "List the deliverables an asset currently has in inventory.",
+        "description": "Pass the asset_id from the knowledge store. Returns a `have` list the agent subtracts from the per-territory `requirements` to compute `missing`.",
+        "parameters": [
+          {
+            "name": "asset_id",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "24-char hex asset_id (TwelveLabs ObjectId)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deliverable inventory for this asset.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "asset_id": { "type": "string" },
+                    "have":     { "type": "array", "items": { "type": "string" }, "description": "Deliverable labels present in inventory (video, poster, subs:de, trailer, …)." },
+                    "source":   { "type": "string" }
+                  },
+                  "required": ["asset_id", "have"]
+                }
+              }
+            }
+          },
+          "401": { "description": "Missing or wrong X-API-Key header." }
+        }
+      }
+    },
+    "/inventory_summary": {
+      "get": {
+        "operationId": "get_inventory_summary",
+        "summary": "Aggregate counts across the whole inventory.",
+        "description": "'N of M assets have a trailer' / 'K of M have German subs'. Useful for territory-level narrative in the distribution_card summary.",
+        "responses": {
+          "200": {
+            "description": "Rolled-up counts across every known asset.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "summary": {
+                      "type": "object",
+                      "additionalProperties": { "type": "integer" }
+                    },
+                    "source": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "description": "Missing or wrong X-API-Key header." }
+        }
+      }
+    }
+  }
+}
