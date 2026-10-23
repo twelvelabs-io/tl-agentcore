@@ -83,6 +83,20 @@ data "aws_iam_policy_document" "plugins_perms" {
     ]
     resources = ["*"]
   }
+  # Token-vault lifecycle. CreateApiKeyCredentialProvider auto-creates
+  # a token vault at `token-vault/default` on first use in the account;
+  # without this permission the first registration fails with
+  # `bedrock-agentcore:CreateTokenVault is not allowed`. GetTokenVault
+  # covers subsequent registrations where the vault already exists.
+  statement {
+    sid = "TokenVaultBootstrap"
+    actions = [
+      "bedrock-agentcore:CreateTokenVault",
+      "bedrock-agentcore:GetTokenVault",
+      "bedrock-agentcore:ListTokenVaults",
+    ]
+    resources = ["*"]
+  }
   # Create/DeleteApiKeyCredentialProvider internally creates a
   # Secrets Manager secret under `bedrock-agentcore-identity!*` to
   # back the stored key. Give the lambda just enough to let the
