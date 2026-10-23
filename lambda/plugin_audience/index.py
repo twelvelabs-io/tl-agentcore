@@ -168,12 +168,21 @@ _TOOLS = {
 }
 
 
-def handler(event, _context):
-    tool = event.get("tool")
-    args = event.get("arguments") or {}
+def handler(event, context):
+    # AgentCore Gateway lambda-target contract (observed 2026-10-23):
+    #   event   = raw tool arguments at top level
+    #   context.client_context.custom["bedrockAgentCoreToolName"]
+    #           = "<target-name>___<tool-name>" (e.g. "plugin-audience___territory_fit")
+    full_name = ""
+    cc = getattr(context, "client_context", None)
+    if cc is not None:
+        custom = getattr(cc, "custom", None) or {}
+        full_name = custom.get("bedrockAgentCoreToolName") or ""
+    tool = full_name.split("___", 1)[1] if "___" in full_name else full_name
+    args = event if isinstance(event, dict) else {}
     fn = _TOOLS.get(tool)
     if not fn:
-        return {"error": f"unknown tool: {tool!r}"}
+        return {"error": f"unknown tool: {tool!r} (full={full_name!r})"}
     try:
         return fn(args)
     except Exception as e:

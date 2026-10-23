@@ -59,6 +59,36 @@ data "aws_iam_policy_document" "gateway_perms" {
       "arn:aws:logs:${var.region}:${data.aws_caller_identity.current.account_id}:log-group:/aws/bedrock-agentcore/*:log-stream:*",
     ]
   }
+  # PR #11: fetch stored API-key/bearer/basic credentials for OpenAPI
+  # targets. Without GetWorkloadAccessToken + GetSecretValue on the
+  # token-vault secrets, the gateway denies its own outbound call to
+  # any OpenAPI target that references a credential provider and
+  # returns a generic "An internal error occurred" to the caller —
+  # the downstream HTTPS endpoint is never reached.
+  statement {
+    sid     = "WorkloadIdentityForCredentialProviders"
+    actions = [
+      "bedrock-agentcore:GetWorkloadAccessToken",
+      "bedrock-agentcore:GetWorkloadAccessTokenForJWT",
+      "bedrock-agentcore:GetWorkloadAccessTokenForUserId",
+      "bedrock-agentcore:GetResourceApiKey",
+      "bedrock-agentcore:GetResourceOauth2Token",
+    ]
+    resources = ["*"]
+  }
+  # Token Vault stores api-key / bearer / basic secrets under this
+  # Secrets Manager prefix. The gateway reads them per outbound call
+  # to inject the auth header.
+  statement {
+    sid     = "ReadCredentialProviderSecrets"
+    actions = [
+      "secretsmanager:GetSecretValue",
+      "secretsmanager:DescribeSecret",
+    ]
+    resources = [
+      "arn:aws:secretsmanager:${var.region}:${data.aws_caller_identity.current.account_id}:secret:bedrock-agentcore-identity!default/*",
+    ]
+  }
 }
 
 resource "aws_iam_role_policy" "gateway" {
@@ -69,6 +99,13 @@ resource "aws_iam_role_policy" "gateway" {
 resource "aws_bedrockagentcore_gateway" "plugins" {
   name            = "${local.fqname}-plugins"
   role_arn        = aws_iam_role.gateway.arn
+  # PR #10: protocol_type is required — the control plane left it null
+  # when the field was omitted (aws provider ~> 6.70). A null-protocol
+  # gateway still serves /mcp but the handshake frames don't conform to
+  # the MCP shape the strands client expects (observed as 11
+  # JSONRPCMessage validation errors on client startup; the sibling
+  # Jocky stack sets this explicitly and works).
+  protocol_type   = "MCP"
   authorizer_type = "CUSTOM_JWT"
   description     = "Pluggable data-source surface. Targets added by the plugins lambda."
 

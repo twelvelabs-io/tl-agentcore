@@ -4010,6 +4010,17 @@ def fetch_mcp_tools(access_token: Optional[str]) -> list:
     mcp_url = os.environ.get("GATEWAY_MCP_URL")
     if not (mcp_url and access_token):
         return []
+    # The aws_bedrockagentcore_gateway.gateway_url output used to carry
+    # the "/mcp" protocol suffix in older provider versions; aws provider
+    # ~> 6.70 returns the bare host, and streamablehttp_client against
+    # that bare URL triggers 11 JSONRPCMessage validation errors on the
+    # first inbound frame (the gateway's root path doesn't speak
+    # streamable-HTTP MCP). Append /mcp when the operator's env var
+    # didn't already include it. See the sibling Jocky stack, where the
+    # same resource with provider ~> 6.43 returns the URL already
+    # suffixed and the handshake succeeds.
+    if not mcp_url.rstrip("/").endswith("/mcp"):
+        mcp_url = mcp_url.rstrip("/") + "/mcp"
     try:
         from strands.tools.mcp import MCPClient
         from mcp.client.streamable_http import streamablehttp_client
