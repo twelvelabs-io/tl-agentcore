@@ -7,13 +7,15 @@
 //   └─────────────┴───────────────────────────┴──────────────┘
 // No page scroll; each pane scrolls internally where content overflows.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "motion/react";
 import { agentEnabled, errorLabel, streamAgentTurn } from "../lib/agent-api";
 import { fetchScores, type JudgeRow } from "../lib/api";
 import { ResponseMarkdown } from "../lib/vref";
+import { extractDistributionCard } from "../lib/distribution-card";
 import { useStore, setState as setGlobal } from "../lib/store";
 import { LiveArchSidebar } from "./LiveArchSidebar";
+import { DistributionCard } from "./DistributionCard";
 import { nodeForEvent, downstreamFor, type NodeId } from "./LiveArchDiagram";
 import { ArchHandle } from "../App";
 import {
@@ -392,6 +394,7 @@ export function AgentCore() {
                 <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }}>
                   {heroTurn.text ? (
                     <div className={heroTurn.streaming ? "caret" : ""}>
+                      <HeroCard text={heroTurn.text} />
                       <ResponseMarkdown text={heroTurn.text} ksId={ks?._id} />
                     </div>
                   ) : (
@@ -444,6 +447,17 @@ export function AgentCore() {
 }
 
 function rid() { return Math.random().toString(36).slice(2, 10); }
+
+// Thin memoized wrapper around the Distribution-Readiness card parser.
+// Keyed on the raw response text so React doesn't re-parse on every
+// unrelated re-render of the hero pane. Returns null (and renders
+// nothing) when the text doesn't contain a well-formed card — same
+// pattern as RoughCut's extractPlan.
+function HeroCard({ text }: { text: string }) {
+  const card = useMemo(() => extractDistributionCard(text), [text]);
+  if (!card) return null;
+  return <DistributionCard card={card} />;
+}
 
 // Dim mono strip rendered under the § Response header for the active
 // turn, showing the agent's own human-readable narration (one line per
