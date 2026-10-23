@@ -3982,6 +3982,35 @@ def _load_system_prompt() -> str:
     return SYSTEM_PROMPT
 
 
+# ═══ MCP tool discovery (shared by build_agent and ReWOO) ═════════════════════
+def fetch_mcp_tools(access_token: Optional[str]) -> list:
+    """Enumerate the Gateway's current tool set as a list of MCPAgentTool
+    wrappers. The MCPClient stays started inside each wrapper so the
+    executor can `call_tool_sync` on it later this turn — the wrappers
+    hold a reference, so the client is not GC'd mid-call.
+
+    Returns `[]` when GATEWAY_MCP_URL is unset, no access token was
+    forwarded (background jobs / local runs), or the gateway refused the
+    handshake. A broken plugin must not kill the turn — the agent still
+    works with its in-process tools alone."""
+    mcp_url = os.environ.get("GATEWAY_MCP_URL")
+    if not (mcp_url and access_token):
+        return []
+    try:
+        from strands.tools.mcp import MCPClient
+        from mcp.client.streamable_http import streamablehttp_client
+
+        client = MCPClient(lambda: streamablehttp_client(
+            url=mcp_url,
+            headers={"Authorization": f"Bearer {access_token}"},
+        ))
+        client.start()
+        return client.list_tools_sync()
+    except Exception as e:
+        print(f"[plugins] gateway tool discovery failed: {e}", flush=True)
+        return []
+
+
 # ═══ Build the agent ══════════════════════════════════════════════════════════
 def build_agent(access_token: Optional[str] = None) -> tuple[Agent, str]:
     """Construct the Strands Agent. Returns (agent, mode):
@@ -4044,24 +4073,7 @@ def build_agent(access_token: Optional[str] = None) -> tuple[Agent, str]:
     # can't accidentally shadow a built-in. Falls through silently when
     # the gateway isn't configured (local runs, legacy deploys) or no
     # access token was forwarded (background jobs).
-    mcp_url = os.environ.get("GATEWAY_MCP_URL")
-    mcp_tools: list = []
-    if mcp_url and access_token:
-        try:
-            from strands.tools.mcp import MCPClient
-            from mcp.client.streamable_http import streamablehttp_client
-
-            client = MCPClient(lambda: streamablehttp_client(
-                url=mcp_url,
-                headers={"Authorization": f"Bearer {access_token}"},
-            ))
-            client.start()
-            mcp_tools = client.list_tools_sync()
-        except Exception as e:
-            # A broken plugin must not kill the whole turn — the agent
-            # still works with its in-process tools alone.
-            print(f"[plugins] gateway tool discovery failed: {e}", flush=True)
-            mcp_tools = []
+    mcp_tools = fetch_mcp_tools(access_token)
 
     builtin_names = {getattr(t, "__name__", str(t)) for t in in_process_tools}
     merged_tools = list(in_process_tools) + [
