@@ -64,7 +64,7 @@ def main() -> int:
                 },
                 "pegasus_profile": {
                     "label": "Pegasus profile prompt — per-asset ingest",
-                    "description": "Sent to Bedrock Pegasus 1.2 for every newly uploaded clip. Output schema drives the ASSET# row written to kb_cache.",
+                    "description": "Sent to Bedrock Pegasus 1.5 for every newly uploaded clip. Output schema drives the ASSET# row written to kb_cache.",
                     "source": "lambda/asset_profile/index.mjs · PROFILE_PROMPT",
                     "text": pegasus_prompt,
                 },

@@ -71,7 +71,7 @@ data "aws_iam_policy_document" "runtime_perms" {
   # Narrowed to just the three models the agent actually uses:
   #   - Claude Sonnet 4.6 (agent reasoner)
   #   - Marengo 3.0 (embeddings for vector_search / find_by_image)
-  #   - Pegasus 1.2 (per-clip video analysis)
+  #   - Pegasus 1.5 (per-clip video analysis; 1.2 kept allow-listed for rollback via pegasus_bedrock_model_id)
   # us.* inference profiles need permissions on BOTH the profile ARN
   # (the caller-facing id) AND every regional foundation-model ARN it
   # can route to (the actual model), so we grant both.
@@ -86,10 +86,10 @@ data "aws_iam_policy_document" "runtime_perms" {
     resources = [
       "arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6*",
       "arn:aws:bedrock:*::foundation-model/twelvelabs.marengo-embed-3-0-v1:0",
-      "arn:aws:bedrock:*::foundation-model/twelvelabs.pegasus-1-2-v1:0",
+      "arn:aws:bedrock:*::foundation-model/twelvelabs.pegasus-1-5-v1:0",
       "arn:aws:bedrock:*:${data.aws_caller_identity.current.account_id}:inference-profile/us.anthropic.claude-sonnet-4-6*",
       "arn:aws:bedrock:*:${data.aws_caller_identity.current.account_id}:inference-profile/us.twelvelabs.marengo-embed-3-0-v1:0",
-      "arn:aws:bedrock:*:${data.aws_caller_identity.current.account_id}:inference-profile/us.twelvelabs.pegasus-1-2-v1:0",
+      "arn:aws:bedrock:*:${data.aws_caller_identity.current.account_id}:inference-profile/us.twelvelabs.pegasus-1-5-v1:0",
     ]
   }
   # Query the S3 Vectors index. QueryVectors + GetVectors are required to
@@ -133,6 +133,11 @@ data "aws_iam_policy_document" "runtime_perms" {
       "${aws_s3_bucket.clips.arn}/async-in-eval/*",
       "${aws_s3_bucket.clips.arn}/async-out-eval/*",
       "${aws_s3_bucket.clips.arn}/embed-cache/*",
+      # PR #6: artifact store — large (>16 KiB) agent-produced artifacts
+      # land here as `artifacts/<user_id>/<artifact_id>/<name>`. The small
+      # path is DDB-inline so these S3 writes are the exception, not the
+      # norm. Reads come through the existing ReadClipBytes grant.
+      "${aws_s3_bucket.clips.arn}/artifacts/*",
     ]
   }
   statement {
@@ -153,6 +158,31 @@ data "aws_iam_policy_document" "runtime_perms" {
     actions   = ["rekognition:SearchFacesByImage", "rekognition:DescribeCollection"]
     resources = ["arn:aws:rekognition:${var.region}:${data.aws_caller_identity.current.account_id}:collection/${local.fqname}-ks-*"]
   }
+  # Rekognition Video SegmentDetection powers the get_shot_timeline agent
+  # tool. StartSegmentDetection + GetSegmentDetection operate on the account
+  # level — no collection scoping — so resource is "*". The video S3 object
+  # is accessed via the Rekognition service principal, not the runtime
+  # role, so no extra s3:GetObject grant is required beyond the existing
+  # ReadClipBytes statement.
+  statement {
+    sid = "RekognitionSegmentDetection"
+    actions = [
+      "rekognition:StartSegmentDetection",
+      "rekognition:GetSegmentDetection",
+    ]
+    resources = ["*"]
+  }
+  # Comprehend DetectSentiment + DetectEntities back the get_audio_context
+  # tool (transcript-derived audio activity sketch). Account-wide sync APIs
+  # with no resource-level scoping.
+  statement {
+    sid = "ComprehendDetect"
+    actions = [
+      "comprehend:DetectSentiment",
+      "comprehend:DetectEntities",
+    ]
+    resources = ["*"]
+  }
   # Read the cache DDB tables. kb_cache is Query-driven (single-
   # table pk/sk); rights and audiences are GetItem + Scan. Write access
   # belongs to the operator (ingest-kb-cache.py + seed-*.py), not the
@@ -169,6 +199,160 @@ data "aws_iam_policy_document" "runtime_perms" {
       aws_dynamodb_table.kb_cache.arn,
       aws_dynamodb_table.rights.arn,
       aws_dynamodb_table.audiences.arn,
+    ]
+  }
+  # Multi-turn session scratch + per-user long-term memory. The runtime
+  # both reads (list/get memories) and writes (persist session turn,
+  # save a memory, delete a memory via manage_memory).
+  statement {
+    sid = "SessionAndMemoryTables"
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:PutItem",
+      "dynamodb:UpdateItem",
+      "dynamodb:DeleteItem",
+      "dynamodb:Query",
+    ]
+    resources = [
+      aws_dynamodb_table.sessions.arn,
+      "${aws_dynamodb_table.sessions.arn}/index/by-user",
+      aws_dynamodb_table.memories.arn,
+    ]
+  }
+  # PR #8: add_media writes a lightweight registration row (asset_id,
+  # knowledge_store_id, source S3 URI, status) to the assets table. The
+  # runtime does NOT get write on kb_cache or on the vector index — those
+  # stay operator-owned. GetItem lets add_media no-op on a duplicate, if we
+  # add that path later.
+  statement {
+    sid       = "AddMediaWriteAssets"
+    actions   = ["dynamodb:PutItem", "dynamodb:GetItem"]
+    resources = [aws_dynamodb_table.assets.arn]
+  }
+  # PR #10: mining plans. The jockey_save / jockey_list / jockey_run /
+  # jockey_list_runs agent tools need:
+  #   - full RW on the plans table (save creates, delete pauses, list queries)
+  #   - Query on the plans by-ks GSI (list filtered by knowledge_store_id)
+  #   - Read on the runs table (jockey_list_runs is a per-plan Query)
+  #   - EventBridge Scheduler C/U/D scoped to our mining group
+  #   - lambda:InvokeFunction on the mining-run Lambda (jockey_run sync path)
+  #   - iam:PassRole on the scheduler-target role, so scheduler:CreateSchedule
+  #     can hand that role to EventBridge when it creates a per-plan Schedule
+  statement {
+    sid = "MiningPlansDdb"
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:PutItem",
+      "dynamodb:UpdateItem",
+      "dynamodb:DeleteItem",
+      "dynamodb:Query",
+    ]
+    resources = [
+      aws_dynamodb_table.jockey_plans.arn,
+      "${aws_dynamodb_table.jockey_plans.arn}/index/by-ks",
+      aws_dynamodb_table.jockey_runs.arn,
+    ]
+  }
+  statement {
+    sid = "MiningScheduler"
+    actions = [
+      "scheduler:CreateSchedule",
+      "scheduler:UpdateSchedule",
+      "scheduler:DeleteSchedule",
+      "scheduler:GetSchedule",
+    ]
+    resources = [
+      "arn:aws:scheduler:${var.region}:${data.aws_caller_identity.current.account_id}:schedule/${aws_scheduler_schedule_group.mining.name}/*",
+    ]
+  }
+  statement {
+    sid       = "MiningRunInvoke"
+    actions   = ["lambda:InvokeFunction"]
+    resources = [aws_lambda_function.mining_run.arn]
+  }
+  statement {
+    sid       = "MiningSchedulerPassRole"
+    actions   = ["iam:PassRole"]
+    resources = [aws_iam_role.mining_scheduler_target.arn]
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["scheduler.amazonaws.com"]
+    }
+  }
+  # PR #11: generate_video → stitch Lambda. We invoke the existing stitch
+  # handler synchronously so the agent gets the same MediaConvert job the
+  # UI's Render-preview button submits, without duplicating job-building.
+  statement {
+    sid       = "GenerateVideoInvokeStitch"
+    actions   = ["lambda:InvokeFunction"]
+    resources = [aws_lambda_function.stitch.arn]
+  }
+  # PR #6: artifact store. The agent save_/open_/list_artifacts tools
+  # Get/Put/Delete rows on the table itself and Query the by-kind GSI
+  # for list-with-filter.
+  statement {
+    sid = "ArtifactsTable"
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:PutItem",
+      "dynamodb:UpdateItem",
+      "dynamodb:DeleteItem",
+      "dynamodb:Query",
+    ]
+    resources = [
+      aws_dynamodb_table.artifacts.arn,
+      "${aws_dynamodb_table.artifacts.arn}/index/by-kind",
+    ]
+  }
+  # Wave-2 PR #9: online quality judges. The runtime fire-and-forgets
+  # judge dispatch at end-of-turn (see agent/tl_agentcore/scoring/
+  # judge_runner.py) and writes one row per judge to the scores table.
+  statement {
+    sid       = "ScoresTableWrite"
+    actions   = ["dynamodb:PutItem"]
+    resources = [aws_dynamodb_table.scores.arn]
+  }
+  # Wave-2 PR #9: reference-validity judge uses BatchGetItem on the
+  # assets table to verify that every asset_id cited inside a <plan>
+  # block exists. Read-only; the add_media write grant above is unchanged.
+  statement {
+    sid       = "ScoresJudgeReadAssets"
+    actions   = ["dynamodb:BatchGetItem"]
+    resources = [aws_dynamodb_table.assets.arn]
+  }
+  # Wave-2 PR #10: per-tool / per-model metering. The runtime writes one
+  # row per Bedrock model turn and one row per in-process tool call to
+  # the usage_events table, fire-and-forget. See
+  # agent/tl_agentcore/metering/ledger.py.
+  statement {
+    sid       = "UsageEventsWrite"
+    actions   = ["dynamodb:PutItem"]
+    resources = [aws_dynamodb_table.usage_events.arn]
+  }
+  # Price source for the metering cost column lives in SSM Parameter
+  # Store under /tl-agentcore/prices/<model_id>. GetParameter is read-
+  # only; ops updates happen out of band so pricing can be bumped
+  # without a redeploy. GetParameters supports the per-process cache's
+  # bulk warmup path.
+  statement {
+    sid     = "MeteringPricesSsmRead"
+    actions = ["ssm:GetParameter", "ssm:GetParameters"]
+    resources = [
+      "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter/tl-agentcore/prices/*",
+    ]
+  }
+  # Wave-2 PR #7: hosted web-search API keys. Each provider's key lives
+  # under /tl-agentcore/web-search/<provider> as a SecureString; the
+  # web_search tool fetches with WithDecryption=true. Terraform does
+  # NOT create these parameters — ops writes the key out of band after
+  # choosing a provider so the SecureString's KMS encryption context
+  # stays in operator-controlled scope.
+  statement {
+    sid     = "WebSearchApiKeysSsmRead"
+    actions = ["ssm:GetParameter", "ssm:GetParameters"]
+    resources = [
+      "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter/tl-agentcore/web-search/*",
     ]
   }
 }

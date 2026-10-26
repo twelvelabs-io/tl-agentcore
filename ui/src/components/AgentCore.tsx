@@ -7,12 +7,15 @@
 //   └─────────────┴───────────────────────────┴──────────────┘
 // No page scroll; each pane scrolls internally where content overflows.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "motion/react";
-import { agentEnabled, streamAgentTurn } from "../lib/agent-api";
+import { agentEnabled, errorLabel, streamAgentTurn } from "../lib/agent-api";
+import { fetchScores, type JudgeRow } from "../lib/api";
 import { ResponseMarkdown } from "../lib/vref";
+import { extractDistributionCard } from "../lib/distribution-card";
 import { useStore, setState as setGlobal } from "../lib/store";
 import { LiveArchSidebar } from "./LiveArchSidebar";
+import { DistributionCard } from "./DistributionCard";
 import { nodeForEvent, downstreamFor, type NodeId } from "./LiveArchDiagram";
 import { ArchHandle } from "../App";
 import {
@@ -28,6 +31,24 @@ type Turn = {
   text: string;
   streaming?: boolean;
   elapsedMs?: number;
+  // Human-readable "doing X now" lines from response.activity frames.
+  // The agent emits one per tool call (narrated by activity_narrator.py)
+  // and one for each pipeline / preseed / rewoo stage. Rendered as a dim
+  // mono strip under the § Response header so producers can see what the
+  // agent is up to without reading the raw function_call JSON.
+  activity?: string[];
+  // Set from response.completed.tool_path — carries the pipeline / tool
+  // transport the agent actually ran this turn through (e.g. "react",
+  // "rewoo", "in-process", "mcp-gateway"). Rendered as a small label
+  // next to the elapsed time in the response header.
+  toolPath?: string;
+  // Online judge rows (coherence + reference_validity) pulled from the
+  // /scores/{response_id} endpoint. Fetched a short delay after
+  // response.completed since judges run fire-and-forget. Rendered as a
+  // small panel under the trace strip; empty array means "no judges
+  // yet" (which may be legitimate if sampling or a judge failure).
+  responseId?: string;
+  judges?: JudgeRow[];
 };
 
 const enabled = agentEnabled();
@@ -39,6 +60,7 @@ export function AgentCore() {
   const [sessionId, setSessionId] = useState<string | undefined>(undefined);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [errCode, setErrCode] = useState<string | null>(null);
   const [activeNode, setActiveNode] = useState<NodeId | null>(null);
   const [nodeHistory, setNodeHistory] = useState<NodeId[]>([]);
   const [historyEntryId, setHistoryEntryId] = useState<string | null>(null);
@@ -72,7 +94,7 @@ export function AgentCore() {
   const send = async () => {
     if (!ks || !draft.trim() || busy) return;
     const text = draft.trim();
-    setDraft(""); setErr(null);
+    setDraft(""); setErr(null); setErrCode(null);
     const userTurn: Turn = { id: rid(), role: "user", text };
     const aTurn: Turn = { id: rid(), role: "assistant", text: "", streaming: true };
     setTurns((ts) => [...ts, userTurn, aTurn]);
@@ -88,23 +110,82 @@ export function AgentCore() {
         prompt: text,
         session_id: sessionId,
       })) {
-        const node = nodeForEvent(ev as { type: string; tool?: string });
+        // Sniff tool name from a function_call item added/done so the arch
+        // diagram can light the right lane. Other item types just show
+        // "runtime" via nodeForEvent.
+        let toolName: string | undefined;
+        if ((ev.type === "response.output_item.added" || ev.type === "response.output_item.done")
+            && ev.item.type === "function_call") {
+          toolName = ev.item.name;
+        }
+        const node = nodeForEvent({ type: ev.type, tool: toolName });
         if (node) {
           recordNode(node);
-          if (ev.type === "tool_call") {
-            const downstream = downstreamFor((ev as { tool?: string }).tool);
+          if (ev.type === "response.output_item.added" && toolName) {
+            const downstream = downstreamFor(toolName);
             if (downstream) setTimeout(() => recordNode(downstream), 400);
           }
         }
-        if (ev.type === "session") {
-          if (!sessionId) setSessionId(ev.session_id);
-        } else if (ev.type === "text_delta") {
+
+        if (ev.type === "response.created") {
+          if (!sessionId) setSessionId(ev.response.id);
+          // Stash the response_id on the current turn so the scores
+          // fetch (fired after completed) can hit the right row.
+          const rid = ev.response.id;
+          setTurns((ts) => ts.map((t) =>
+            t.id === aTurn.id ? { ...t, responseId: rid } : t
+          ));
+        } else if (ev.type === "response.output_text.delta") {
           acc += ev.delta;
           setTurns((ts) => ts.map((t) => t.id === aTurn.id ? { ...t, text: acc } : t));
           responseRef.current?.scrollTo({ top: 1e9 });
-        } else if (ev.type === "error") {
-          setErr(ev.message);
-        } else if (ev.type === "done") {
+        } else if (ev.type === "response.activity") {
+          const line = ev.text;
+          setTurns((ts) => ts.map((t) =>
+            t.id === aTurn.id
+              ? { ...t, activity: [...(t.activity || []), line] }
+              : t
+          ));
+        } else if (ev.type === "response.output_item.done"
+                   && ev.item.type === "function_call"
+                   && ev.item.error_code) {
+          // Surface tool-level failures in the activity trace. The
+          // narrator fired a "Searching the KB for..." line at
+          // tool_begin; this appends the outcome so the producer sees
+          // which tool failed and the taxonomic bucket.
+          const label = errorLabel(ev.item.error_code);
+          const line = `⚠ ${ev.item.name} failed — ${label}`;
+          setTurns((ts) => ts.map((t) =>
+            t.id === aTurn.id
+              ? { ...t, activity: [...(t.activity || []), line] }
+              : t
+          ));
+        } else if (ev.type === "response.failed") {
+          setErr(ev.response.error.message);
+          setErrCode(ev.response.error.code || null);
+        } else if (ev.type === "response.completed") {
+          const tp = ev.response.tool_path;
+          if (tp) {
+            setTurns((ts) => ts.map((t) =>
+              t.id === aTurn.id ? { ...t, toolPath: tp } : t
+            ));
+          }
+          // Judges run fire-and-forget on the runtime side; give them a
+          // couple seconds to land in DDB before fetching. A single
+          // fetch is enough — Sonnet latency is well under 2s and the
+          // runtime awaits the dispatch (not the result) synchronously.
+          const rid = ev.response.id;
+          setTimeout(async () => {
+            try {
+              const { judges } = await fetchScores(rid);
+              setTurns((ts) => ts.map((t) =>
+                t.id === aTurn.id ? { ...t, judges } : t
+              ));
+            } catch {
+              // Scores are an observability nice-to-have — a failure
+              // here never breaks the chat turn.
+            }
+          }, 2000);
           setTimeout(() => setActiveNode(null), 1200);
         }
       }
@@ -282,16 +363,38 @@ export function AgentCore() {
                 )}
               </div>
               {heroTurn?.elapsedMs && !heroTurn.streaming && (
-                <div className="font-mono text-sm" style={{ color: "var(--color-ink-soft)" }}>
-                  {(heroTurn.elapsedMs / 1000).toFixed(1)}s
+                <div className="flex items-baseline gap-2">
+                  {heroTurn.toolPath && (
+                    <span
+                      className="px-1.5 py-0.5 rounded-full font-mono text-[9px] uppercase tracking-wider"
+                      style={{
+                        background: "var(--color-surface)",
+                        border: "1px solid var(--color-rule)",
+                        color: "var(--color-ink-faint)",
+                      }}
+                      title={`pipeline / transport: ${heroTurn.toolPath}`}
+                    >
+                      {heroTurn.toolPath}
+                    </span>
+                  )}
+                  <span className="font-mono text-sm" style={{ color: "var(--color-ink-soft)" }}>
+                    {(heroTurn.elapsedMs / 1000).toFixed(1)}s
+                  </span>
                 </div>
               )}
             </div>
             <div ref={responseRef} className="flex-1 min-h-0 overflow-y-auto px-8 py-6">
+              {heroTurn?.activity && heroTurn.activity.length > 0 && (
+                <ActivityStrip lines={heroTurn.activity} live={!!heroTurn.streaming} />
+              )}
+              {heroTurn && heroTurn.judges !== undefined && !heroTurn.streaming && (
+                <JudgeStrip judges={heroTurn.judges} />
+              )}
               {heroTurn ? (
                 <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }}>
                   {heroTurn.text ? (
                     <div className={heroTurn.streaming ? "caret" : ""}>
+                      <HeroCard text={heroTurn.text} />
                       <ResponseMarkdown text={heroTurn.text} ksId={ks?._id} />
                     </div>
                   ) : (
@@ -306,9 +409,20 @@ export function AgentCore() {
                 </p>
               )}
               {err && (
-                <pre className="font-mono text-xs mt-6 p-3 whitespace-pre-wrap rounded-[var(--radius-card)]" style={{ background: "var(--color-surface)", color: "var(--color-status-failed)" }}>
-                  {err}
-                </pre>
+                <div className="mt-6">
+                  {errCode && (
+                    <div className="inline-block mb-2 px-2 py-0.5 rounded-full font-mono text-[10px] uppercase tracking-wider" style={{
+                      background: "var(--color-surface)",
+                      border: "1px solid var(--color-rule)",
+                      color: "var(--color-status-failed)",
+                    }}>
+                      {errorLabel(errCode)}
+                    </div>
+                  )}
+                  <pre className="font-mono text-xs p-3 whitespace-pre-wrap rounded-[var(--radius-card)]" style={{ background: "var(--color-surface)", color: "var(--color-status-failed)" }}>
+                    {err}
+                  </pre>
+                </div>
               )}
             </div>
           </>
@@ -333,6 +447,154 @@ export function AgentCore() {
 }
 
 function rid() { return Math.random().toString(36).slice(2, 10); }
+
+// Thin memoized wrapper around the Distribution-Readiness card parser.
+// Keyed on the raw response text so React doesn't re-parse on every
+// unrelated re-render of the hero pane. Returns null (and renders
+// nothing) when the text doesn't contain a well-formed card — same
+// pattern as RoughCut's extractPlan.
+function HeroCard({ text }: { text: string }) {
+  const card = useMemo(() => extractDistributionCard(text), [text]);
+  if (!card) return null;
+  return <DistributionCard card={card} />;
+}
+
+// Dim mono strip rendered under the § Response header for the active
+// turn, showing the agent's own human-readable narration (one line per
+// tool call plus pipeline / preseed / rewoo stage lines). While the
+// turn is streaming, shows a collapsed tail; once completed, becomes
+// a disclosure the producer can expand to see the full trace.
+function ActivityStrip({ lines, live }: { lines: string[]; live: boolean }) {
+  const [open, setOpen] = useState(false);
+  const tail = live ? lines.slice(-4) : lines.slice(-1);
+  const hidden = lines.length - tail.length;
+  const show = open ? lines : tail;
+  return (
+    <div
+      className="mb-4 rounded-[var(--radius-card)] px-3 py-2 border font-mono"
+      style={{
+        borderColor: "var(--color-rule)",
+        background: "var(--color-surface)",
+        color: "var(--color-ink-faint)",
+        fontSize: 11,
+        lineHeight: 1.5,
+      }}
+    >
+      <div className="flex items-baseline justify-between">
+        <span className="label" style={{ color: "var(--color-ink-faint)" }}>
+          § Trace
+        </span>
+        {!live && hidden > 0 && (
+          <button
+            className="label hover:text-[var(--color-ink)] transition-colors"
+            onClick={() => setOpen((o) => !o)}
+          >
+            {open ? "collapse" : `+${hidden} more`}
+          </button>
+        )}
+      </div>
+      <ul className="mt-1 space-y-0.5">
+        {show.map((line, i) => (
+          <li key={`${i}-${line.slice(0, 24)}`} className="truncate">
+            {live && i === show.length - 1 ? "▸ " : "· "}
+            {line}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// Shown under the trace strip once the fire-and-forget judges have
+// landed. Empty judges[] means the fetch succeeded but no rows exist
+// yet (sampling miss or a sub-2s judge write) — surface that explicitly
+// so the producer knows the UI isn't broken.
+function JudgeStrip({ judges }: { judges: JudgeRow[] }) {
+  if (judges.length === 0) {
+    return (
+      <div
+        className="mb-4 rounded-[var(--radius-card)] px-3 py-2 border font-mono"
+        style={{
+          borderColor: "var(--color-rule)",
+          background: "var(--color-surface)",
+          color: "var(--color-ink-faint)",
+          fontSize: 11,
+        }}
+      >
+        <span className="label" style={{ color: "var(--color-ink-faint)" }}>§ Judges</span>
+        <span className="ml-2">no scores yet (sampled out or judge still writing)</span>
+      </div>
+    );
+  }
+  return (
+    <div
+      className="mb-4 rounded-[var(--radius-card)] px-3 py-2 border"
+      style={{
+        borderColor: "var(--color-rule)",
+        background: "var(--color-surface)",
+      }}
+    >
+      <div className="flex items-baseline justify-between">
+        <span className="label" style={{ color: "var(--color-ink-faint)" }}>§ Judges</span>
+        <span className="label font-mono" style={{ color: "var(--color-ink-faint)" }}>
+          {judges.length}
+        </span>
+      </div>
+      <ul className="mt-1 space-y-1.5 text-[11px]" style={{ color: "var(--color-ink-soft)" }}>
+        {judges.map((j) => (
+          <li key={j.judge_name} className="flex items-start gap-2">
+            <JudgeScore score={j.score} />
+            <div className="flex-1 min-w-0">
+              <div className="font-mono text-[10px] uppercase tracking-wider" style={{ color: "var(--color-ink-faint)" }}>
+                {j.judge_name.replace(/_/g, " ")}
+                {j.latency_ms != null && ` · ${j.latency_ms}ms`}
+              </div>
+              {j.justification && (
+                <div className="mt-0.5" style={{ color: "var(--color-ink)" }}>
+                  {j.justification}
+                </div>
+              )}
+              {j.error && (
+                <div className="mt-0.5 font-mono" style={{ color: "var(--color-status-failed)" }}>
+                  error: {j.error}
+                </div>
+              )}
+              {j.missing_asset_ids && j.missing_asset_ids.length > 0 && (
+                <div className="mt-0.5 font-mono text-[10px]" style={{ color: "var(--color-status-failed)" }}>
+                  missing: {j.missing_asset_ids.length} asset{j.missing_asset_ids.length === 1 ? "" : "s"}
+                </div>
+              )}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function JudgeScore({ score }: { score?: number | null }) {
+  const display = score == null ? "—" : String(score);
+  const color = score == null
+    ? "var(--color-ink-faint)"
+    : score >= 4
+      ? "var(--color-cue)"
+      : score >= 3
+        ? "var(--color-ink-soft)"
+        : "var(--color-status-failed)";
+  return (
+    <div
+      className="shrink-0 w-6 h-6 rounded-full flex items-center justify-center font-mono text-[11px]"
+      style={{
+        background: "var(--color-bg)",
+        border: `1px solid ${color}`,
+        color,
+      }}
+      title={score == null ? "no score" : `${score}/5`}
+    >
+      {display}
+    </div>
+  );
+}
 
 function Suggestions({ onPick }: { onPick: (s: string) => void }) {
   const samples = [

@@ -326,6 +326,7 @@ async function streamTurn(
   sessionId: string,
   onDelta: (proseSoFar: string) => void,
   onEvent?: (ev: { type: string; tool?: string }) => void,
+  onCorrection?: (note: string) => void,
 ): Promise<string> {
   let acc = "";
   for await (const ev of streamAgentTurn({
@@ -333,20 +334,41 @@ async function streamTurn(
     prompt,
     session_id: sessionId,
   })) {
-    onEvent?.(ev as { type: string; tool?: string });
-    if (ev.type === "text_delta") {
+    // Sniff the tool name from a function_call item for the arch diagram.
+    let toolName: string | undefined;
+    if ((ev.type === "response.output_item.added" || ev.type === "response.output_item.done")
+        && ev.item.type === "function_call") {
+      toolName = ev.item.name;
+    }
+    onEvent?.({ type: ev.type, tool: toolName });
+
+    if (ev.type === "response.output_text.delta") {
       acc += ev.delta;
       onDelta(stripPlanBlock(acc));
-    } else if (ev.type === "plan_corrected") {
-      // Runtime rewrote the <plan> JSON to satisfy the duration target.
-      // Replace the running buffer wholesale so extractPlan() picks up the
-      // corrected scenes. Any text_delta that follows (e.g. the enforcer's
-      // note) appends normally.
-      acc = ev.text;
+    } else if (ev.type === "response.output_item.done"
+               && ev.item.type === "custom"
+               && ev.item.custom_type === "edl.plan"
+               && ev.item.data != null) {
+      // Server-side EDL extraction. The text stream still carries the raw
+      // <plan>...</plan> block; this is the parsed authoritative copy. When
+      // the duration-enforcer rewrites the plan the server re-emits this
+      // item with the same id — splice the corrected JSON back into the
+      // text accumulator so extractPlan() picks up the right scenes.
+      const planJson = JSON.stringify(ev.item.data, null, 2);
+      const block = `<plan>\n${planJson}\n</plan>`;
+      acc = /<plan>[\s\S]*?<\/plan>/i.test(acc)
+          ? acc.replace(/<plan>[\s\S]*?<\/plan>/i, block)
+          : acc + "\n\n" + block;
+      if (ev.item.correction_note) {
+        acc += `\n\n${ev.item.correction_note}`;
+        onCorrection?.(ev.item.correction_note);
+      }
       onDelta(stripPlanBlock(acc));
-    } else if (ev.type === "error") {
-      throw new Error(ev.message);
+    } else if (ev.type === "response.failed") {
+      throw new Error(ev.response.error.message);
     }
+    // response.keepalive, response.created, other item.added/done, text_done —
+    // not actionable here; the raw text stream carries everything we need.
   }
   if (!acc.trim()) throw new Error("Agent returned no text — likely the 5-min runtime cap was hit. Try a simpler request.");
   return acc;
@@ -392,6 +414,11 @@ export function RoughCut() {
   const [script, setScript] = useState(SAMPLE_SCRIPT);
   const [fps, setFps] = useState(24);
   const [plan, setPlan] = useState<RoughCutPlan | null>(null);
+  // Set by the stream loop when the duration-enforcer rewrites the plan
+  // and re-emits the custom item with `correction_note`. Rendered as a
+  // chip in the Timeline header so the producer sees the plan was
+  // auto-corrected, not just silently updated.
+  const [planCorrection, setPlanCorrection] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
@@ -424,12 +451,12 @@ export function RoughCut() {
     const node = nodeForEvent(ev);
     if (node) {
       recordNode(node);
-      if (ev.type === "tool_call") {
+      if (ev.type === "response.output_item.added" && ev.tool) {
         const downstream = downstreamFor(ev.tool);
         if (downstream) setTimeout(() => recordNode(downstream), 400);
       }
     }
-    if (ev.type === "done") setTimeout(() => setActiveNode(null), 1200);
+    if (ev.type === "response.completed") setTimeout(() => setActiveNode(null), 1200);
   };
 
   // Consume any pending restore the drawer leaves in the global store.
@@ -546,7 +573,7 @@ export function RoughCut() {
 
   const generate = async () => {
     if (!ks || !script.trim() || busy) return;
-    setBusy(true); setErr(null); setPlan(null); setElapsed(0);
+    setBusy(true); setErr(null); setPlan(null); setPlanCorrection(null); setElapsed(0);
     setRender(null); setRenderErr(null);
     if (renderPollRef.current) { clearInterval(renderPollRef.current); renderPollRef.current = null; }
 
@@ -561,7 +588,7 @@ export function RoughCut() {
       setNodeHistory([]);
       recordNode("runtime");
       const wrapped = `${AGENT_INSTRUCTIONS}\n\n---\n\nBrief:\n${script.trim()}\n\nKnowledge store id: ${ks._id}\n\nGo.`;
-      const full = await streamTurn(ks._id, wrapped, sid, updateLastAssistant, trackEvent);
+      const full = await streamTurn(ks._id, wrapped, sid, updateLastAssistant, trackEvent, setPlanCorrection);
 
       // Prose-only is a legitimate first response: the agent may legitimately
       // bail out (empty index, ambiguous brief, missing KS context) and reply
@@ -601,7 +628,10 @@ export function RoughCut() {
     if (!ks || !followup.trim() || busy) return;
     const text = followup.trim();
     setFollowup("");
-    setBusy(true); setErr(null);
+    // Clear any stale correction chip from the prior turn — if the
+    // follow-up emits its own correction_note the stream handler will
+    // repopulate; otherwise the current plan is treated as clean.
+    setBusy(true); setErr(null); setPlanCorrection(null);
 
     const sid = sessionId || newSessionId();
     if (!sessionId) setSessionId(sid);
@@ -620,7 +650,7 @@ export function RoughCut() {
       const wrapped = plan
         ? `[ks: ${ks._id}]\n\n[CURRENT PLAN]\n<plan>\n${JSON.stringify(plan, null, 2)}\n</plan>\n\n[FOLLOWUP]\n${text}`
         : `${AGENT_INSTRUCTIONS}\n\n---\n\n[ks: ${ks._id}]\n\n[FOLLOWUP]\n${text}`;
-      const full = await streamTurn(ks._id, wrapped, sid, updateLastAssistant, trackEvent);
+      const full = await streamTurn(ks._id, wrapped, sid, updateLastAssistant, trackEvent, setPlanCorrection);
 
       const prose = stripPlanBlock(full);
       setMessages((m) => {
@@ -662,6 +692,7 @@ export function RoughCut() {
     setMessages([]);
     setSessionId("");
     setPlan(null);
+    setPlanCorrection(null);
     setActiveEntryId(null);
     setFollowup("");
     setErr(null);
@@ -675,6 +706,10 @@ export function RoughCut() {
     setErr(null);
     setRenderErr(null);
     setPlan(entry.plan);
+    // History entries don't persist the correction note yet — a restored
+    // plan is treated as clean. (Adding it to the history schema is
+    // follow-up work, not scope for this plumbing PR.)
+    setPlanCorrection(null);
     setMessages(entry.messages || []);
     setSessionId(entry.session_id || "");
     setFollowup("");
@@ -951,7 +986,22 @@ export function RoughCut() {
           {plan && (
             <div className="text-right">
               <div className="font-mono text-base">{fmtDuration(totalSec)}</div>
-              <div className="label">{plan.scenes.length} scenes · {clipCount} clips</div>
+              <div className="label flex items-center justify-end gap-2">
+                {planCorrection && (
+                  <span
+                    className="px-1.5 py-0.5 rounded-full font-mono text-[9px] uppercase tracking-wider"
+                    style={{
+                      background: "var(--color-surface)",
+                      border: "1px solid var(--color-rule)",
+                      color: "var(--color-cue)",
+                    }}
+                    title={planCorrection}
+                  >
+                    duration auto-corrected
+                  </span>
+                )}
+                <span>{plan.scenes.length} scenes · {clipCount} clips</span>
+              </div>
             </div>
           )}
         </div>

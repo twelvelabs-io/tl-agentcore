@@ -197,6 +197,55 @@ resource "aws_cloudfront_distribution" "frontend" {
     cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # CachingDisabled
   }
 
+  # /scores/* → HTTP API Gateway (scores lambda → scores DDB table).
+  # Surfaces the coherence + reference-validity judge rows per response
+  # id so the SPA can render them under the chat trace panel.
+  ordered_cache_behavior {
+    path_pattern             = "/scores/*"
+    target_origin_id         = "tl-proxy-http"
+    viewer_protocol_policy   = "redirect-to-https"
+    allowed_methods          = ["GET", "HEAD", "OPTIONS"]
+    cached_methods           = ["GET", "HEAD"]
+    compress                 = true
+    origin_request_policy_id = "b689b0a8-53d0-40ab-baf2-68738e2966ac" # AllViewer
+    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # CachingDisabled
+  }
+
+  ordered_cache_behavior {
+    path_pattern             = "/usage"
+    target_origin_id         = "tl-proxy-http"
+    viewer_protocol_policy   = "redirect-to-https"
+    allowed_methods          = ["GET", "HEAD", "OPTIONS"]
+    cached_methods           = ["GET", "HEAD"]
+    compress                 = true
+    origin_request_policy_id = "b689b0a8-53d0-40ab-baf2-68738e2966ac" # AllViewer
+    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # CachingDisabled
+  }
+
+  # /plugins and /plugins/* → HTTP API Gateway (plugins lambda).
+  # Distribution-Readiness plugin surface: CRUD for AgentCore Gateway
+  # targets. Two exact patterns, same two-pattern reason as /users.
+  ordered_cache_behavior {
+    path_pattern             = "/plugins"
+    target_origin_id         = "tl-proxy-http"
+    viewer_protocol_policy   = "redirect-to-https"
+    allowed_methods          = ["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"]
+    cached_methods           = ["GET", "HEAD"]
+    compress                 = false
+    origin_request_policy_id = "b689b0a8-53d0-40ab-baf2-68738e2966ac" # AllViewer
+    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # CachingDisabled
+  }
+  ordered_cache_behavior {
+    path_pattern             = "/plugins/*"
+    target_origin_id         = "tl-proxy-http"
+    viewer_protocol_policy   = "redirect-to-https"
+    allowed_methods          = ["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"]
+    cached_methods           = ["GET", "HEAD"]
+    compress                 = false
+    origin_request_policy_id = "b689b0a8-53d0-40ab-baf2-68738e2966ac" # AllViewer
+    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # CachingDisabled
+  }
+
   # /settings/* → HTTP API Gateway (settings lambda → kb_cache DDB).
   # View/edit the system prompts the agent + ingest pipeline use.
   ordered_cache_behavior {

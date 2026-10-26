@@ -24,9 +24,18 @@ import {
   resetPwd,
   type User,
 } from "../lib/users-api";
+import {
+  createPlugin,
+  deletePlugin,
+  fetchPlugins,
+  fetchUsage,
+  type FallbackSummary,
+  type Plugin,
+  type UsagePayload,
+} from "../lib/api";
 
 type Prompts = Record<PromptId, PromptInfo>;
-type TabId = "prompts" | "users";
+type TabId = "prompts" | "users" | "usage" | "plugins";
 
 export default function SettingsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   return (
@@ -77,7 +86,10 @@ function SettingsModalContent({ onClose }: { onClose: () => void }) {
           <div>
             <div className="label" style={{ color: "var(--color-cue)" }}>settings</div>
             <h2 className="font-display text-2xl mt-1">
-              {tab === "prompts" ? "System prompts" : "Users"}
+              {tab === "prompts" ? "System prompts"
+                : tab === "users" ? "Users"
+                : tab === "plugins" ? "Data sources"
+                : "Usage"}
             </h2>
             {tab === "prompts" && (
               <p className="font-mono text-[11px] mt-1" style={{ color: "var(--color-ink-faint)" }}>
@@ -94,11 +106,15 @@ function SettingsModalContent({ onClose }: { onClose: () => void }) {
           {showUsers && (
             <TabButton active={tab === "users"} onClick={() => setTab("users")}>Users</TabButton>
           )}
+          <TabButton active={tab === "usage"} onClick={() => setTab("usage")}>Usage</TabButton>
+          <TabButton active={tab === "plugins"} onClick={() => setTab("plugins")}>Data sources</TabButton>
         </div>
 
         <div className="flex-1 min-h-0 overflow-y-auto">
           {tab === "prompts" && <PromptsTab />}
           {tab === "users" && showUsers && <UsersTab />}
+          {tab === "usage" && <UsageTab />}
+          {tab === "plugins" && <PluginsTab />}
         </div>
       </motion.div>
     </motion.div>
@@ -573,6 +589,369 @@ function RowBtn({
   );
 }
 
+// ─── Usage tab ───────────────────────────────────────────────────────────────
+
+const USAGE_WINDOWS: { id: string; label: string; ms: number }[] = [
+  { id: "24h",  label: "last 24h", ms: 86_400_000 },
+  { id: "7d",   label: "last 7d",  ms: 7  * 86_400_000 },
+  { id: "30d",  label: "last 30d", ms: 30 * 86_400_000 },
+];
+
+function UsageTab() {
+  const [winId, setWinId] = useState<string>("24h");
+  const [data, setData] = useState<UsagePayload | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    const win = USAGE_WINDOWS.find((w) => w.id === winId)!;
+    const since = new Date(Date.now() - win.ms).toISOString();
+    setBusy(true); setErr(null);
+    fetchUsage({ since })
+      .then((p) => { if (!cancelled) { setData(p); setBusy(false); } })
+      .catch((e) => { if (!cancelled) { setErr(String(e?.message || e)); setBusy(false); } });
+    return () => { cancelled = true; };
+  }, [winId]);
+
+  return (
+    <section className="px-5 py-4">
+      <header className="flex items-baseline justify-between gap-4 pb-3">
+        <div>
+          <div className="label" style={{ color: "var(--color-cue)" }}>metering ledger</div>
+          <p className="font-mono text-[11px] mt-1" style={{ color: "var(--color-ink-faint)" }}>
+            per-model + per-tool activity for your signed-in sub · 90-day TTL on rows
+            {!isAdmin() && " · admin to query other users"}
+          </p>
+        </div>
+        <div className="flex items-center gap-1">
+          {USAGE_WINDOWS.map((w) => (
+            <TabButton key={w.id} active={winId === w.id} onClick={() => setWinId(w.id)}>
+              {w.label}
+            </TabButton>
+          ))}
+        </div>
+      </header>
+
+      {busy && (
+        <p className="caret font-display text-lg py-6" style={{ color: "var(--color-ink-soft)" }}>loading</p>
+      )}
+      {err && (
+        <div className="py-4">
+          <p className="font-display text-lg" style={{ color: "var(--color-status-failed)" }}>Couldn't load usage</p>
+          <p className="font-mono text-xs mt-2 break-all" style={{ color: "var(--color-ink-soft)" }}>{err}</p>
+        </div>
+      )}
+      {!busy && !err && data && <UsageBody data={data} />}
+    </section>
+  );
+}
+
+function UsageBody({ data }: { data: UsagePayload }) {
+  const { summary, events } = data;
+  const nothing = summary.model_invocations === 0 && summary.tool_calls === 0
+    && (summary.pipeline_fallbacks || 0) === 0;
+  if (nothing) {
+    return (
+      <p className="font-mono text-sm py-6" style={{ color: "var(--color-ink-soft)" }}>
+        No events in this window.
+      </p>
+    );
+  }
+
+  const modelRows = Object.entries(summary.by_model)
+    .sort((a, b) => b[1].invocations - a[1].invocations);
+  const toolRows = Object.entries(summary.by_tool)
+    .sort((a, b) => b[1].calls - a[1].calls);
+  // Fixed display order so retrieval always leads — makes the Jockey
+  // AGENT-4090 split visually obvious (how much of this tool traffic
+  // was retrieval vs analysis?). Unknown lands last; it covers rows
+  // written before the tool_category field existed.
+  const CATEGORY_ORDER = [
+    "retrieval", "analysis", "kb_read", "mutation",
+    "generation", "web", "other", "unknown",
+  ];
+  const categoryRows = CATEGORY_ORDER
+    .map((c) => [c, summary.by_category[c]] as const)
+    .filter(([, b]) => b && b.calls > 0);
+
+  return (
+    <div className="flex flex-col gap-6">
+      <div className="grid grid-cols-5 gap-4">
+        <Stat label="model turns"       value={fmtCount(summary.model_invocations)} />
+        <Stat label="tool calls"        value={fmtCount(summary.tool_calls)} />
+        <Stat label="tokens (in · out)" value={`${fmtCount(summary.total_input_tokens)} · ${fmtCount(summary.total_output_tokens)}`} />
+        <Stat
+          label="total cost"
+          value={summary.total_cost_usd === null ? "—" : fmtUsd(summary.total_cost_usd)}
+          hint={summary.unknown_cost_count > 0 ? `${summary.unknown_cost_count} unknown-price` : undefined}
+        />
+        <Stat
+          label="pipeline fallbacks"
+          value={fmtCount(summary.pipeline_fallbacks || 0)}
+          hint={
+            summary.model_invocations > 0 && (summary.pipeline_fallbacks || 0) > 0
+              ? `${Math.round(((summary.pipeline_fallbacks || 0) / summary.model_invocations) * 100)}% of turns`
+              : undefined
+          }
+        />
+      </div>
+
+      {modelRows.length > 0 && (
+        <div>
+          <div className="label pb-2" style={{ color: "var(--color-cue)" }}>by model</div>
+          <table className="w-full font-mono text-xs">
+            <thead style={{ color: "var(--color-ink-faint)" }}>
+              <tr>
+                <th className="text-left py-1">model</th>
+                <th className="text-right py-1">turns</th>
+                <th className="text-right py-1">in</th>
+                <th className="text-right py-1">out</th>
+                <th className="text-right py-1">cost</th>
+              </tr>
+            </thead>
+            <tbody>
+              {modelRows.map(([mid, b]) => (
+                <tr key={mid} className="border-t" style={{ borderColor: "var(--color-rule)" }}>
+                  <td className="py-1 pr-4 break-all">{mid}</td>
+                  <td className="text-right py-1 tabular-nums">{fmtCount(b.invocations)}</td>
+                  <td className="text-right py-1 tabular-nums">{fmtCount(b.input_tokens)}</td>
+                  <td className="text-right py-1 tabular-nums">{fmtCount(b.output_tokens)}</td>
+                  <td className="text-right py-1 tabular-nums">
+                    {b.unknown_cost ? "—" : fmtUsd(b.cost_usd)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {summary.fallbacks && summary.fallbacks.total > 0 && (
+        <FallbacksPanel fb={summary.fallbacks} />
+      )}
+
+      {categoryRows.length > 0 && (
+        <div>
+          <div className="label pb-2" style={{ color: "var(--color-cue)" }}>by category</div>
+          <table className="w-full font-mono text-xs">
+            <thead style={{ color: "var(--color-ink-faint)" }}>
+              <tr>
+                <th className="text-left py-1">category</th>
+                <th className="text-right py-1">calls</th>
+                <th className="text-right py-1">share</th>
+                <th className="text-right py-1">total ms</th>
+                <th className="text-right py-1">avg ms</th>
+              </tr>
+            </thead>
+            <tbody>
+              {categoryRows.map(([cat, b]) => (
+                <tr key={cat} className="border-t" style={{ borderColor: "var(--color-rule)" }}>
+                  <td className="py-1 pr-4">{cat}</td>
+                  <td className="text-right py-1 tabular-nums">{fmtCount(b.calls)}</td>
+                  <td className="text-right py-1 tabular-nums">
+                    {Math.round((b.calls / summary.tool_calls) * 100)}%
+                  </td>
+                  <td className="text-right py-1 tabular-nums">{fmtCount(b.duration_ms_total)}</td>
+                  <td className="text-right py-1 tabular-nums">
+                    {fmtCount(Math.round(b.duration_ms_total / b.calls))}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {toolRows.length > 0 && (
+        <div>
+          <div className="label pb-2" style={{ color: "var(--color-cue)" }}>by tool</div>
+          <table className="w-full font-mono text-xs">
+            <thead style={{ color: "var(--color-ink-faint)" }}>
+              <tr>
+                <th className="text-left py-1">tool</th>
+                <th className="text-right py-1">calls</th>
+                <th className="text-right py-1">total ms</th>
+                <th className="text-right py-1">avg ms</th>
+              </tr>
+            </thead>
+            <tbody>
+              {toolRows.map(([tn, b]) => (
+                <tr key={tn} className="border-t" style={{ borderColor: "var(--color-rule)" }}>
+                  <td className="py-1 pr-4">{tn}</td>
+                  <td className="text-right py-1 tabular-nums">{fmtCount(b.calls)}</td>
+                  <td className="text-right py-1 tabular-nums">{fmtCount(b.duration_ms_total)}</td>
+                  <td className="text-right py-1 tabular-nums">
+                    {fmtCount(Math.round(b.duration_ms_total / b.calls))}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div>
+        <div className="label pb-2 flex items-baseline justify-between" style={{ color: "var(--color-cue)" }}>
+          <span>recent events</span>
+          <span className="font-mono text-[10px]" style={{ color: "var(--color-ink-faint)" }}>
+            showing {events.length.toLocaleString()} newest in window
+          </span>
+        </div>
+        <table className="w-full font-mono text-[11px]">
+          <thead style={{ color: "var(--color-ink-faint)" }}>
+            <tr>
+              <th className="text-left py-1">when</th>
+              <th className="text-left py-1">kind</th>
+              <th className="text-left py-1">what</th>
+              <th className="text-right py-1">tokens / ms</th>
+              <th className="text-right py-1">cost</th>
+            </tr>
+          </thead>
+          <tbody>
+            {events.slice(0, 50).map((e) => (
+              <tr key={e.event_id} className="border-t align-top" style={{ borderColor: "var(--color-rule)" }}>
+                <td className="py-1 pr-4 whitespace-nowrap">{fmtEventWhen(e.sampled_at)}</td>
+                <td className="py-1 pr-2">
+                  {e.event_type === "model_invoke" ? "model" : "tool"}
+                </td>
+                <td className="py-1 pr-4 break-all">
+                  {e.event_type === "model_invoke" ? e.model_id : e.tool_name}
+                </td>
+                <td className="text-right py-1 tabular-nums whitespace-nowrap">
+                  {e.event_type === "model_invoke"
+                    ? `${fmtCount(e.input_tokens || 0)} / ${fmtCount(e.output_tokens || 0)}`
+                    : `${fmtCount(e.duration_ms || 0)} ms`}
+                </td>
+                <td className="text-right py-1 tabular-nums whitespace-nowrap">
+                  {e.event_type === "model_invoke"
+                    ? (e.cost_usd === null || e.cost_usd === undefined ? "—" : fmtUsd(e.cost_usd))
+                    : ""}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {events.length > 50 && (
+          <p className="font-mono text-[10px] mt-2" style={{ color: "var(--color-ink-faint)" }}>
+            {events.length - 50} older events hidden · widen the window to filter server-side
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function FallbacksPanel({ fb }: { fb: FallbackSummary }) {
+  const reasonRows = Object.entries(fb.by_reason)
+    .sort((a, b) => b[1] - a[1]);
+  const stageRows = Object.entries(fb.by_stage)
+    .sort((a, b) => b[1] - a[1]);
+  return (
+    <div
+      className="px-4 py-3"
+      style={{
+        background: "var(--color-surface)",
+        border: "1px solid var(--color-status-failed)",
+      }}
+    >
+      <div className="label pb-2" style={{ color: "var(--color-status-failed)" }}>
+        pipeline fallbacks
+      </div>
+      <p className="font-mono text-[11px] pb-3" style={{ color: "var(--color-ink-faint)" }}>
+        rewoo→react fallbacks mean the planner, executor, or solver hit an error and the
+        turn restarted on ReAct. Not fatal to the user, but each row is a bug or classifier
+        miss waiting to be fixed.
+      </p>
+      <div className="grid grid-cols-2 gap-6">
+        <div>
+          <div className="label pb-1" style={{ color: "var(--color-ink-faint)" }}>by reason</div>
+          <table className="w-full font-mono text-xs">
+            <tbody>
+              {reasonRows.map(([k, n]) => (
+                <tr key={k} className="border-t" style={{ borderColor: "var(--color-rule)" }}>
+                  <td className="py-1 pr-4">{k}</td>
+                  <td className="text-right py-1 tabular-nums">{fmtCount(n)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div>
+          <div className="label pb-1" style={{ color: "var(--color-ink-faint)" }}>by stage</div>
+          <table className="w-full font-mono text-xs">
+            <tbody>
+              {stageRows.map(([k, n]) => (
+                <tr key={k} className="border-t" style={{ borderColor: "var(--color-rule)" }}>
+                  <td className="py-1 pr-4">{k}</td>
+                  <td className="text-right py-1 tabular-nums">{fmtCount(n)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {fb.recent.length > 0 && (
+        <div className="pt-4">
+          <div className="label pb-1" style={{ color: "var(--color-ink-faint)" }}>recent</div>
+          <table className="w-full font-mono text-[11px]">
+            <thead style={{ color: "var(--color-ink-faint)" }}>
+              <tr>
+                <th className="text-left py-1">when</th>
+                <th className="text-left py-1">reason</th>
+                <th className="text-left py-1">stage</th>
+                <th className="text-left py-1">response_id</th>
+              </tr>
+            </thead>
+            <tbody>
+              {fb.recent.map((r) => (
+                <tr key={r.event_id} className="border-t align-top" style={{ borderColor: "var(--color-rule)" }}>
+                  <td className="py-1 pr-4 whitespace-nowrap">{fmtEventWhen(r.sampled_at)}</td>
+                  <td className="py-1 pr-4">
+                    <span title={r.reason_text || ""}>{r.reason_class || "other"}</span>
+                  </td>
+                  <td className="py-1 pr-4">{r.stage || "unknown"}</td>
+                  <td className="py-1 pr-4 break-all" style={{ color: "var(--color-ink-faint)" }}>
+                    {r.response_id || "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <div className="px-3 py-2" style={{ background: "var(--color-surface)", border: "1px solid var(--color-rule)" }}>
+      <div className="label" style={{ color: "var(--color-ink-faint)" }}>{label}</div>
+      <div className="font-display text-lg mt-1 tabular-nums">{value}</div>
+      {hint && (
+        <div className="font-mono text-[10px] mt-0.5" style={{ color: "var(--color-ink-faint)" }}>{hint}</div>
+      )}
+    </div>
+  );
+}
+
+function fmtCount(n: number): string {
+  return (n || 0).toLocaleString();
+}
+
+function fmtUsd(n: number): string {
+  if (n < 0.01) return `$${n.toFixed(4)}`;
+  if (n < 1)    return `$${n.toFixed(3)}`;
+  return `$${n.toFixed(2)}`;
+}
+
+function fmtEventWhen(iso: string): string {
+  // Short local time; keeps the recent-events table scannable.
+  const d = new Date(iso);
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
 // ─── shared utils ────────────────────────────────────────────────────────────
 
 function fmtRelative(unixSec: number): string {
@@ -588,4 +967,345 @@ function fmtRelative(unixSec: number): string {
 function unixOf(iso: string | number): number {
   if (typeof iso === "number") return iso;
   return Math.floor(new Date(iso).getTime() / 1000);
+}
+
+// ─── Data sources tab (plugin surface for Distribution-Readiness) ─────
+//
+// Lists every registered gateway target. Admins can add a new plugin
+// by pasting the Lambda ARN + an inline MCP tool_schema JSON blob;
+// non-admins see the list read-only. The seed plugin_echo target
+// (Terraform-owned) does NOT appear here — it lives on the gateway
+// but is not in the plugins DDB, so the admin surface stays focused
+// on customer-added sources.
+function PluginsTab() {
+  const admin = isAdmin();
+  const [plugins, setPlugins] = useState<Plugin[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  // "Add new" form state — common
+  const [showForm, setShowForm] = useState(false);
+  const [fName, setFName]       = useState("");
+  const [fDesc, setFDesc]       = useState("");
+  const [fTargetType, setFTargetType] = useState<"lambda" | "openapi">("openapi");
+  const [fErr, setFErr]         = useState<string | null>(null);
+
+  // Lambda-target state
+  const [fArn, setFArn]         = useState("");
+  const [fSchema, setFSchema]   = useState("");
+
+  // OpenAPI-target state
+  const [fUrl, setFUrl]           = useState("");
+  const [fOpenapi, setFOpenapi]   = useState("");
+  const [fAuthType, setFAuthType] = useState<"none" | "api_key" | "bearer" | "basic">("none");
+  const [fAuthCred, setFAuthCred] = useState("");
+  const [fAuthHdr, setFAuthHdr]   = useState("X-API-Key");
+
+  async function reload() {
+    try {
+      setErr(null);
+      const p = await fetchPlugins();
+      setPlugins(p);
+    } catch (e: any) {
+      setErr(String(e?.message || e));
+      setPlugins([]);
+    }
+  }
+  useEffect(() => { reload(); }, []);
+
+  function resetForm() {
+    setFName(""); setFDesc("");
+    setFArn(""); setFSchema("");
+    setFUrl(""); setFOpenapi("");
+    setFAuthType("none"); setFAuthCred(""); setFAuthHdr("X-API-Key");
+    setFErr(null);
+  }
+
+  async function onAdd() {
+    setFErr(null);
+    setBusy(true);
+    try {
+      if (fTargetType === "lambda") {
+        let schema: unknown;
+        try {
+          schema = JSON.parse(fSchema);
+        } catch {
+          setFErr("tool_schema must be valid JSON");
+          setBusy(false);
+          return;
+        }
+        await createPlugin({
+          target_type: "lambda",
+          name:        fName.trim(),
+          description: fDesc.trim(),
+          lambda_arn:  fArn.trim(),
+          tool_schema: schema,
+        });
+      } else {
+        // OpenAPI mode — parse schema (JSON), validate shape loosely.
+        let schema: Record<string, unknown>;
+        try {
+          schema = JSON.parse(fOpenapi);
+        } catch {
+          setFErr("openapi_schema must be valid JSON");
+          setBusy(false);
+          return;
+        }
+        if (fAuthType !== "none" && !fAuthCred.trim()) {
+          setFErr(`auth_credential is required for ${fAuthType}`);
+          setBusy(false);
+          return;
+        }
+        await createPlugin({
+          target_type:      "openapi",
+          name:             fName.trim(),
+          description:      fDesc.trim(),
+          endpoint_url:     fUrl.trim(),
+          openapi_schema:   schema,
+          auth_type:        fAuthType,
+          auth_credential:  fAuthType === "none" ? undefined : fAuthCred,
+          auth_header_name: fAuthType === "api_key" ? fAuthHdr.trim() : undefined,
+        });
+      }
+      resetForm();
+      setShowForm(false);
+      await reload();
+    } catch (e: any) {
+      setFErr(String(e?.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onDelete(id: string, name: string) {
+    if (!confirm(`Remove plugin "${name}"? This also deletes its gateway target and any stored credential.`)) return;
+    setBusy(true);
+    try {
+      await deletePlugin(id);
+      await reload();
+    } catch (e: any) {
+      setErr(String(e?.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const inputCls = "px-2 py-1.5 text-sm font-mono";
+  const inputStyle = { background: "var(--color-paper)", border: "1px solid var(--color-rule)" } as const;
+
+  return (
+    <div className="p-5">
+      <div className="flex items-baseline justify-between mb-4">
+        <p className="text-sm" style={{ color: "var(--color-ink-soft)" }}>
+          Pluggable data sources the agent calls over MCP. Each row is one AgentCore Gateway target —
+          an in-account Lambda, or an external HTTPS API registered with its OpenAPI schema and the
+          auth header Gateway should inject on every call.
+        </p>
+        {admin && (
+          <button
+            className="label hover:text-[var(--color-cue)]"
+            onClick={() => setShowForm((v) => !v)}
+          >
+            {showForm ? "cancel" : "+ add plugin"}
+          </button>
+        )}
+      </div>
+
+      {err && (
+        <div className="mb-3 p-3 text-xs font-mono" style={{ background: "#2a1818", color: "#ffb0b0" }}>
+          {err}
+        </div>
+      )}
+
+      {showForm && admin && (
+        <div className="mb-5 p-4" style={{ background: "var(--color-surface)", border: "1px solid var(--color-rule)" }}>
+          <div className="label mb-2">new plugin</div>
+
+          {/* Target type picker */}
+          <div className="mb-3 flex gap-2 text-xs">
+            {(["openapi", "lambda"] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => setFTargetType(t)}
+                className="px-3 py-1 font-mono"
+                style={{
+                  background: fTargetType === t ? "var(--color-cue)" : "var(--color-paper)",
+                  color: fTargetType === t ? "#000" : "var(--color-ink-soft)",
+                  border: "1px solid var(--color-rule)",
+                }}
+              >
+                {t === "openapi" ? "OpenAPI / HTTPS" : "Lambda (in-account)"}
+              </button>
+            ))}
+          </div>
+
+          {/* Common fields */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+            <input
+              className={inputCls} style={inputStyle}
+              placeholder="name (gateway target name, kebab/alnum)"
+              value={fName}
+              onChange={(e) => setFName(e.target.value)}
+            />
+            <input
+              className={inputCls} style={inputStyle}
+              placeholder="description (optional)"
+              value={fDesc}
+              onChange={(e) => setFDesc(e.target.value)}
+            />
+          </div>
+
+          {fTargetType === "lambda" ? (
+            <>
+              <input
+                className={`w-full mb-3 ${inputCls}`} style={inputStyle}
+                placeholder="lambda_arn (arn:aws:lambda:...)"
+                value={fArn}
+                onChange={(e) => setFArn(e.target.value)}
+              />
+              <textarea
+                className={`w-full mb-3 ${inputCls} text-xs`}
+                style={{ ...inputStyle, minHeight: 160 }}
+                placeholder={`tool_schema (JSON — gateway inlinePayload shape, see plugin-echo-target.tf). Example:\n{\n  "name": "my_tool",\n  "description": "...",\n  "inputSchema": {"type": "object", "properties": [...]},\n  "outputSchema": {"type": "object", "properties": [...]}\n}`}
+                value={fSchema}
+                onChange={(e) => setFSchema(e.target.value)}
+              />
+            </>
+          ) : (
+            <>
+              <input
+                className={`w-full mb-3 ${inputCls}`} style={inputStyle}
+                placeholder="endpoint_url (https://api.example.com — ignored when the OpenAPI 'servers' list is set)"
+                value={fUrl}
+                onChange={(e) => setFUrl(e.target.value)}
+              />
+              <textarea
+                className={`w-full mb-3 ${inputCls} text-xs`}
+                style={{ ...inputStyle, minHeight: 180 }}
+                placeholder={`openapi_schema (JSON — OpenAPI 3.x spec). The agent discovers one tool per operation. Example:\n{\n  "openapi": "3.0.0",\n  "info": {"title": "Deliverables inventory", "version": "1.0"},\n  "servers": [{"url": "https://..."}],\n  "paths": {\n    "/deliverables": {\n      "get": {\n        "operationId": "list_deliverables",\n        "parameters": [...],\n        "responses": {"200": {"description": "...", "content": {...}}}\n      }\n    }\n  }\n}`}
+                value={fOpenapi}
+                onChange={(e) => setFOpenapi(e.target.value)}
+              />
+
+              {/* Auth picker */}
+              <div className="label mb-1">auth</div>
+              <div className="mb-3 flex gap-2 text-xs flex-wrap">
+                {(["none", "api_key", "bearer", "basic"] as const).map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => setFAuthType(t)}
+                    className="px-3 py-1 font-mono"
+                    style={{
+                      background: fAuthType === t ? "var(--color-cue)" : "var(--color-paper)",
+                      color: fAuthType === t ? "#000" : "var(--color-ink-soft)",
+                      border: "1px solid var(--color-rule)",
+                    }}
+                  >
+                    {t === "none" ? "none" : t.replace("_", "-")}
+                  </button>
+                ))}
+              </div>
+
+              {fAuthType === "api_key" && (
+                <input
+                  className={`w-full mb-2 ${inputCls}`} style={inputStyle}
+                  placeholder="auth_header_name (default: X-API-Key)"
+                  value={fAuthHdr}
+                  onChange={(e) => setFAuthHdr(e.target.value)}
+                />
+              )}
+              {fAuthType !== "none" && (
+                <input
+                  className={`w-full mb-3 ${inputCls}`} style={inputStyle}
+                  type="password"
+                  autoComplete="off"
+                  placeholder={
+                    fAuthType === "basic"
+                      ? "credential (user:password — base64-encoded before storage)"
+                      : fAuthType === "bearer"
+                        ? "credential (bearer token — 'Bearer ' prefix added by gateway)"
+                        : "credential (api key — injected verbatim)"
+                  }
+                  value={fAuthCred}
+                  onChange={(e) => setFAuthCred(e.target.value)}
+                />
+              )}
+            </>
+          )}
+
+          {fErr && (
+            <div className="mb-3 p-2 text-xs font-mono" style={{ background: "#2a1818", color: "#ffb0b0" }}>
+              {fErr}
+            </div>
+          )}
+          <button
+            className="px-4 py-1.5 text-sm"
+            style={{ background: "var(--color-cue)", color: "#000" }}
+            disabled={
+              busy || !fName ||
+              (fTargetType === "lambda"
+                ? (!fArn || !fSchema)
+                : (!fUrl || !fOpenapi))
+            }
+            onClick={onAdd}
+          >
+            {busy ? "creating…" : "create plugin"}
+          </button>
+        </div>
+      )}
+
+      {plugins === null ? (
+        <div className="text-sm" style={{ color: "var(--color-ink-faint)" }}>loading…</div>
+      ) : plugins.length === 0 ? (
+        <div className="text-sm" style={{ color: "var(--color-ink-faint)" }}>
+          No customer plugins yet. {admin && "Add one above to expose a new data source to the agent."}
+        </div>
+      ) : (
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="label" style={{ borderBottom: "1px solid var(--color-rule)" }}>
+              <th className="text-left py-2">name</th>
+              <th className="text-left py-2">kind</th>
+              <th className="text-left py-2">endpoint</th>
+              <th className="text-left py-2">auth</th>
+              <th className="text-left py-2">added</th>
+              {admin && <th className="text-right py-2">·</th>}
+            </tr>
+          </thead>
+          <tbody>
+            {plugins.map((p) => (
+              <tr key={p.plugin_id} style={{ borderBottom: "1px solid var(--color-rule)" }}>
+                <td className="py-2 font-mono">{p.name}</td>
+                <td className="py-2 text-xs font-mono" style={{ color: "var(--color-ink-faint)" }}>
+                  {p.target_type}
+                </td>
+                <td className="py-2 font-mono text-xs" style={{ color: "var(--color-ink-faint)" }}>
+                  {p.target_type === "lambda"
+                    ? p.lambda_arn.split(":").pop()
+                    : (p.endpoint_url.length > 56 ? p.endpoint_url.slice(0, 55) + "…" : p.endpoint_url)}
+                </td>
+                <td className="py-2 text-xs font-mono" style={{ color: "var(--color-ink-faint)" }}>
+                  {p.target_type === "lambda" ? "iam" : p.auth_type}
+                </td>
+                <td className="py-2 text-xs" style={{ color: "var(--color-ink-faint)" }}>
+                  {p.created_at ? fmtEventWhen(p.created_at) : "—"}
+                </td>
+                {admin && (
+                  <td className="py-2 text-right">
+                    <button
+                      className="label hover:text-[#ffb0b0]"
+                      disabled={busy}
+                      onClick={() => onDelete(p.plugin_id, p.name)}
+                    >
+                      remove
+                    </button>
+                  </td>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
 }

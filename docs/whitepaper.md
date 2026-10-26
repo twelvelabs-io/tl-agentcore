@@ -10,23 +10,29 @@ conversational: a brief in natural language returns an Edit Decision
 List (EDL) of clips; a follow-up question gets a grounded prose answer;
 a *"find me more of this person"* finds them across the entire library.
 Underneath, **every model and every store lives inside the customer's
-AWS account**. Marengo 3.0 (clip embeddings), Pegasus 1.2 (clip
-analysis), Titan Multimodal (image embeddings for Re-ID), and Claude 4
-(reasoning + clustering) are all invoked through Bedrock — the
-TwelveLabs models via Bedrock Marketplace, billed through the customer's
-AWS account with no separate SaaS sign-up. ANN retrieval is S3 Vectors.
-The agent runs on Bedrock AgentCore Runtime, which terminates the
-browser WebSocket **directly** — no chat-lambda hop, no API Gateway in
-the live path. The customer-deployed surface is a Strands agent
-container (arm64), six support lambdas (`kb_admin`, `kb_graph`,
-`presign_upload`, `embed_clip_start`, `asset_profile`, `ks_rollup`), a
-SageMaker Async Inference Endpoint for the Re-ID worker, a MediaConvert
-HLS transcode pipeline, and the S3 buckets / DynamoDB tables that hold
-the clips, the vectors, and the asset registry. **The full
-"upload-to-ready" pipeline is automatic** — no operator scripts
-required between dropping an MP4 in the UI and the agent having a
-Pegasus profile + cross-asset entity graph for it. Nothing — not even the knowledge-store catalog
-— talks to api.twelvelabs.io on the live path.
+AWS account**. Marengo 3.0 (clip embeddings), Pegasus 1.5 (clip
+analysis — the same model as SaaS Pegasus 1.6 under the hood), Claude
+Sonnet 4.6 (reasoning + online judges), and Rekognition Faces +
+Marengo image-embed (hybrid Re-ID) are all invoked through Bedrock —
+the TwelveLabs models via Bedrock Marketplace, billed through the
+customer's AWS account with no separate SaaS sign-up. ANN retrieval is
+S3 Vectors. The agent runs on Bedrock AgentCore Runtime, which
+terminates the browser WebSocket **directly** — no chat-lambda hop,
+no API Gateway in the live path. The customer-deployed surface is a
+Strands agent container (arm64), a handful of support lambdas
+(`kb_admin`, `kb_graph`, `presign_upload`, `embed_clip_start`,
+`embed_clip_finalize`, `hls_finalize`, `asset_profile`,
+`enrich_comprehend`, `enrich_transcribe_start`, `index_faces`,
+`ks_rollup`, `graph_backfill`, `mining_run`, `settings`, `stitch`,
+`users`, `scores`), a Neptune Analytics graph for the entity + event
+layer, a MediaConvert HLS transcode pipeline, and the S3 buckets /
+DynamoDB tables that hold the clips, the vectors, the asset registry,
+the per-asset profiles, the online judge rows, and the metering
+ledger. **The full "upload-to-ready" pipeline is automatic** — no
+operator scripts required between dropping an MP4 in the UI and the
+agent having a Pegasus profile + cross-asset entity graph for it.
+Nothing — not even the knowledge-store catalog — talks to
+api.twelvelabs.io on the live path.
 
 The worked example is a **Rough Cut / Highlight Reel studio**: a
 producer types a brief in natural language and the agent returns an
@@ -60,10 +66,15 @@ as `[CURRENT PLAN] <plan>{...}</plan> [FOLLOWUP] {...}`, so the agent
 always reasons over the current state of the cut. The browser
 WebSocket is now the AgentCore Runtime's native `/ws` endpoint
 (authenticated with a Cognito JWT carried in the
-`Sec-WebSocket-Protocol` subprotocol). Each agent yield becomes a JSON
-text frame — `tool_call`, `tool_result`, `text_delta`, `result` — so
-the producer sees the agent reason in wall-clock order rather than as
-a 60-second spinner.
+`Sec-WebSocket-Protocol` subprotocol). The wire format follows the
+OpenAI Open-Responses taxonomy — each yield becomes a JSON frame of
+one of `response.created`, `response.output_item.added`,
+`response.output_text.delta`, `response.output_text.done`,
+`response.output_item.done`, `response.activity` (human-readable
+"doing X now" narration for every tool call plus pipeline / preseed /
+rewoo stage lines), `response.keepalive`, `response.completed`, or
+`response.failed`. The producer sees the agent reason in wall-clock
+order rather than as a 60-second spinner.
 
 ---
 
@@ -127,7 +138,7 @@ flowchart TD
 
     MC["<b>AWS Elemental MediaConvert</b><br/>HLS transcode"]
     Marengo["<b>Bedrock · Marengo 3.0</b>"]
-    Pegasus["<b>Bedrock · Pegasus 1.2</b>"]
+    Pegasus["<b>Bedrock · Pegasus 1.5</b>"]
     Titan["<b>Bedrock · Titan Multimodal</b>"]
     Claude["<b>Bedrock · Claude</b><br/>sonnet 4.6 (reason) · haiku 4.5 (cluster)"]
 
@@ -246,7 +257,7 @@ the cheap tools cannot.
 |---|---|---|---|---|
 | **0 · retrieval** | `vector_search`, `find_entity_by_image` | S3 Vectors (clips · entity-thumbs · entity-patches) | 250–400 ms per call | Beat-phrase → clip rank; image → similar-entity rank |
 | **1 · cache** | `get_kb_overview`, `list_kb_assets`, `lookup_asset_profile`, `list_kb_events`, `lookup_event`, `find_cached_entity_appearances`, `list_cached_entities`, `lookup_rights`, `list_audiences`, `lookup_audience` | DynamoDB (`kb_cache`, `rights`, `audiences`) | 10–40 ms | "What's in this KS?", "who appears in asset X?", "what events span the corpus?", rights / audience filters |
-| **2 · analyze** | `pegasus_analyze` | Bedrock Pegasus 1.2 → S3 clips | 3–15 s | Ground a follow-up in what the model actually sees on screen |
+| **2 · analyze** | `pegasus_analyze` | Bedrock Pegasus 1.5 → S3 clips | 3–15 s | Ground a follow-up in what the model actually sees on screen |
 
 Tier 1 is the workhorse on conversational follow-ups. *"Who else
 appears in this asset?"* and *"is this clip in our rights window?"*
@@ -394,7 +405,7 @@ shots feel similar?"). Pass the clip's `asset_id` as `target` and the
 question as `prompt`; the response is grounding text the agent
 paraphrases back to the producer.
 
-This routes to **Bedrock Pegasus 1.2** reading
+This routes to **Bedrock Pegasus 1.5** reading
 `s3://CLIPS_BUCKET_NAME/clips/<asset_id>.mp4` directly — no URL
 download, the model reads the S3 object with the runtime's IAM role.
 The agent only invokes Bedrock; there is no TwelveLabs HTTP path on
@@ -453,6 +464,64 @@ the chat view and extracted onto the timeline when the turn finishes.
 A "new cut" button discards the conversation and starts a fresh
 session.
 
+### 4.5 Orchestration + observability layer
+
+A wave of 2026-10 additions moves the runtime up a layer: the agent
+is no longer a bare ReAct loop with a tool catalog, it carries its own
+pipeline selection, pre-flight context seeding, in-session identity
+compression, online quality scoring, and a per-call cost ledger. Every
+feature below runs unconditionally — there is no ship-dark toggle to
+flip on later; the only knobs are config values that name a provider
+or model id.
+
+- **Pipeline selection + ReWOO.** `pipelines/router.py` classifies
+  each turn into INFORMATIONAL (routed to a planner → executor →
+  solver ReWOO pipeline with a bounded round-trip count),
+  STRUCTURAL (classic ReAct for plan edits), or AMBIGUOUS (ReAct
+  with a clarifying question). ReWOO's executor transparently falls
+  back to ReAct on any error — the user never sees a failure. The
+  `response.completed.tool_path` field surfaces which pipeline ran.
+- **Synthetic tool-call injection.** Every turn with a knowledge
+  store pre-executes `get_kb_overview` + `list_kb_assets` for the
+  current KS in parallel and splices synthetic
+  tool_use + tool_result messages into `agent.messages` before
+  `stream_async`. The model's first move can then be the actual
+  answer instead of two near-reflex lookups.
+- **ID aliases.** 24-hex `asset_id` values on tool fanout results
+  are rewritten to short `@id_N` handles bound per-turn via a
+  `ContextVar`. Final text re-expands the handles before the UI,
+  duration enforcer, and judges see them. Saves ~600 tokens per
+  25-clip retrieval.
+- **Online judges.** `scoring/judge_runner.py` dispatches a Sonnet
+  4.6 coherence judge + a deterministic reference-validity judge
+  fire-and-forget at end-of-turn — every turn, no sampling gate.
+  Rows land in a `scores` DDB table keyed by
+  `(response_id, judge_name)` with 90-day TTL. The SPA reads them
+  through the `/scores/{response_id}` lambda and renders a judge
+  panel under each turn.
+- **Metering ledger.** `metering/ledger.py` writes one row per
+  Bedrock model invocation + per in-process tool call to a
+  `usage_events` DDB table keyed by `(user_id, event_id)`. Prices
+  for the cost column live in SSM Parameter Store under
+  `/tl-agentcore/prices/<model_id>` (JSON blob with `input_per_mtok`
+  and `output_per_mtok`) with a 15 min per-process cache, so ops
+  bumps rates without a redeploy.
+- **Hosted web search.** The `web_search` tool wraps a provider
+  adapter picked by the `WEB_SEARCH_PROVIDER` env var: `brave`
+  (default — adapter in `web_search/brave.py`) or `none` (disables
+  the tool with an explanatory error). API keys live in SSM
+  SecureStrings at `/tl-agentcore/web-search/<provider>`.
+- **QA-item.** A per-asset question-answer tool with a kb_cache row
+  per `(asset_id, modality, window, normalized_question)`. Repeat
+  questions over the same clip collapse from a $0.001 Pegasus call
+  to a sub-10 ms DDB `GetItem`.
+
+The user-visible slice is the SPA's `§ Trace` and `§ Judges` strips
+under each agent turn: pipeline + preseed + rewoo stage lines plus
+per-tool "doing X" narration from `activity_narrator.py` on the
+trace side, coherence + reference-validity scores with a colored
+pill (4-5 cue / 3 soft / ≤2 failed / null faint) on the judges side.
+
 ---
 
 ## 5 · Offline tier — ingest pipelines
@@ -510,7 +579,7 @@ between per-asset (cheap, hot) and cross-asset (expensive, batchable):
 flowchart LR
     Trig["S3 ObjectCreated<br/>clips/&lt;asset_id&gt;.mp4"]
     Prof["<b>asset_profile λ</b><br/>per upload"]
-    Pegasus["<b>Bedrock · Pegasus 1.2</b><br/>InvokeModel · per asset"]
+    Pegasus["<b>Bedrock · Pegasus 1.5</b><br/>InvokeModel · per asset"]
     Asset[("DDB · ASSET#&lt;id&gt;<br/>synopsis · entities · mood · style")]
     EB["EventBridge<br/>rate(4 hours)"]
     Roll["<b>ks_rollup λ</b><br/>per KS"]
@@ -539,7 +608,7 @@ flowchart LR
 ```
 
 `asset_profile` fires the moment a new MP4 lands in `clips/`. It calls
-Bedrock Pegasus 1.2 with a structured-output prompt asking for
+Bedrock Pegasus 1.5 with a structured-output prompt asking for
 `{title, one_liner, mood_tags, primary_subjects, visual_style,
 role_hint, key_entities: [{name, kind, appears}]}` and writes that as
 one `ASSET#<asset_id>` row in `kb_cache`. Per-asset, per-upload,
@@ -562,6 +631,18 @@ becomes a `kind = animal` query against `ENTITY#*` rows; *"who appears
 in this asset"* becomes a single `ASSET#<asset_id>` get.
 
 ### 5.3 Entity Re-ID — real CV on a SageMaker Async Inference Endpoint
+
+> **Note:** this section describes the v0.3-era pipeline. v0.4
+> replaced it with a Rekognition Faces + Marengo image-embed hybrid
+> (per the 4-way evaluation in `docs/v0.4-plan.md`: Rekognition Faces
+> hit MRR 0.77 on trailers vs. 0.50 for Titan, and Marengo image
+> queries against the already-populated clips index gave a free
+> fallback for non-face content). The current reference implementation
+> no longer ships the Grounding DINO + DeepSORT + Titan + SageMaker
+> stack described below — it's preserved here as a legitimate
+> AWS-native CV pattern worth remembering. See CLAUDE.md §
+> "Phase 3 v0.4: Rekognition + Marengo hybrid image search" for the
+> current `find_by_image` implementation.
 
 The Phase 3-proper path. A genuine computer-vision pipeline runs over
 every asset to extract person/animal/object identities at the pixel
@@ -772,7 +853,7 @@ runtime container makes only AWS calls on the per-turn path:
 | Reasoning (clustering, summaries) | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | InvokeModel |
 | Marengo text embed (vector_search) | `twelvelabs.marengo-embed-3-0-v1:0` | InvokeModel (sync, text) |
 | Marengo video embed (ingest) | `twelvelabs.marengo-embed-3-0-v1:0` | StartAsyncInvoke (S3 in, S3 out) |
-| Pegasus analyze | `us.twelvelabs.pegasus-1-2-v1:0` | InvokeModel (sync, S3 in) |
+| Pegasus analyze | `us.twelvelabs.pegasus-1-5-v1:0` | InvokeModel (sync, S3 in) |
 | Titan Multimodal image embed | `amazon.titan-embed-image-v1` | InvokeModel (sync, image) |
 
 Operational requirement: Bedrock's TwelveLabs models accept media as
@@ -840,33 +921,44 @@ tool catalog stay identical across verticals.
 
 The companion repository contains:
 
-- `agent/` — Strands agent and 14 tools (Python, packaged into the
-  arm64 AgentCore Runtime container). Single-source `runtime.py`
-  exposes both `@app.entrypoint` (SSE, legacy) and `@app.websocket`
-  (native, current) handlers sharing one event generator.
+- `agent/` — Strands agent and the full tool catalog (Python, packaged
+  into the arm64 AgentCore Runtime container). Single-source
+  `runtime.py` exposes both `@app.entrypoint` (SSE, legacy) and
+  `@app.websocket` (native, current) handlers sharing one event
+  generator. Pipeline selection (ReWOO / ReAct), preseed, aliases,
+  judges, metering, QA cache, and web search ship as sibling
+  modules under `agent/tl_agentcore/` and plug into the runtime's
+  stream loop.
 - `lambda/` — `kb_admin` (HTTP /kb/* · KS + assets CRUD over DDB),
-  `kb_graph` (HTTP /kb-graph · knowledge-graph payload),
+  `kb_graph` (HTTP /kb-graph · knowledge-graph payload from Neptune),
   `presign_upload` (HTTP /upload/presign · S3 PUT URL),
   `embed_clip_start` (HTTP /upload/embed · mints asset_id, kicks off
   MediaConvert + Marengo), `hls_finalize` (S3-triggered · flips asset
   row to "ready" + stamps size/duration/thumbnail when HLS lands),
   `embed_clip_finalize` (S3-triggered · writes Marengo vectors into
-  S3 Vectors), `asset_profile` (S3-triggered · runs Pegasus per upload,
-  writes kb_cache `ASSET#` row), `ks_rollup` (EventBridge 4h ·
-  cross-asset entity aggregation + OVERVIEW + event clustering),
-  `stitch` (HTTP /stitch · MediaConvert preview render), `chat` (legacy
-  WS relay, scheduled for removal in a follow-up), and the two Re-ID
-  pipeline lambdas (`entity_reid_invoke_async`,
-  `entity_reid_embed_patches`).
-- `expert-models/gdino/` — Triton 22.12 + HF GroundingDINO + DeepSORT
-  + Re-ID Triton container for the SageMaker Async Inference Endpoint.
+  S3 Vectors), `asset_profile` (S3-triggered · runs Pegasus per
+  upload, writes kb_cache `ASSET#` row), `enrich_comprehend` and
+  `enrich_transcribe_start` (S3-triggered · entity + ASR enrichment,
+  writes to the Neptune graph), `index_faces` (per-KS Rekognition
+  face indexing), `ks_rollup` (EventBridge 4h · cross-asset entity
+  aggregation + OVERVIEW + event clustering), `graph_backfill`
+  (one-shot backfill of the Neptune graph from kb_cache),
+  `mining_run` (EventBridge Scheduler · runs saved jockey plans on
+  cron), `settings` (HTTP /settings/* · system-prompt view/edit),
+  `stitch` (HTTP /stitch* · MediaConvert preview render), `users`
+  (HTTP /users* · Cognito user management), and `scores` (HTTP
+  /scores/{response_id} · surfaces online judge rows for the SPA
+  trace panel).
 - `infra/` — Terraform stack: AgentCore Runtime + JWT authorizer,
-  S3 Vectors indexes (clips · entity-thumbs · entity-patches),
-  DynamoDB tables (knowledge_stores · assets · kb_cache · rights ·
-  audiences), Cognito user pool + hosted UI, CloudFront + S3 bucket
-  for the SPA, MediaConvert HLS service role, HTTP API Gateways
-  for the support lambdas, Step Functions + SageMaker Async Endpoint
-  + ECR + CodeBuild for the Re-ID pipeline.
+  S3 Vectors indexes (clips with per-modality visual/audio/
+  transcription embeddings), DynamoDB tables (knowledge_stores ·
+  assets · kb_cache · rights · audiences · sessions · memories ·
+  artifacts · jockey_plans · jockey_runs · scores · usage_events),
+  Neptune Analytics graph for the entity + event layer, SSM
+  Parameter Store paths for pricing and web-search keys, Cognito
+  user pool + hosted UI, CloudFront + S3 bucket for the SPA,
+  MediaConvert HLS service role, and HTTP API Gateway routes for
+  every support lambda above.
 - `ui/` — React + Vite SPA with the Rough Cut tab, the Agent tab
   (live tool-lane diagram), the Library tab (asset CRUD + upload),
   the Graph tab (3D force-directed knowledge graph), and a Playwright

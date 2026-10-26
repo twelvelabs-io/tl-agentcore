@@ -116,7 +116,7 @@ export function LiveArchDiagram({
           <ArchCardInner compact state={stateOf("s3vectors_index")} tag="store" title="S3 Vectors" sub="clips · entity-thumbs · entity-patches" highlightAlways />
         </div>
         <div className="flex flex-col items-center">
-          <ArchCardInner compact state={stateOf("pegasus_tool")} tag="tier 2 · analyze" title="pegasus_analyze" sub="Bedrock Pegasus 1.2" highlightAlways />
+          <ArchCardInner compact state={stateOf("pegasus_tool")} tag="tier 2 · analyze" title="pegasus_analyze" sub="Bedrock Pegasus 1.5" highlightAlways />
           <ArchArrow active={activeNode === "clips_bucket"} label="reads s3Location" />
           <ArchCardInner compact state={stateOf("clips_bucket")} tag="store" title="S3 · clips bucket" sub="mirrored asset bytes + HLS bundles" highlightAlways />
         </div>
@@ -332,19 +332,22 @@ const CACHE_TOOLS = new Set([
   "list_kb_events", "lookup_event",
 ]);
 
+// Accepts the Open-Responses event shape directly; `tool` is sniffed from
+// a `response.output_item.added`/`done` for a function_call item.
 export function nodeForEvent(ev: { type: string; tool?: string }): NodeId | null {
-  if (ev.type === "session") return "runtime";
-  if (ev.type === "tool_call") {
+  if (ev.type === "response.created") return "runtime";
+  if (ev.type === "response.output_item.added" || ev.type === "response.output_item.done") {
     const t = ev.tool || "";
+    if (!t) return "runtime";
     if (t === "vector_search" || t === "find_by_image") return "vector_search_tool";
-    if (t === "pegasus_analyze") return "pegasus_tool";
+    if (t === "pegasus_analyze" || t === "pegasus_segments") return "pegasus_tool";
     if (CACHE_TOOLS.has(t)) return "cache_tool";
     return "runtime";
   }
-  if (ev.type === "tool_result") return "runtime";
-  if (ev.type === "rationale") return "runtime";
-  if (ev.type === "text_delta") return "runtime";
-  if (ev.type === "done") return "browser";
+  if (ev.type === "response.output_text.delta") return "runtime";
+  if (ev.type === "response.output_text.done") return "runtime";
+  if (ev.type === "response.keepalive") return null;      // no node highlight for liveness pings
+  if (ev.type === "response.completed") return "browser";
   return null;
 }
 

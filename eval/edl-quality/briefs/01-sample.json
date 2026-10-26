@@ -1,0 +1,14 @@
+{
+  "id": "01-sample",
+  "note": "Seed example. Replace knowledge_store_id with a KS that exists in your account, then run `python eval/edl-quality/bin/run_eval.py eval/edl-quality/briefs/01-sample.json` from the repo root. Add real reference EDLs by filling the `reference` field with a human-produced plan — see README.md for the schema.",
+  "knowledge_store_id": "ks_demo04-takeout",
+  "brief": "Build a 30 second action highlight reel from this footage, favoring kinetic shots and short cuts.",
+  "constraints": {
+    "target_duration_s": 30,
+    "min_scenes": 2,
+    "max_scenes": 6,
+    "min_clip_duration_s": 3,
+    "max_clip_duration_s": 15
+  },
+  "reference": null
+}

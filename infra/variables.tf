@@ -33,6 +33,20 @@ variable "agent_image_tag" {
   description = "ECR image tag the AgentCore Runtime points at. Bump on every container build."
 }
 
+variable "agent_runtime_arn" {
+  type        = string
+  default     = ""
+  description = <<-EOT
+    AgentCore Runtime ARN the mining-run Lambda invokes. Empty by default
+    to break the terraform dependency cycle (runtime env refs the Lambda;
+    the Lambda needs the runtime ARN). Two-apply pattern, same as
+    agent_image_tag: first apply creates the runtime without mining
+    execution; second apply passes `-var agent_runtime_arn=$(terraform
+    -chdir=infra output -raw agent_runtime_arn)` to wire the Lambda.
+    Scheduled mining runs fail-soft until this is set.
+  EOT
+}
+
 variable "seed_admin_email" {
   type        = string
   default     = ""
@@ -41,8 +55,8 @@ variable "seed_admin_email" {
 
 variable "pegasus_bedrock_model_id" {
   type        = string
-  default     = "us.twelvelabs.pegasus-1-2-v1:0"
-  description = "Bedrock model id for Pegasus when pegasus_provider = 'bedrock'. Defaults to the us cross-region inference profile of Pegasus 1.2."
+  default     = "us.twelvelabs.pegasus-1-5-v1:0"
+  description = "Bedrock model id for Pegasus analyze. Defaults to the us cross-region inference profile of Pegasus 1.5 (GA on Bedrock Marketplace 2026-09-18)."
 }
 
 # Frontend origin for CORS narrowing. Chicken-and-egg with the

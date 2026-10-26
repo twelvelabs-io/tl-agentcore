@@ -23,21 +23,26 @@ end:
   seven-day lifecycle rule.
 - **Edge + transport.** CloudFront fronts an S3 bucket of built UI
   assets plus one HTTP API Gateway that routes `/kb/*`, `/kb-graph`,
-  `/upload/*`, `/settings/*`, `/users/*`, and `/stitch*` to the
-  respective lambdas. The agent stream is browser-direct to
-  `wss://bedrock-agentcore.<region>.amazonaws.com` — no chat-lambda
-  relay, no WS API Gateway (v0.3+ removed both).
+  `/upload/*`, `/settings/*`, `/users/*`, `/stitch*`, and
+  `/scores/{response_id}` to the respective lambdas. The agent stream
+  is browser-direct to `wss://bedrock-agentcore.<region>.amazonaws.com`
+  — no chat-lambda relay, no WS API Gateway (v0.3+ removed both).
 - **Identity.** Cognito User Pool with `allow_admin_create_user_only =
   true`: no self-registration, and admins onboard every user via
   `aws cognito-idp admin-create-user`. An `admins` group surfaces the
   admin role to the UI as a claim. The Cognito JWT flows end-to-end
   from browser through CloudFront to the HTTP API + AgentCore Runtime
   authorizer.
-- **Bedrock model access.** The runtime calls Marengo 3.0, Pegasus 1.2,
-  and Claude Haiku 4.5 through the Bedrock Marketplace / Anthropic
+- **Bedrock model access.** The runtime calls Marengo 3.0, Pegasus 1.5,
+  and Claude Sonnet 4.6 through the Bedrock Marketplace / Anthropic
   Bedrock catalog. Grant model access in the Bedrock console
   (Model access → Manage model access) before the first invoke.
-  us-east-1 is the region we default to.
+  us-east-1 is the region we default to. Pegasus "1.5" on Bedrock is
+  functionally the same model as SaaS Pegasus 1.6 — the Bedrock
+  version string lags, there is no capability gap. The agent code
+  pins the inference profile `us.twelvelabs.pegasus-1-5-v1:0`; both
+  1.2 and 1.5 ARNs are IAM-allowlisted so a rollback is a one-var
+  flip (`-var pegasus_bedrock_model_id="us.twelvelabs.pegasus-1-2-v1:0"`).
 - **Gateway.** `gateway.tf` is documented but not enabled in this
   reference implementation. A future evolution moves the agent tools
   out of the runtime container into MCP-served lambdas behind
@@ -226,6 +231,61 @@ Both applies converge on the same infra — the second one just
 narrows the CORS allowlist. Add this variable to your CI-run
 tfvars going forward.
 
+## Pricing + web search
+
+Two wave-2 subsystems are activated out-of-band via SSM
+parameters, not Terraform variables, so ops can rotate / bump without
+touching the stack:
+
+- **Per-model prices** (metering ledger) — write JSON blobs to
+  `/tl-agentcore/prices/<model_id>` with shape
+  `{"input_per_mtok": 3.0, "output_per_mtok": 15.0, "currency": "USD"}`.
+  The runtime caches with a 15 min TTL (`PRICES_CACHE_TTL_SECONDS`).
+  Missing parameters are cached as "unknown price" and still write
+  a `usage_events` row with `cost=null`.
+- **Hosted web search** — `WEB_SEARCH_PROVIDER` env var picks the
+  provider; default `brave` (adapter in
+  `agent/tl_agentcore/web_search/brave.py`). Set to `none` to
+  disable the tool with an explanatory error. If a different
+  provider is needed, add an adapter next to `brave.py` and extend
+  `select_provider()` in `provider.py`. The API key is a
+  SecureString SSM parameter at `/tl-agentcore/web-search/<provider>`
+  — Terraform does NOT create the parameter, so ops writes the key
+  out of band to keep the KMS encryption context in
+  operator-controlled scope. For Brave: get a key from
+  https://api.search.brave.com (free tier is 2K queries/month), then
+  `aws ssm put-parameter --name /tl-agentcore/web-search/brave --type
+  SecureString --value <key>`. The runtime caches the key for 5 min
+  (`WEB_SEARCH_API_KEY_CACHE_TTL_SECONDS`), so rotating is just
+  overwriting the parameter and waiting out the TTL.
+
+## Lambda surface
+
+The stack provisions one lambda per capability. Deploy artifacts land
+under `lambda/<name>/` with Node 20 and a per-lambda `package.json`;
+`install-lambda-deps.sh` installs the aws-sdk + jwt-verify bundle for
+each one.
+
+| Lambda | Trigger | Purpose |
+|---|---|---|
+| `kb_admin` | HTTP `/kb/*` | Knowledge-store + asset CRUD (DDB-backed). |
+| `kb_graph` | HTTP `/kb-graph` | Neptune-backed subgraph for the Graph tab. |
+| `presign_upload` | HTTP `/upload/presign` | Browser upload URL. |
+| `embed_clip_start` | HTTP `/upload/embed` | Kicks off MediaConvert HLS + Marengo async. |
+| `embed_clip_finalize` | S3 event | Upserts Marengo vectors into S3 Vectors. |
+| `hls_finalize` | S3 event | Finalizes playback manifest + flips status. |
+| `asset_profile` | S3 event | Pegasus run + per-asset profile write. |
+| `enrich_comprehend` | S3 event | Comprehend sentiment + entities, writes graph. |
+| `enrich_transcribe_start` | S3 event | ASR start for audio-context tool. |
+| `index_faces` | async | Rekognition face indexing per-KS. |
+| `ks_rollup` | EventBridge (4 h) | Aggregates OVERVIEW / ENTITY# / EVENT#. |
+| `graph_backfill` | manual / cron | One-shot backfill of the Neptune graph. |
+| `mining_run` | EventBridge Scheduler | Executes a jockey_save plan on its schedule. |
+| `settings` | HTTP `/settings/*` | System-prompt view/edit (admin-gated). |
+| `stitch` | HTTP `/stitch*` | MediaConvert render preview. |
+| `users` | HTTP `/users*` | Cognito user management (admin-only). |
+| `scores` | HTTP `/scores/{response_id}` | Returns online judge rows for a turn. |
+
 ## Ingesting video
 
 Use the SPA's Library tab to upload. The auto-pipeline takes it from
@@ -295,9 +355,10 @@ Operational gotchas worth knowing before the first apply:
   Marengo nor Pegasus on Bedrock accepts a plain URL for media. The
   reference stack mirrors each ingested asset to `clips/<asset_id>.mp4`
   on the clips bucket; the runtime IAM role carries `s3:GetObject`
-  there. Sub-clip time ranges are not supported on the Pegasus 1.2
-  Bedrock API, so the whole S3 object is analyzed; deployments with
-  long source videos should consider segmenting at ingest time.
+  there. Pegasus 1.5 on Bedrock supports sub-clip time ranges
+  (`startTime`/`endTime` in the request body); the reference agent
+  does not yet pass them, so today the whole S3 object is analyzed
+  per invocation.
 - **Marengo on Bedrock is async-only for video.** Sync `InvokeModel`
   rejects `inputType=video`; use `StartAsyncInvoke` against the
   foundation-model ARN (not the inference profile). Output writes to

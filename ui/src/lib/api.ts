@@ -77,6 +77,221 @@ export async function fetchKbGraph(ks_id: string): Promise<GraphPayload> {
   if (!r.ok) throw new Error(`kb-graph ${r.status}: ${await r.text().catch(() => "")}`);
   return r.json();
 }
+
+// ─── Scores (wave-2 online judges) ──────────────────────────────────────────
+export type JudgeRow = {
+  judge_name: string;             // "coherence" | "reference_validity"
+  score?: number | null;          // 1-5, or null when a judge couldn't score
+  justification?: string;
+  latency_ms?: number;
+  sampled_at?: string;
+  error?: string;
+  missing_asset_ids?: string[];
+};
+
+export type ScoresPayload = {
+  response_id: string;
+  judges: JudgeRow[];
+};
+
+/** Fetch the online judge rows for one agent turn. Returns {judges: []}
+ *  when no rows have landed yet — judges run fire-and-forget after
+ *  response.completed, so a tight-loop fetch may need to be delayed
+ *  by a second or two for the writes to settle. */
+export async function fetchScores(response_id: string): Promise<ScoresPayload> {
+  const headers = await authHeaders();
+  const r = await fetch(`/scores/${encodeURIComponent(response_id)}`, { headers });
+  if (!r.ok) throw new Error(`scores ${r.status}: ${await r.text().catch(() => "")}`);
+  return r.json();
+}
+
+// ─── Usage (wave-2 metering ledger) ─────────────────────────────────────────
+export type UsageEvent = {
+  user_id: string;
+  event_id: string;
+  event_type: "model_invoke" | "tool_call";
+  sampled_at: string;
+  response_id?: string;
+  knowledge_store_id?: string;
+  // model_invoke:
+  model_id?: string;
+  input_tokens?: number;
+  output_tokens?: number;
+  cost_usd?: number | null;
+  price_source?: string;
+  latency_ms?: number;
+  // tool_call:
+  tool_name?: string;
+  tool_category?: string;   // retrieval | analysis | kb_read | mutation | generation | web | other
+  duration_ms?: number;
+};
+
+export type UsageModelBucket = {
+  invocations: number;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+  unknown_cost?: boolean;
+};
+export type UsageToolBucket = {
+  calls: number;
+  duration_ms_total: number;
+};
+export type FallbackRecent = {
+  event_id: string;
+  sampled_at: string;
+  response_id?: string;
+  from_pipeline?: string;
+  to_pipeline?: string;
+  reason_class?: string;
+  stage?: string;
+  reason_text?: string;
+};
+export type FallbackSummary = {
+  total: number;
+  by_reason: Record<string, number>;
+  by_stage: Record<string, number>;
+  by_from_to: Record<string, number>;
+  recent: FallbackRecent[];
+};
+
+export type UsagePayload = {
+  user_id: string;
+  window: { since: string; until: string };
+  summary: {
+    model_invocations: number;
+    tool_calls: number;
+    pipeline_fallbacks: number;
+    total_input_tokens: number;
+    total_output_tokens: number;
+    total_cost_usd: number | null;   // null when any invocation had unknown price
+    unknown_cost_count: number;
+    by_model: Record<string, UsageModelBucket>;
+    by_tool: Record<string, UsageToolBucket>;
+    by_category: Record<string, UsageToolBucket>;
+    fallbacks: FallbackSummary;
+  };
+  events: UsageEvent[];
+};
+
+/** Fetch metering-ledger events for a user and time window. `since` /
+ *  `until` are ISO strings; default is the last 24h. `user_id` is
+ *  admin-only — non-admin callers see only their own events regardless
+ *  of the argument. `limit` defaults to 500, capped at 2000 by the
+ *  lambda. */
+export async function fetchUsage(opts: {
+  since?: string;
+  until?: string;
+  user_id?: string;
+  limit?: number;
+} = {}): Promise<UsagePayload> {
+  const headers = await authHeaders();
+  const qs = new URLSearchParams();
+  if (opts.since)   qs.set("since", opts.since);
+  if (opts.until)   qs.set("until", opts.until);
+  if (opts.user_id) qs.set("user_id", opts.user_id);
+  if (opts.limit)   qs.set("limit", String(opts.limit));
+  const suffix = qs.toString() ? `?${qs}` : "";
+  const r = await fetch(`/usage${suffix}`, { headers });
+  if (!r.ok) throw new Error(`usage ${r.status}: ${await r.text().catch(() => "")}`);
+  return r.json();
+}
+
+// ---- Plugins (Distribution-Readiness data sources) ----
+
+export type PluginAuthType = "none" | "api_key" | "bearer" | "basic";
+
+/** Common fields on every plugin row. */
+type PluginBase = {
+  plugin_id:   string;
+  name:        string;
+  description: string;
+  target_id:   string;
+  enabled:     boolean;
+  created_by:  string;
+  created_at:  string;
+};
+
+/** Lambda-backed target — gateway invokes the Lambda directly. */
+export type LambdaPlugin = PluginBase & {
+  target_type: "lambda";
+  lambda_arn:  string;
+};
+
+/** OpenAPI-backed target — gateway proxies HTTPS calls to `endpoint_url`,
+ *  injecting the auth header configured at registration time. */
+export type OpenApiPlugin = PluginBase & {
+  target_type:              "openapi";
+  endpoint_url:             string;
+  auth_type:                PluginAuthType;
+  auth_header_name?:        string;
+  credential_provider_arn?: string;
+  credential_provider_name?: string;
+};
+
+export type Plugin = LambdaPlugin | OpenApiPlugin;
+
+export async function fetchPlugins(): Promise<Plugin[]> {
+  const headers = await authHeaders();
+  const r = await fetch(`/plugins`, { headers });
+  if (!r.ok) throw new Error(`plugins ${r.status}: ${await r.text().catch(() => "")}`);
+  const body = await r.json();
+  const plugins: Plugin[] = (body.plugins || []).map((p: Record<string, unknown>) => ({
+    ...p,
+    // Backfill target_type on legacy rows written before the OpenAPI
+    // extension landed — those predate the field but are always Lambda.
+    target_type: (p.target_type as string) || "lambda",
+  }));
+  return plugins;
+}
+
+/** Register a Lambda-backed plugin. Same shape as PR 1. */
+export type CreateLambdaPluginInput = {
+  target_type: "lambda";
+  name:        string;
+  description: string;
+  lambda_arn:  string;
+  tool_schema: unknown;
+};
+
+/** Register an OpenAPI-backed plugin with optional auth. For `basic`,
+ *  pass `auth_credential` as raw "user:password" — the lambda
+ *  base64-encodes before handing to Gateway. */
+export type CreateOpenApiPluginInput = {
+  target_type:       "openapi";
+  name:              string;
+  description:       string;
+  endpoint_url:      string;
+  openapi_schema:    string | Record<string, unknown>;
+  auth_type:         PluginAuthType;
+  auth_credential?:  string;
+  auth_header_name?: string;
+};
+
+export type CreatePluginInput = CreateLambdaPluginInput | CreateOpenApiPluginInput;
+
+export async function createPlugin(input: CreatePluginInput): Promise<Plugin> {
+  const headers = { ...(await authHeaders()), "content-type": "application/json" };
+  const r = await fetch(`/plugins`, {
+    method:  "POST",
+    headers,
+    body:    JSON.stringify(input),
+  });
+  if (!r.ok) throw new Error(`plugins ${r.status}: ${await r.text().catch(() => "")}`);
+  const body = await r.json();
+  return body.plugin;
+}
+
+export async function deletePlugin(pluginId: string): Promise<void> {
+  const headers = await authHeaders();
+  const r = await fetch(`/plugins/${encodeURIComponent(pluginId)}`, {
+    method:  "DELETE",
+    headers,
+  });
+  if (!r.ok && r.status !== 204) {
+    throw new Error(`plugins ${r.status}: ${await r.text().catch(() => "")}`);
+  }
+}
 async function authHeaders(): Promise<Record<string, string>> {
   const token = await getAccessToken();
   if (token) return { authorization: `Bearer ${token}` };

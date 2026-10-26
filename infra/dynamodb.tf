@@ -126,3 +126,280 @@ resource "aws_dynamodb_table" "assets" {
     projection_type = "ALL"
   }
 }
+
+# ─── Multi-turn session state + long-term user memory ────────────────────
+#
+# PR #4 of the Jockey-parity roadmap. Two new tables:
+#
+#   sessions  — Per-AgentCore-session scratch for resuming context across
+#               turns. One row per AgentCore runtime session_id (the ≥33-char
+#               id the browser carries in X-Amzn-Bedrock-AgentCore-Runtime-
+#               Session-Id). The runtime writes an updated row at the end of
+#               every turn with the final <plan>...</plan> text, the prompt,
+#               and the knowledge_store_id. 7-day TTL via `expires_at`.
+#
+#               Read-for-resume (previous_response_id semantics) is NOT
+#               wired in this PR — the UI continues to echo [CURRENT PLAN]
+#               back on follow-up turns. The write-only path lands first so
+#               that multi-device resume + audit become possible without a
+#               wire-format change (deferred until after PR #15 merges).
+#
+#   memories  — Long-term, per-user, agent-callable notes and named clip
+#               references (TRefs). Agent tools `manage_memory` and
+#               `save_tref_to_memory` are the only writers; user_id is the
+#               Cognito `sub` claim decoded from the access_token the
+#               browser passes on the WS handshake. Durable, no TTL —
+#               explicit delete via `manage_memory(action="delete", ...)`.
+
+resource "aws_dynamodb_table" "sessions" {
+  name         = "${local.fqname}-sessions"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "session_id"
+
+  point_in_time_recovery {
+    enabled = true
+  }
+
+  attribute {
+    name = "session_id"
+    type = "S"
+  }
+  # Wave-2 PR #8 — session index. The by-user GSI lets a user resurface
+  # their recent sessions across devices without a Scan. Only turns with
+  # a resolved Cognito sub populate `user_id`, so the GSI's sparse-key
+  # semantics naturally exclude anonymous rows.
+  attribute {
+    name = "user_id"
+    type = "S"
+  }
+  attribute {
+    name = "last_updated_at"
+    type = "S"
+  }
+
+  global_secondary_index {
+    name            = "by-user"
+    hash_key        = "user_id"
+    range_key       = "last_updated_at"
+    projection_type = "ALL"
+  }
+
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+}
+
+resource "aws_dynamodb_table" "memories" {
+  name         = "${local.fqname}-memories"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "user_id"
+  range_key    = "memory_id"
+
+  point_in_time_recovery {
+    enabled = true
+  }
+
+  attribute {
+    name = "user_id"
+    type = "S"
+  }
+  attribute {
+    name = "memory_id"
+    type = "S"
+  }
+}
+
+# ─── Mining plans (PR #10 of Jockey parity) ──────────────────────────────
+#
+#   jockey_plans — Saved agent prompts that run on an EventBridge schedule.
+#                  PK=plan_id (24-hex uuid4). GSI `by-ks` lets `jockey_list`
+#                  filter by knowledge_store_id without a Scan. One row holds
+#                  `prompt`, `schedule_expression` (EventBridge format), the
+#                  `schedule_arn` the agent created, and `enabled` for pause.
+#                  Scoped by KS, not by user_id (user-id ownership adds in a
+#                  follow-up when PR #16 lands and ships the user_id ContextVar).
+#
+#   jockey_runs  — Append-only history of plan executions. PK=plan_id, SK=run_id
+#                  (ISO-prefixed ULID so range queries sort newest-last). 30-day
+#                  TTL via `expires_at` keeps the table small; status + result_text
+#                  + error are populated by the mining-run Lambda.
+
+resource "aws_dynamodb_table" "jockey_plans" {
+  name         = "${local.fqname}-jockey-plans"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "plan_id"
+
+  point_in_time_recovery { enabled = true }
+
+  attribute {
+    name = "plan_id"
+    type = "S"
+  }
+  attribute {
+    name = "knowledge_store_id"
+    type = "S"
+  }
+  attribute {
+    name = "created_at"
+    type = "S"
+  }
+
+  global_secondary_index {
+    name            = "by-ks"
+    hash_key        = "knowledge_store_id"
+    range_key       = "created_at"
+    projection_type = "ALL"
+  }
+}
+
+resource "aws_dynamodb_table" "jockey_runs" {
+  name         = "${local.fqname}-jockey-runs"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "plan_id"
+  range_key    = "run_id"
+
+  point_in_time_recovery { enabled = true }
+
+  attribute {
+    name = "plan_id"
+    type = "S"
+  }
+  attribute {
+    name = "run_id"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+}
+
+# ─── Artifact store (PR #6) ──────────────────────────────────────────────
+#
+#   artifacts — Per-user, durable store for things the agent produces that
+#               the user may want to open, reference, or regenerate from
+#               later: saved EDL plans, generated html-1 apps, rendered
+#               videos, arbitrary blobs. Small payloads (<16 KiB) ride
+#               inline in the `inline_data` string attribute; larger
+#               payloads live under `artifacts/<user_id>/<artifact_id>/
+#               <name>` in the clips bucket and the row carries only the
+#               `s3_key`. Agent-driven writes only via save_artifact /
+#               open_artifact / list_artifacts. GSI `by-kind` lets a user
+#               filter their artifacts by kind (edl.plan, html.app,
+#               video.render, other) without a Scan.
+resource "aws_dynamodb_table" "artifacts" {
+  name         = "${local.fqname}-artifacts"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "user_id"
+  range_key    = "artifact_id"
+
+  point_in_time_recovery {
+    enabled = true
+  }
+
+  attribute {
+    name = "user_id"
+    type = "S"
+  }
+  attribute {
+    name = "artifact_id"
+    type = "S"
+  }
+  attribute {
+    name = "kind"
+    type = "S"
+  }
+
+  global_secondary_index {
+    name            = "by-kind"
+    hash_key        = "user_id"
+    range_key       = "kind"
+    projection_type = "ALL"
+  }
+}
+
+# ─── Online quality judges — scores (wave-2 PR #9) ───────────────────────
+#
+#   scores — one row per (response_id, judge_name) pair. Judges are
+#            dispatched fire-and-forget at end-of-turn by the runtime;
+#            see agent/tl_agentcore/scoring/judge_runner.py. 90-day TTL
+#            via `expires_at` keeps the table small.
+#
+#            pk = response_id   sk = judge_name  (coherence | reference_validity)
+#            Payload: score (int 1-5 | null), justification, latency_ms,
+#            sampled_at, user_id, knowledge_store_id, error?, missing_asset_ids?
+#
+#            Judge-model identity: Sonnet 4.6 (per the wave-2 locked
+#            decision in project_jockey_parity_wave_2.md). Every turn is
+#            judged — no sampling gate; the runtime only skips dispatch
+#            when SCORES_TABLE isn't configured.
+resource "aws_dynamodb_table" "scores" {
+  name         = "${local.fqname}-scores"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "response_id"
+  range_key    = "judge_name"
+
+  point_in_time_recovery { enabled = true }
+
+  attribute {
+    name = "response_id"
+    type = "S"
+  }
+  attribute {
+    name = "judge_name"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+}
+
+# ─── Per-tool / per-model metering ledger (wave-2 PR #10) ────────────────
+#
+#   usage_events — one row per Bedrock model invocation + per in-process
+#                  tool call. Keyed by (user_id, event_id) where event_id
+#                  is an ISO-timestamp-prefixed ULID-ish string so Range
+#                  queries sort chronologically. 90-day TTL via
+#                  `expires_at`. Writes are fire-and-forget from the
+#                  runtime (see agent/tl_agentcore/metering/ledger.py).
+#
+#                  Attributes:
+#                    event_type:  "model_invoke" | "tool_call"
+#                    response_id: agent turn id
+#                    knowledge_store_id: ks_... or ''
+#                    # model_invoke:
+#                    model_id, input_tokens, output_tokens, cost_usd,
+#                    price_source, latency_ms
+#                    # tool_call:
+#                    tool_name, duration_ms
+#
+#                  Prices live in SSM Parameter Store under
+#                  `/tl-agentcore/prices/<model_id>` as JSON blobs so ops
+#                  can bump a rate without a redeploy. Missing price →
+#                  cost_usd omitted (tokens stay useful).
+resource "aws_dynamodb_table" "usage_events" {
+  name         = "${local.fqname}-usage-events"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "user_id"
+  range_key    = "event_id"
+
+  point_in_time_recovery { enabled = true }
+
+  attribute {
+    name = "user_id"
+    type = "S"
+  }
+  attribute {
+    name = "event_id"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+}

@@ -81,11 +81,83 @@ resource "aws_bedrockagentcore_agent_runtime" "this" {
     KB_CACHE_TABLE  = aws_dynamodb_table.kb_cache.name
     RIGHTS_TABLE    = aws_dynamodb_table.rights.name
     AUDIENCES_TABLE = aws_dynamodb_table.audiences.name
+    # Multi-turn session scratch (write-only in this release; UI still echoes
+    # [CURRENT PLAN]) + long-term per-user memory for the manage_memory /
+    # save_tref_to_memory tools.
+    SESSIONS_TABLE = aws_dynamodb_table.sessions.name
+    MEMORIES_TABLE = aws_dynamodb_table.memories.name
+    # PR #8: add_media writes a registration row to the assets table so the
+    # agent can bring a new asset into the current KS mid-conversation. The
+    # table + its by-ks GSI already exist (kb_admin / enrich lambdas own them);
+    # the runtime now gets PutItem on it. Read-side (list_kb_assets, etc.)
+    # still goes through kb_cache ASSET# rows, which the batch ingest builds.
+    ASSETS_TABLE = aws_dynamodb_table.assets.name
+    # PR #10: mining plans. The jockey_save tool writes to JOCKEY_PLANS_TABLE
+    # AND creates an EventBridge Schedule in MINING_SCHEDULER_GROUP whose
+    # target is MINING_RUN_LAMBDA_ARN, assumed via MINING_SCHEDULER_TARGET_ROLE_ARN.
+    # jockey_run invokes the Lambda synchronously; jockey_list_runs reads
+    # JOCKEY_RUNS_TABLE.
+    JOCKEY_PLANS_TABLE               = aws_dynamodb_table.jockey_plans.name
+    JOCKEY_RUNS_TABLE                = aws_dynamodb_table.jockey_runs.name
+    MINING_RUN_LAMBDA_ARN            = aws_lambda_function.mining_run.arn
+    MINING_SCHEDULER_GROUP           = aws_scheduler_schedule_group.mining.name
+    MINING_SCHEDULER_TARGET_ROLE_ARN = aws_iam_role.mining_scheduler_target.arn
+    # PR #11: generate_video delegates to the existing stitch MediaConvert
+    # lambda via direct lambda:Invoke (HTTP-API-shaped payload), reusing the
+    # same job-building code the UI's "Render preview" button hits. generate_html_app
+    # uses the Claude Sonnet model already configured via MODEL_ID. execute_code
+    # has no external deps.
+    STITCH_LAMBDA_ARN = aws_lambda_function.stitch.arn
+    # PR #6: durable per-user artifact store (saved plans, generated html-1
+    # apps, rendered videos, arbitrary blobs). Small payloads inline, large
+    # payloads under `artifacts/<user_id>/<artifact_id>/<name>` in the
+    # clips bucket.
+    ARTIFACTS_TABLE = aws_dynamodb_table.artifacts.name
+    # Wave-2 PR #9: online quality judges. The runtime dispatches a
+    # coherence judge (Sonnet) + reference-validity judge (deterministic
+    # <plan> parse) fire-and-forget at end-of-turn and writes one row per
+    # judge to the scores table. JUDGE_MODEL_ID defaults to
+    # us.anthropic.claude-sonnet-4-6 inside the scoring module.
+    SCORES_TABLE = aws_dynamodb_table.scores.name
+    # Wave-2 PR #10: per-tool / per-model metering ledger. One row per
+    # Bedrock model turn + per in-process tool call, fire-and-forget.
+    # Prices for the cost column live in SSM Parameter Store under
+    # /tl-agentcore/prices/<model_id> — ops bumps a rate by writing a
+    # new parameter value; PRICES_CACHE_TTL_SECONDS controls how long
+    # until the runtime re-reads it (default 15 min).
+    USAGE_EVENTS_TABLE       = aws_dynamodb_table.usage_events.name
+    PRICES_SSM_PREFIX        = "/tl-agentcore/prices"
+    PRICES_CACHE_TTL_SECONDS = "900"
+    # Wave-2 PR #5: synthetic tool-call injection cap. Every turn with a
+    # KS pre-executes get_kb_overview + list_kb_assets in parallel and
+    # splices them into agent.messages as a 4-message synthetic turn so
+    # the model's first move can skip two near-reflex tool calls. This
+    # knob caps how many assets the preseed list_kb_assets fetches to
+    # keep the preamble bounded; the model can fetch more via a plain
+    # tool call if it needs them.
+    PRESEED_ASSETS_LIMIT = "30"
+    # Wave-2 PR #7: hosted web search + citations. The `web_search` tool
+    # routes to the provider named here. Brave is the shipped adapter
+    # (`web_search/brave.py`); add another one next to it and extend
+    # `select_provider()` if a different provider is needed. The API key
+    # lives at `${WEB_SEARCH_API_KEY_SSM_PREFIX}/<provider>`
+    # (SecureString) — written out of band by ops so the KMS encryption
+    # context stays in operator-controlled scope. Set to "none" to
+    # disable the tool with an explanatory error.
+    WEB_SEARCH_PROVIDER                  = "brave"
+    WEB_SEARCH_API_KEY_SSM_PREFIX        = "/tl-agentcore/web-search"
+    WEB_SEARCH_API_KEY_CACHE_TTL_SECONDS = "300"
     # v0.4 hybrid entity-reID: per-KS Rekognition collection id is
     # derived as `<STACK_FQNAME>-ks-<ks_id>`. Marengo image-embed
     # async-invoke needs the bucket owner for s3Location.bucketOwner.
     STACK_FQNAME   = local.fqname
     AWS_ACCOUNT_ID = data.aws_caller_identity.current.account_id
+    # Distribution-Readiness plugin surface (PR #TBD). When set, the
+    # runtime opens an MCP connection to this gateway on top of its
+    # in-process tool list — see build_agent() in agent/.../agent.py.
+    # Each customer-added data source is a gateway target managed by
+    # the plugins lambda. Not set → in-process tools only.
+    GATEWAY_MCP_URL = aws_bedrockagentcore_gateway.plugins.gateway_url
   }
 }
 

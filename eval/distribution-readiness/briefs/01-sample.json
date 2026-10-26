@@ -1,0 +1,14 @@
+{
+  "id": "01-sample",
+  "note": "Seed example. Replace knowledge_store_id with a KS that exists in your account, then run `python eval/distribution-readiness/bin/run_eval.py eval/distribution-readiness/briefs/01-sample.json` from the repo root. The DE policy row is seeded in infra/plugin-policy-target.tf (video, poster, subs:de, trailer) — if you've applied Terraform recently, policy section lights up automatically. Add real reference cards by filling the `reference` field with a human-curated distribution_card — see README.md for the schema.",
+  "knowledge_store_id": "ks_demo04-takeout",
+  "brief": "Can I distribute to Germany? Give me a readiness report with policy requirements and audience fit for a drama targeting 35-54.",
+  "expected": {
+    "territory": "DE",
+    "expect_policy": true,
+    "expect_audience_fit": true,
+    "min_policy_requirements": 2,
+    "max_elapsed_ms": 120000
+  },
+  "reference": null
+}

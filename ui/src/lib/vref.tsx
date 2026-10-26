@@ -136,20 +136,26 @@ function wrapAssetIds(text: string): string {
   return text.replace(ASSET_ID_RE, (_, id) => `<aref id="${id}"></aref>`);
 }
 
-/** Strip `<plan>…</plan>` JSON blocks (the Rough Cut EDL payload) from
- *  any agent output before it reaches the markdown renderer. The plan
- *  block is an internal contract between the agent and the Rough Cut
- *  timeline view — surfacing the raw JSON in a chat thread (e.g. on the
- *  Agent tab, when a user asks for a reel) dumps a wall of unreadable
- *  data. Centralizing the strip here means every consumer of
- *  `ResponseMarkdown` gets this for free. */
-function stripPlanBlocks(text: string): string {
+/** Strip structured JSON blocks (`<plan>`, `<distribution_card>`) from any
+ *  agent output before it reaches the markdown renderer. These blocks are
+ *  internal contracts between the agent and dedicated UI panes (Rough Cut
+ *  timeline, Distribution-Readiness card) — surfacing the raw JSON in a
+ *  chat thread dumps a wall of unreadable data. Centralizing the strip
+ *  here means every consumer of `ResponseMarkdown` gets this for free. */
+function stripStructuredBlocks(text: string): string {
+  let out = text;
   // Closed pairs anywhere in the text.
-  let out = text.replace(/<plan>[\s\S]*?<\/plan>/gi, "");
+  out = out.replace(/<plan>[\s\S]*?<\/plan>/gi, "");
+  out = out.replace(/<distribution_card>[\s\S]*?<\/distribution_card>/gi, "");
   // Truncated/streaming case — open tag with no close yet. Hide everything
-  // from there forward so the JSON never paints.
-  const open = out.indexOf("<plan>");
-  if (open >= 0) out = out.slice(0, open);
+  // from the earliest open tag forward so no JSON paints.
+  const openPlan = out.indexOf("<plan>");
+  const openCard = out.indexOf("<distribution_card>");
+  const open = Math.min(
+    openPlan >= 0 ? openPlan : Infinity,
+    openCard >= 0 ? openCard : Infinity,
+  );
+  if (open !== Infinity) out = out.slice(0, open);
   return out.trim();
 }
 
@@ -163,7 +169,7 @@ export function ResponseMarkdown({ text, ksId }: { text: string; ksId?: string }
   // and back on every keystroke. Memoizing keyed on ksId makes the chip
   // tree stable across unrelated re-renders.
   const prepared = useMemo(
-    () => (text ? wrapAssetIds(stripPlanBlocks(text)) : ""),
+    () => (text ? wrapAssetIds(stripStructuredBlocks(text)) : ""),
     [text],
   );
   const components = useMemo(
