@@ -121,8 +121,12 @@ html, body, #root {
 }
 
 body {
-  background: var(--color-paper);
-  color: var(--color-ink);
+  /* With the makeover complete (PR4), the body background matches the
+     studio floor so the slate intro and sign-in never flash against
+     a different base. --color-paper (legacy) kept available for any
+     view that explicitly asks for it. */
+  background: var(--cr-film-black);
+  color: var(--cr-grade-ink);
   font-family: var(--font-body);
   font-feature-settings: "ss01", "cv05", "cv11", "calt";
   font-variant-ligatures: common-ligatures;

@@ -122,7 +122,7 @@ export function App() {
   }
 
   return (
-    <div className="h-screen w-screen flex flex-col" style={{ background: "var(--color-paper)" }}>
+    <div className="cr-studio h-screen w-screen flex flex-col" style={{ background: "var(--color-paper)" }}>
       {slateVisible && <Slate onDone={() => setSlateVisible(false)} />}
 
       <Masthead tab={tab} setTab={setTab} bootError={bootError} ready={ready} />
