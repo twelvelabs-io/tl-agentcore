@@ -9,6 +9,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import DecryptedText from "./bits/DecryptedText";
+import LatticeLoader from "./bits/LatticeLoader";
+import ThoughtLine from "./bits/ThoughtLine";
+import PromptBar from "./bits/PromptBar";
 import { streamAgentTurn } from "../lib/agent-api";
 import { useStore } from "../lib/store";
 import { getAsset, getStitch, startStitch, type Asset, type Channel, type StitchJob } from "../lib/api";
@@ -16,7 +19,7 @@ import { ChannelPlayer } from "./ChannelPlayer";
 import { SmartClipThumb } from "../lib/clip-thumb";
 import { EntityChips } from "./EntityChips";
 import { LiveArchSidebar } from "./LiveArchSidebar";
-import { nodeForEvent, downstreamFor, type NodeId } from "./LiveArchDiagram";
+import { nodeForEvent, downstreamFor, labelForTool, type NodeId } from "./LiveArchDiagram";
 import { setState as setGlobal } from "../lib/store";
 import { ResponseMarkdown } from "../lib/vref";
 import { ArchHandle } from "../App";
@@ -432,6 +435,10 @@ export function RoughCut() {
   // stream loop in generate() / sendFollowup() as agent events land.
   const [activeNode, setActiveNode] = useState<NodeId | null>(null);
   const [nodeHistory, setNodeHistory] = useState<NodeId[]>([]);
+  // Reasoning-trace steps surfaced by ThoughtLine: one line per tool call,
+  // in order. Cleared at the start of every turn so the visible trace
+  // matches what the current response is doing, not a cumulative log.
+  const [toolTrace, setToolTrace] = useState<string[]>([]);
 
   const recordNode = (n: NodeId) => {
     setActiveNode((prev) => {
@@ -446,6 +453,8 @@ export function RoughCut() {
       if (ev.type === "response.output_item.added" && ev.tool) {
         const downstream = downstreamFor(ev.tool);
         if (downstream) setTimeout(() => recordNode(downstream), 400);
+        const label = labelForTool(ev.tool);
+        if (label) setToolTrace((t) => [...t, label]);
       }
     }
     if (ev.type === "response.completed") setTimeout(() => setActiveNode(null), 1200);
@@ -566,6 +575,7 @@ export function RoughCut() {
   const generate = async () => {
     if (!ks || !script.trim() || busy) return;
     setBusy(true); setErr(null); setPlan(null); setElapsed(0);
+    setToolTrace([]);
     setRender(null); setRenderErr(null);
     if (renderPollRef.current) { clearInterval(renderPollRef.current); renderPollRef.current = null; }
 
@@ -616,11 +626,13 @@ export function RoughCut() {
     }
   };
 
-  const sendFollowup = async () => {
-    if (!ks || !followup.trim() || busy) return;
-    const text = followup.trim();
+  const sendFollowup = async (raw?: string) => {
+    const source = raw != null ? raw : followup;
+    if (!ks || !source.trim() || busy) return;
+    const text = source.trim();
     setFollowup("");
     setBusy(true); setErr(null);
+    setToolTrace([]);
 
     const sid = sessionId || newSessionId();
     if (!sessionId) setSessionId(sid);
@@ -921,33 +933,18 @@ export function RoughCut() {
               <ChatThread messages={messages} streaming={busy} />
             </div>
             <div className="px-5 pb-4 border-t pt-3" style={{ borderColor: "var(--color-rule)" }}>
-              <textarea
-                className="bg-transparent border w-full p-2 outline-none text-sm font-mono rounded-[var(--radius-card)]"
-                style={{ borderColor: "var(--color-rule)", minHeight: 64 }}
-                rows={2}
-                value={followup}
-                onChange={(e) => setFollowup(e.target.value)}
-                placeholder="ask the agent to swap, extend, describe a clip…  (⌘↩)"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                    e.preventDefault();
-                    void sendFollowup();
-                  }
-                }}
-                disabled={busy}
+              <PromptBar
+                key={`followup:${activeEntryId ?? "new"}`}
+                placeholder="ask the agent to swap, extend, describe a clip…"
+                sendLabel="send →"
+                busy={busy}
+                width={9999}
+                background="var(--color-paper)"
+                color="var(--color-ink)"
+                menuBackground="var(--color-surface)"
+                sparkColor="var(--color-cue)"
+                onSend={(text) => void sendFollowup(text)}
               />
-              <div className="flex items-center justify-between mt-2">
-                <div className="label" style={{ color: "var(--color-ink-faint)" }}>
-                  {busy ? "agent thinking…" : "⌘↩ to send"}
-                </div>
-                <button
-                  className="btn btn-cue"
-                  onClick={sendFollowup}
-                  disabled={busy || !followup.trim()}
-                >
-                  {busy ? "..." : "send →"}
-                </button>
-              </div>
               {err && (
                 <pre className="font-mono text-[11px] mt-3 p-2 whitespace-pre-wrap rounded-[var(--radius-card)]" style={{ background: "var(--color-surface)", color: "var(--color-status-failed)" }}>{err}</pre>
               )}
@@ -999,9 +996,26 @@ export function RoughCut() {
           )}
 
           {busy && (
-            <p className="caret font-display text-xl mt-6" style={{ color: "var(--color-ink-soft)" }}>
-              <RotatingStatus elapsed={elapsed} />
-            </p>
+            <div className="mt-6 flex flex-col gap-3" style={{ color: "var(--color-ink-soft)" }}>
+              <ThoughtLine
+                label="Assembling…"
+                doneLabel="Thought for"
+                steps={toolTrace}
+                working={busy}
+                elapsed={elapsed}
+                color="var(--color-ink)"
+                glyphColor="var(--color-cue)"
+                fontSize={16}
+              />
+              <LatticeLoader
+                label=""
+                status="working"
+                pattern="orbit"
+                grid={3}
+                showTimer={false}
+                color="var(--color-cue)"
+              />
+            </div>
           )}
 
           {plan && (

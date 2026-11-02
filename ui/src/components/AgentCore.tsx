@@ -13,7 +13,10 @@ import { agentEnabled, streamAgentTurn } from "../lib/agent-api";
 import { ResponseMarkdown } from "../lib/vref";
 import { useStore, setState as setGlobal } from "../lib/store";
 import { LiveArchSidebar } from "./LiveArchSidebar";
-import { nodeForEvent, downstreamFor, type NodeId } from "./LiveArchDiagram";
+import { nodeForEvent, downstreamFor, labelForTool, type NodeId } from "./LiveArchDiagram";
+import LatticeLoader from "./bits/LatticeLoader";
+import ThoughtLine from "./bits/ThoughtLine";
+import PromptBar from "./bits/PromptBar";
 import { ArchHandle } from "../App";
 import {
   saveEntry,
@@ -42,8 +45,19 @@ export function AgentCore() {
   const [activeNode, setActiveNode] = useState<NodeId | null>(null);
   const [nodeHistory, setNodeHistory] = useState<NodeId[]>([]);
   const [historyEntryId, setHistoryEntryId] = useState<string | null>(null);
+  const [toolTrace, setToolTrace] = useState<string[]>([]);
+  const [elapsed, setElapsed] = useState(0);
   const responseRef = useRef<HTMLDivElement>(null);
   const threadRef = useRef<HTMLDivElement>(null);
+
+  // Tick the elapsed-time meter while the agent is streaming so
+  // ThoughtLine's live clock reflects wall time, not the fallback
+  // internal clock.
+  useEffect(() => {
+    if (!busy) return;
+    const t = setInterval(() => setElapsed((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, [busy]);
 
   // Consume any pending restore the drawer leaves in the global store.
   // Subscribing (vs reading once on mount) covers two paths: cross-tab
@@ -69,9 +83,10 @@ export function AgentCore() {
     });
   };
 
-  const send = async () => {
-    if (!ks || !draft.trim() || busy) return;
-    const text = draft.trim();
+  const send = async (raw?: string) => {
+    const source = raw != null ? raw : draft;
+    if (!ks || !source.trim() || busy) return;
+    const text = source.trim();
     setDraft(""); setErr(null);
     const userTurn: Turn = { id: rid(), role: "user", text };
     const aTurn: Turn = { id: rid(), role: "assistant", text: "", streaming: true };
@@ -79,6 +94,8 @@ export function AgentCore() {
     setBusy(true);
     setActiveNode("runtime");
     setNodeHistory([]);
+    setToolTrace([]);
+    setElapsed(0);
     const t0 = Date.now();
 
     let acc = "";
@@ -102,6 +119,8 @@ export function AgentCore() {
           if (ev.type === "response.output_item.added" && toolName) {
             const downstream = downstreamFor(toolName);
             if (downstream) setTimeout(() => recordNode(downstream), 400);
+            const label = labelForTool(toolName);
+            if (label) setToolTrace((t) => [...t, label]);
           }
         }
 
@@ -209,23 +228,20 @@ export function AgentCore() {
               )}
             </div>
           </div>
-          <textarea
-            className="bg-transparent border w-full p-3 mt-3 outline-none text-sm font-mono rounded-[var(--radius-card)]"
-            style={{ borderColor: "var(--color-rule)", minHeight: 96 }}
-            rows={3}
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder="Ask anything about the active knowledge base…  (⌘↩)"
-            onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(); } }}
-            disabled={busy}
-          />
-          <div className="flex items-center justify-between mt-2">
-            <div className="label" style={{ color: "var(--color-ink-faint)" }}>
-              {busy ? "thinking…" : "⌘↩ to send"}
-            </div>
-            <button className="btn btn-cue" onClick={send} disabled={busy || !draft.trim() || !ks}>
-              {busy ? "..." : "ask →"}
-            </button>
+          <div className="mt-3">
+            <PromptBar
+              key={`ask:${draft}:${historyEntryId ?? "new"}`}
+              defaultValue={draft}
+              placeholder="Ask anything about the active knowledge base…"
+              sendLabel="ask →"
+              busy={busy}
+              width={9999}
+              background="var(--color-paper)"
+              color="var(--color-ink)"
+              menuBackground="var(--color-surface)"
+              sparkColor="var(--color-cue)"
+              onSend={(text) => void send(text)}
+            />
           </div>
         </div>
 
@@ -299,14 +315,34 @@ export function AgentCore() {
             <div ref={responseRef} className="flex-1 min-h-0 overflow-y-auto px-8 py-6">
               {heroTurn ? (
                 <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }}>
-                  {heroTurn.text ? (
+                  {busy && (
+                    <div className="mb-5 flex flex-col gap-3" style={{ color: "var(--color-ink-soft)" }}>
+                      <ThoughtLine
+                        label="Reasoning…"
+                        doneLabel="Thought for"
+                        steps={toolTrace}
+                        working={busy}
+                        elapsed={elapsed}
+                        color="var(--color-ink)"
+                        glyphColor="var(--color-cue)"
+                        fontSize={16}
+                      />
+                      {!heroTurn.text && (
+                        <LatticeLoader
+                          label=""
+                          status="working"
+                          pattern="orbit"
+                          grid={3}
+                          showTimer={false}
+                          color="var(--color-cue)"
+                        />
+                      )}
+                    </div>
+                  )}
+                  {heroTurn.text && (
                     <div className={heroTurn.streaming ? "caret" : ""}>
                       <ResponseMarkdown text={heroTurn.text} ksId={ks?._id} />
                     </div>
-                  ) : (
-                    <p className="caret font-display text-2xl" style={{ color: "var(--color-ink-soft)" }}>
-                      Agent reasoning…
-                    </p>
                   )}
                 </motion.div>
               ) : (

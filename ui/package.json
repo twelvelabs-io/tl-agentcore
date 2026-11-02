@@ -16,11 +16,13 @@
     "test:e2e:comprehensive:loop": "node e2e/comprehensive/loop-runner.mjs"
   },
   "dependencies": {
+    "@hugeicons/core-free-icons": "^4.4.0",
+    "@hugeicons/react": "^1.1.10",
     "@xyflow/react": "^12.10.2",
     "amazon-cognito-identity-js": "^6.3.16",
     "d3-force": "^3.0.0",
     "hls.js": "^1.6.16",
-    "motion": "^11.15.0",
+    "motion": "^12.43.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-force-graph-3d": "^1.29.1",
