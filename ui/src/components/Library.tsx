@@ -196,7 +196,7 @@ export function Library() {
 
   // ── Render ──────────────────────────────────────────────────────────────
   return (
-    <div className="grid h-full min-h-0" style={{ gridTemplateColumns: "320px 1fr 320px" }}>
+    <div className="cr-studio grid h-full min-h-0" style={{ gridTemplateColumns: "320px 1fr 320px" }}>
       {/* LEFT — search + filters + upload status */}
       <aside className="flex flex-col min-h-0 border-r" style={{ borderColor: "var(--color-rule)" }}>
         <div className="px-5 pt-5 pb-4 border-b" style={{ borderColor: "var(--color-rule)" }}>
