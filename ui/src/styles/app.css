@@ -9,43 +9,70 @@
  */
 
 @theme {
-  /* Single sans throughout. Inter handles both display and body weights.
-     JetBrains Mono for code + tabular numerics. */
-  --font-display: "Inter", ui-sans-serif, system-ui, sans-serif;
+  /* ─── Type ──────────────────────────────────────────────────────────── */
+  /* Display: Instrument Serif — 1950s film-title energy; the one editorial
+     flourish in the whole system. Used for first-screen hero text and the
+     slate intro only. Body stays Inter. Data stays JetBrains Mono.
+     Rationale: Fraunces has become the AI-tell serif; Instrument Serif
+     carries cinema-title DNA that matches the subject matter. */
+  --font-display: "Instrument Serif", ui-serif, Georgia, serif;
   --font-body: "Inter", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", monospace;
 
-  /* Zinc-leaning neutrals. True dark, near-black paper. */
+  /* ─── Legacy palette (unchanged — existing views keep rendering) ────── */
   --color-paper: #0a0a0a;
-  --color-ink: #fafafa;          /* zinc-50 */
-  --color-ink-soft: #a1a1aa;     /* zinc-400 — ~7.6:1 on paper, ~6.5:1 on surface */
-  --color-ink-faint: #9a9aa3;    /* ~7.2:1 on paper, ~5.6:1 on surface — clears AA on both */
-  --color-rule: #27272a;         /* zinc-800 */
-  --color-surface: #171717;      /* zinc-900 */
-  --color-surface-2: #262626;    /* zinc-800-ish elevated */
-
-  /* Accent = pure white (the dark-mode inversion of the playground's
-     pure-black emphasis). Used on filled CTAs, active tab borders,
-     scrubber positions. */
+  --color-ink: #fafafa;
+  --color-ink-soft: #a1a1aa;
+  --color-ink-faint: #9a9aa3;
+  --color-rule: #27272a;
+  --color-surface: #171717;
+  --color-surface-2: #262626;
   --color-cue: #fafafa;
-  --color-cue-soft: #d4d4d8;     /* zinc-300, hover state */
-  --color-cue-deep: #a1a1aa;     /* zinc-400, recent state */
-
-  /* Warm secondary — soft peach, the playground's only non-neutral hue.
-     Sits on badges, the success pip, and human warmth moments. */
-  --color-warm: #ffcab0;         /* peach */
+  --color-cue-soft: #d4d4d8;
+  --color-cue-deep: #a1a1aa;
+  --color-warm: #ffcab0;
   --color-warm-soft: #ffe0d0;
   --color-warm-deep: #c79278;
-
-  /* Status colours — quiet, neutral-warm */
   --color-status-ready: #8db4a0;
   --color-status-pending: #ffcab0;
   --color-status-failed: #c98c84;
-
-  /* Radius scale — playground-style rounded corners */
   --radius-card: 14px;
   --radius-btn: 10px;
   --radius-pill: 9999px;
+
+  /* ─── Cinema Reference Monitor palette (new; opt-in via tokens below) ─ */
+  /* The world of the colorist's grading suite — dim rooms, 18% grey cards,
+     tungsten highlights, print-film orange, cold shadow-lift teal.
+     Components rebuilt in later PRs opt in via --cr-* variables; legacy
+     --color-* variables stay stable so the live app doesn't shift under
+     anyone mid-makeover. */
+  --cr-film-black: #0b0d10;      /* base, cool-leaning (never pure black) */
+  --cr-slate: #2a2f36;           /* elevated surface */
+  --cr-slate-2: #3a4049;         /* hovered / grouped surface */
+  --cr-mist: #8c92a1;            /* secondary type, hairline rules */
+  --cr-grade-ink: #f6ecd5;       /* primary type (warm tungsten highlight) */
+  --cr-grade-ink-soft: #d8d0bd;  /* secondary emphasis */
+  --cr-pulse: #f05d44;           /* primary accent — raw print-film orange */
+  --cr-pulse-soft: #ff8f78;      /* hover state */
+  --cr-signal: #3fb8af;          /* secondary accent — cold shadow-lift teal */
+  --cr-signal-soft: #78d6cf;     /* hover state */
+  --cr-alarm: #e5533d;           /* error */
+}
+
+/* ─── Instrument Serif helper class ─────────────────────────────────── */
+/* .font-display already exists further down for the legacy weight/tracking.
+   This class is for the Cinema-Reference-Monitor headlines: thin letter
+   spacing, no tracking adjustment, serif takes the stage. */
+.display-cinema {
+  font-family: var(--font-display);
+  font-weight: 400;
+  letter-spacing: -0.01em;
+  line-height: 1.02;
+}
+.display-cinema em,
+.display-cinema .italic {
+  font-style: italic;
+  font-weight: 400;
 }
 
 html, body, #root {
