@@ -106,7 +106,7 @@ export function SignInScreen({ onSignedIn }: { onSignedIn: () => void }) {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-6" style={{ background: "var(--color-page, #0c0d0e)" }}>
+    <div className="cr-studio min-h-screen flex items-center justify-center px-6" style={{ background: "var(--color-page, #0c0d0e)" }}>
       {/* Faint background grain + subtle warm-amber halo above the card. */}
       <motion.div
         className="absolute inset-0 grain pointer-events-none"
