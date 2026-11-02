@@ -75,6 +75,46 @@
   font-weight: 400;
 }
 
+/* ─── Cinema Reference Monitor studio scope ─────────────────────────── */
+/* Wrapping a subtree in .cr-studio remaps the legacy --color-* tokens
+   onto the --cr-* palette, so every existing utility (btn-cue, label,
+   clip-card, surface backgrounds, etc.) picks up the new look without
+   a 100-line find-and-replace across the component tree. Views that
+   haven't been reworked yet keep rendering against the legacy tokens
+   because they live outside this scope. */
+.cr-studio {
+  --color-paper: var(--cr-film-black);
+  --color-ink: var(--cr-grade-ink);
+  --color-ink-soft: var(--cr-mist);
+  --color-ink-faint: color-mix(in oklch, var(--cr-mist) 70%, transparent);
+  --color-rule: var(--cr-slate);
+  --color-surface: var(--cr-slate);
+  --color-surface-2: var(--cr-slate-2);
+  --color-cue: var(--cr-pulse);
+  --color-cue-soft: var(--cr-pulse-soft);
+  --color-cue-deep: color-mix(in oklch, var(--cr-pulse) 70%, var(--cr-slate));
+  --color-warm: var(--cr-signal);
+  --color-warm-soft: var(--cr-signal-soft);
+  --color-warm-deep: color-mix(in oklch, var(--cr-signal) 70%, var(--cr-slate));
+  --color-status-ready: var(--cr-signal);
+  --color-status-pending: var(--cr-pulse-soft);
+  --color-status-failed: var(--cr-alarm);
+  background: var(--cr-film-black);
+  color: var(--cr-grade-ink);
+}
+/* Pulse-orange CTA needs dark ink on the fill, not grade-ink cream,
+   or the label blends into the orange. */
+.cr-studio .btn-cue { color: var(--cr-film-black); }
+.cr-studio .btn-cue:disabled { color: var(--cr-mist); }
+/* Scene heading — the one piece of editorial typography inside the
+   studio. Everything else stays Inter / Mono. */
+.cr-studio .scene-head {
+  font-family: var(--font-display);
+  font-weight: 400;
+  letter-spacing: -0.01em;
+  line-height: 1.05;
+}
+
 html, body, #root {
   height: 100%;
   overflow: hidden;

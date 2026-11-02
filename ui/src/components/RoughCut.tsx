@@ -8,6 +8,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
+import DecryptedText from "./bits/DecryptedText";
 import { streamAgentTurn } from "../lib/agent-api";
 import { useStore } from "../lib/store";
 import { getAsset, getStitch, startStitch, type Asset, type Channel, type StitchJob } from "../lib/api";
@@ -783,7 +784,7 @@ export function RoughCut() {
 
   return (
     <div
-      className="grid h-full min-h-0"
+      className="cr-studio grid h-full min-h-0"
       style={{ gridTemplateColumns: archOpen ? "320px 1fr 320px" : "320px 1fr" }}
     >
       {/* LEFT RAIL — brief accordion + chat thread */}
@@ -1224,7 +1225,7 @@ function SceneBlock({
           <span className="label" style={{ color: "var(--color-cue)" }}>
             scene {scene.scene_id || String(index + 1).padStart(2, "0")}
           </span>
-          <h3 className="font-display text-xl mt-1">{scene.scene_name}</h3>
+          <h3 className="scene-head font-display text-2xl mt-1">{scene.scene_name}</h3>
           {scene.scene_description && (
             <p className="text-sm mt-1 max-w-2xl" style={{ color: "var(--color-ink-soft)" }}>{scene.scene_description}</p>
           )}
@@ -1607,20 +1608,24 @@ function RotatingStatus({ elapsed }: { elapsed: number }) {
     return () => clearTimeout(t);
   }, [idx]);
 
+  // DecryptedText replays the scramble on each line change by remounting
+  // via key={idx}. animateOn="view" fires once the IntersectionObserver
+  // registers the span as visible, which happens on mount for an element
+  // already in the viewport. sequential + revealDirection="start" settles
+  // the text left-to-right like a reel finding frame.
   return (
     <span className="inline-flex items-baseline gap-2">
-      <AnimatePresence mode="wait" initial={false}>
-        <motion.span
-          key={idx}
-          initial={{ opacity: 0, y: 6, filter: "blur(2px)" }}
-          animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-          exit={{ opacity: 0, y: -6, filter: "blur(2px)" }}
-          transition={{ duration: 0.45, ease: [0.2, 0, 0, 1] }}
-          className="inline-block"
-        >
-          {STATUS_LINES[idx].text}
-        </motion.span>
-      </AnimatePresence>
+      <DecryptedText
+        key={idx}
+        text={STATUS_LINES[idx].text}
+        animateOn="view"
+        sequential
+        revealDirection="start"
+        speed={34}
+        maxIterations={14}
+        scrambleColor="var(--color-cue)"
+        parentClassName="inline-block"
+      />
       <span style={{ color: "var(--color-ink-faint)" }}>· {elapsed}s</span>
     </span>
   );

@@ -180,7 +180,7 @@ export function AgentCore() {
 
   return (
     <div
-      className="grid h-full min-h-0"
+      className="cr-studio grid h-full min-h-0"
       style={{ gridTemplateColumns: archOpen ? "320px 1fr 320px" : "320px 1fr" }}
     >
       {/* LEFT RAIL — question + chat history */}
