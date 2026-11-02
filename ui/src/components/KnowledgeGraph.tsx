@@ -1136,25 +1136,31 @@ export function KnowledgeGraph() {
       .finally(() => setLoading(false));
   }, [ks]);
 
-  if (!ks)         return <Pad>Pick a knowledge base to render its graph.</Pad>;
-  if (loading)    return <Pad>Loading graph for {ks.name}…</Pad>;
-  if (err)        return <Pad cue>kb-graph error: {err}</Pad>;
-  if (!payload || payload.nodes.length === 0) {
-    return (
-      <Pad>
-        <div className="max-w-md text-center">
-          <div className="label">empty knowledge graph</div>
-          <p className="mt-3 text-sm">
-            No kb_cache records for <span className="font-mono">{ks._id.slice(0, 12)}…</span>. Run{" "}
-            <span className="font-mono">scripts/ingest_kb_cache.py {ks._id}</span> to populate
-            asset profiles + entities, then <span className="font-mono">scripts/build_event_groups.py {ks._id}</span> for event clusters.
-          </p>
-        </div>
-      </Pad>
-    );
-  }
+  // Wrap every render path in the Cinema Reference Monitor scope so
+  // the loading pad, error state, empty state and graph itself all pick
+  // up the --cr-* palette instead of showing mixed-tone chrome.
+  const body = (() => {
+    if (!ks)      return <Pad>Pick a knowledge base to render its graph.</Pad>;
+    if (loading) return <Pad>Loading graph for {ks.name}…</Pad>;
+    if (err)     return <Pad cue>kb-graph error: {err}</Pad>;
+    if (!payload || payload.nodes.length === 0) {
+      return (
+        <Pad>
+          <div className="max-w-md text-center">
+            <div className="label">empty knowledge graph</div>
+            <p className="mt-3 text-sm">
+              No kb_cache records for <span className="font-mono">{ks._id.slice(0, 12)}…</span>. Run{" "}
+              <span className="font-mono">scripts/ingest_kb_cache.py {ks._id}</span> to populate
+              asset profiles + entities, then <span className="font-mono">scripts/build_event_groups.py {ks._id}</span> for event clusters.
+            </p>
+          </div>
+        </Pad>
+      );
+    }
+    return <GraphInner payload={payload} />;
+  })();
 
-  return <GraphInner payload={payload} />;
+  return <div className="cr-studio h-full min-h-0">{body}</div>;
 }
 
 function Pad({ children, cue }: { children: React.ReactNode; cue?: boolean }) {
