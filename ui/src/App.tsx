@@ -12,6 +12,8 @@ import { GlobalAssetPlayer } from "./components/AssetPlayer";
 import { KSPicker } from "./components/KSPicker";
 import { HistoryDrawer } from "./components/HistoryDrawer";
 import SettingsModal from "./components/SettingsModal";
+import { Slate, hasSeenSlate } from "./components/Slate";
+import { TimelineStrip } from "./components/TimelineStrip";
 
 type Tab = "rough_cut" | "agent" | "library" | "graph";
 
@@ -44,6 +46,11 @@ export function App() {
   };
   const [bootError, setBootError] = useState<string | null>(null);
   const [authReady, setAuthReady] = useState(!cognitoEnabled());
+  // Slate intro — plays once per browser, after the app is ready. Dismissed
+  // on click or auto-dismisses after ~2 seconds. See components/Slate.tsx
+  // for choreography. Checked once on mount so a reload during the slate
+  // doesn't replay it.
+  const [slateVisible, setSlateVisible] = useState(() => !hasSeenSlate());
   // Distinct from authReady: authChecked means "we attempted to silently
   // restore tokens once; if there weren't any, we now know to render the
   // SignInScreen." Without this, the page would briefly flash empty
@@ -116,6 +123,8 @@ export function App() {
 
   return (
     <div className="h-screen w-screen flex flex-col" style={{ background: "var(--color-paper)" }}>
+      {slateVisible && <Slate onDone={() => setSlateVisible(false)} />}
+
       <Masthead tab={tab} setTab={setTab} bootError={bootError} ready={ready} />
 
       <main className="flex-1 min-h-0 flex">
@@ -142,6 +151,8 @@ export function App() {
           </div>
         )}
       </main>
+
+      <TimelineStrip />
 
       <HistoryDrawer
         onRestore={(entry) => {
