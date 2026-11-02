@@ -5,7 +5,8 @@ system** built on AWS Bedrock AgentCore (Runtime + Gateway) with
 TwelveLabs Marengo and Pegasus, retrieving over an S3 Vectors index.
 
 This repo is the companion artifact to the joint AWS × TwelveLabs white
-paper in [`docs/whitepaper.md`](docs/whitepaper.md).
+paper, which lives in Google Drive as the single source of truth:
+<https://docs.google.com/document/d/1SsUQuM4kGmUdlmJ-8fB-mH7iuAYC59gsJ4XZw1i1qck>.
 
 ## What it does
 
@@ -41,7 +42,7 @@ lambda/       chat lambda (WebSocket -> InvokeAgentRuntime) and tl_proxy
 infra/        Terraform: AgentCore Runtime, S3 Vectors, Cognito,
               CloudFront + S3, API Gateways
 scripts/      ingest_vectors.py + setup_test_fixtures.sh
-docs/         Whitepaper + scope doc
+docs/         deployment + scope docs (whitepaper lives in Google Drive)
 ```
 
 ## Quick start
@@ -70,8 +71,8 @@ terraform apply
 # API Gateways, CloudFront, and the chat + tl_proxy lambdas.
 ```
 
-See `infra/README.md` for variable reference and the [whitepaper §6
-"deployment recipe"](docs/whitepaper.md#6-deployment-recipe).
+See `infra/README.md` for variable reference and the whitepaper §6
+"deployment recipe" in [Google Drive](https://docs.google.com/document/d/1SsUQuM4kGmUdlmJ-8fB-mH7iuAYC59gsJ4XZw1i1qck).
 
 ## Authors
 
