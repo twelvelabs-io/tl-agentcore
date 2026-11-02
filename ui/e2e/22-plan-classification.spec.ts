@@ -21,14 +21,13 @@ async function sendFollowup(page: Page, text: string) {
   const fu = page.locator('textarea[placeholder*="ask the agent"]').first();
   await fu.click();
   await fu.pressSequentially(text, { delay: 5 });
-  await page.locator('button:has-text("send →")').click();
-  // After send, busy is true and the "agent thinking…" label appears
-  // under the textarea. Wait for that to disappear (agent finished),
-  // then for the "⌘↩ to send" hint to come back. Not using the cue
-  // button's enabled state because it stays disabled while the
-  // textarea is empty regardless of busy.
-  await expect(page.locator('text=agent thinking…')).toBeVisible({ timeout: 10_000 });
-  await expect(page.locator('text=agent thinking…')).toBeHidden({ timeout: 3 * 60_000 });
+  // Enter sends; PromptBar also exposes the "send →" button for click-send.
+  await fu.press("Enter");
+  // After send, the PromptBar enters its busy state (data-busy on the
+  // root). Wait for busy to clear so we know the agent finished.
+  const busyIndicator = page.locator('[data-busy=""]').first();
+  await expect(busyIndicator).toBeVisible({ timeout: 10_000 });
+  await expect(busyIndicator).toBeHidden({ timeout: 3 * 60_000 });
 }
 
 test.describe("Plan classification", () => {

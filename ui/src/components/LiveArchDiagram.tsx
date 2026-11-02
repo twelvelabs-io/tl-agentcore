@@ -358,3 +358,28 @@ export function downstreamFor(toolName: string | undefined): NodeId | null {
   if (CACHE_TOOLS.has(toolName))      return "ddb_cache";
   return null;
 }
+
+// Short human-readable label for a tool call, used by the ThoughtLine
+// reasoning trace. Tool names are the authoritative data; this is just
+// their presentation layer. Default is the raw tool name so new tools
+// show up without silently vanishing.
+const TOOL_LABELS: Record<string, string> = {
+  vector_search: "Searching the knowledge store",
+  find_by_image: "Looking up a reference image",
+  pegasus_analyze: "Watching a clip",
+  pegasus_segments: "Reading clip segments",
+  get_kb_overview: "Loading knowledge overview",
+  list_kb_assets: "Listing cached assets",
+  lookup_asset_profile: "Reading an asset profile",
+  lookup_rights: "Checking usage rights",
+  list_audiences: "Listing audiences",
+  lookup_audience: "Reading an audience profile",
+  find_cached_entity_appearances: "Pulling cached entity appearances",
+  list_cached_entities: "Listing cached entities",
+  list_kb_events: "Listing cached events",
+  lookup_event: "Reading an event",
+};
+export function labelForTool(tool: string | undefined): string | null {
+  if (!tool) return null;
+  return TOOL_LABELS[tool] ?? tool;
+}
