@@ -1,11 +1,12 @@
 # tl-agentcore — Rough Cut / Highlight Reel on AWS AgentCore
 
 Reference implementation of an **agentic rough-cut / highlight-clipping
-system** built on AWS Bedrock AgentCore (Runtime + Gateway) with
-TwelveLabs Marengo and Pegasus, retrieving over an S3 Vectors index.
+system** built on AWS Bedrock AgentCore Runtime with TwelveLabs Marengo
+and Pegasus 1.5, retrieving over an S3 Vectors index.
 
 This repo is the companion artifact to the joint AWS × TwelveLabs white
-paper in [`docs/whitepaper.md`](docs/whitepaper.md).
+paper, which lives in Google Drive as the single source of truth:
+<https://docs.google.com/document/d/1SsUQuM4kGmUdlmJ-8fB-mH7iuAYC59gsJ4XZw1i1qck>.
 
 ## What it does
 
@@ -29,7 +30,7 @@ primary; ranks 2–5 are the producer-swappable alternates.
 | Tool | Latency | Use |
 |---|---|---|
 | `vector_search` | ~250 ms | Marengo text embed + S3 Vectors ANN; one call per beat in parallel |
-| `pegasus_analyze` | 5–15 s | Optional take-note for the chosen primary |
+| `pegasus_analyze` | 5–15 s | Pegasus 1.5 structured JSON — per-moment segments, optional reference image |
 | `list_tl_indexes` | <1 s | Discovery, rarely needed once the index is in context |
 
 ## Layout
@@ -37,11 +38,13 @@ primary; ranks 2–5 are the producer-swappable alternates.
 ```
 agent/        Python Strands agent (tools + runtime + arm64 Dockerfile)
 ui/           React + Vite SPA (Rough Cut tab + Agent tab + Playwright E2E)
-lambda/       chat lambda (WebSocket -> InvokeAgentRuntime) and tl_proxy
+lambda/       kb_admin, kb_graph, presign_upload, embed_clip_{start,finalize},
+              asset_profile, enrich_*, hls_finalize, index_faces, ks_rollup,
+              settings, stitch, users
 infra/        Terraform: AgentCore Runtime, S3 Vectors, Cognito,
-              CloudFront + S3, API Gateways
+              CloudFront + S3, HTTP API Gateway
 scripts/      ingest_vectors.py + setup_test_fixtures.sh
-docs/         Whitepaper + scope doc
+docs/         deployment + scope docs (whitepaper lives in Google Drive)
 ```
 
 ## Quick start
@@ -70,8 +73,8 @@ terraform apply
 # API Gateways, CloudFront, and the chat + tl_proxy lambdas.
 ```
 
-See `infra/README.md` for variable reference and the [whitepaper §6
-"deployment recipe"](docs/whitepaper.md#6-deployment-recipe).
+See `infra/README.md` for variable reference and the whitepaper §6
+"deployment recipe" in [Google Drive](https://docs.google.com/document/d/1SsUQuM4kGmUdlmJ-8fB-mH7iuAYC59gsJ4XZw1i1qck).
 
 ## Authors
 

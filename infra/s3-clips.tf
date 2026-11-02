@@ -11,7 +11,7 @@
 #
 #   - The agent runtime's pegasus_analyze tool (Bedrock path, default)
 #     resolves an asset_id to `s3://<this>/clips/<asset_id>.mp4` and
-#     calls Bedrock Pegasus 1.2 with that s3Location. Runtime role needs
+#     calls Bedrock Pegasus 1.5 with that s3Location. Runtime role needs
 #     s3:GetObject here; granted in iam.tf.
 
 resource "aws_s3_bucket" "clips" {

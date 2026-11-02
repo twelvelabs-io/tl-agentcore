@@ -88,23 +88,32 @@ export function AgentCore() {
         prompt: text,
         session_id: sessionId,
       })) {
-        const node = nodeForEvent(ev as { type: string; tool?: string });
+        // Sniff tool name from a function_call item added/done so the arch
+        // diagram can light the right lane. Other item types just show
+        // "runtime" via nodeForEvent.
+        let toolName: string | undefined;
+        if ((ev.type === "response.output_item.added" || ev.type === "response.output_item.done")
+            && ev.item.type === "function_call") {
+          toolName = ev.item.name;
+        }
+        const node = nodeForEvent({ type: ev.type, tool: toolName });
         if (node) {
           recordNode(node);
-          if (ev.type === "tool_call") {
-            const downstream = downstreamFor((ev as { tool?: string }).tool);
+          if (ev.type === "response.output_item.added" && toolName) {
+            const downstream = downstreamFor(toolName);
             if (downstream) setTimeout(() => recordNode(downstream), 400);
           }
         }
-        if (ev.type === "session") {
-          if (!sessionId) setSessionId(ev.session_id);
-        } else if (ev.type === "text_delta") {
+
+        if (ev.type === "response.created") {
+          if (!sessionId) setSessionId(ev.response.id);
+        } else if (ev.type === "response.output_text.delta") {
           acc += ev.delta;
           setTurns((ts) => ts.map((t) => t.id === aTurn.id ? { ...t, text: acc } : t));
           responseRef.current?.scrollTo({ top: 1e9 });
-        } else if (ev.type === "error") {
-          setErr(ev.message);
-        } else if (ev.type === "done") {
+        } else if (ev.type === "response.failed") {
+          setErr(ev.response.error.message);
+        } else if (ev.type === "response.completed") {
           setTimeout(() => setActiveNode(null), 1200);
         }
       }

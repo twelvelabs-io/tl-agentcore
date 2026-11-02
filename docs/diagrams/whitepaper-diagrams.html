@@ -43,7 +43,7 @@ flowchart TD
     Vectors[("<b>S3 Vectors</b><br/>multi-modal clip embeddings<br/>visual · audio · transcription")]
     Clips[("<b>S3 · clips bucket</b><br/>mirrored asset bytes<br/>clips/&lt;asset_id&gt;.mp4")]
     Marengo["<b>Bedrock · Marengo 3.0</b><br/>StartAsyncInvoke<br/>visual + audio + transcription embeddings"]
-    Pegasus["<b>Bedrock · Pegasus 1.2</b><br/>InvokeModel<br/>clip analysis"]
+    Pegasus["<b>Bedrock · Pegasus 1.5</b><br/>InvokeModel<br/>clip analysis"]
 
     Browser -- "wss + Cognito JWT" --> CF
     CF --> WS

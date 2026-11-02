@@ -30,7 +30,7 @@ INDEX_NAME="tl-agentcore-e2e-index"
 SAMPLE_URL="${E2E_SAMPLE_URL:-https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4}"
 ENV_TEST="ui/e2e/.env.test"
 
-# ─── 1. Index (Marengo 3.0 + Pegasus 1.2) ────────────────────────────────
+# ─── 1. Index (Marengo 3.0 + Pegasus 1.5) ────────────────────────────────
 echo "==> Finding or creating index '$INDEX_NAME'..."
 INDEX_ID=$(curl -fsS "${H_AUTH[@]}" "$TL/indexes?page_limit=50" \
   | python3 -c "import json,sys; d=json.load(sys.stdin).get('data',[]); print(next((i['_id'] for i in d if i.get('index_name')=='$INDEX_NAME'), ''))" )
@@ -38,7 +38,7 @@ INDEX_ID=$(curl -fsS "${H_AUTH[@]}" "$TL/indexes?page_limit=50" \
 if [ -z "$INDEX_ID" ]; then
   echo "    creating new index..."
   INDEX_ID=$(curl -fsS "${H_AUTH[@]}" "${H_JSON[@]}" -X POST "$TL/indexes" \
-    -d "{\"index_name\":\"$INDEX_NAME\",\"models\":[{\"model_name\":\"marengo3.0\",\"model_options\":[\"visual\",\"audio\"]},{\"model_name\":\"pegasus1.2\",\"model_options\":[\"visual\",\"audio\"]}]}" \
+    -d "{\"index_name\":\"$INDEX_NAME\",\"models\":[{\"model_name\":\"marengo3.0\",\"model_options\":[\"visual\",\"audio\"]},{\"model_name\":\"pegasus1.5\",\"model_options\":[\"visual\",\"audio\"]}]}" \
     | python3 -c "import json,sys; print(json.load(sys.stdin)['_id'])")
 fi
 echo "    index_id=$INDEX_ID"

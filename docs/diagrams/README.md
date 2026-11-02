@@ -1,6 +1,6 @@
 # Whitepaper diagrams
 
-Four flowcharts referenced from `docs/whitepaper.md`. Reviewers on the Google Doc see raw mermaid text instead of rendered diagrams (mermaid doesn't render natively in Docs), so each block is also published as a PNG that can be pasted into the Doc.
+Four flowcharts for the whitepaper (which lives in [Google Drive](https://docs.google.com/document/d/1SsUQuM4kGmUdlmJ-8fB-mH7iuAYC59gsJ4XZw1i1qck) as the single source of truth). Mermaid doesn't render natively in Docs, so each block is also published as a PNG that gets pasted into the Doc.
 
 ## Files
 

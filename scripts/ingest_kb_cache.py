@@ -84,7 +84,7 @@ Be terse. No prose around the JSON. Only valid JSON."""
 
 def detect_marengo_index(ks_id: str) -> dict[str, Any] | None:
     """Find the Pegasus-enabled Marengo index whose video set best matches
-    this KS. Heuristic: largest index with pegasus1.2 attached. Stored in
+    this KS. Heuristic: largest index with pegasus1.5 attached. Stored in
     OVERVIEW so the agent skips list_tl_indexes at runtime."""
     with httpx.Client(timeout=30) as client:
         r = client.get(
@@ -97,7 +97,7 @@ def detect_marengo_index(ks_id: str) -> dict[str, Any] | None:
     candidates = []
     for x in r.json().get("data", []):
         models = [m.get("model_name") for m in x.get("models", [])]
-        if "pegasus1.2" in models and (x.get("video_count") or 0) >= 5:
+        if "pegasus1.5" in models and (x.get("video_count") or 0) >= 5:
             candidates.append({
                 "index_id":    x.get("_id"),
                 "name":        x.get("index_name"),
