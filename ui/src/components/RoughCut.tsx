@@ -943,6 +943,14 @@ export function RoughCut() {
                 color="var(--color-ink)"
                 menuBackground="var(--color-surface)"
                 sparkColor="var(--color-cue)"
+                // The agent surface in this app doesn't yet expose
+                // attach/sources, model switching, effort tiers, or
+                // dictation. Strip the demo chrome until any of those
+                // land as real wiring.
+                sources={[]}
+                commands={[]}
+                models={[]}
+                efforts={[]}
                 onSend={(text) => void sendFollowup(text)}
               />
               {err && (

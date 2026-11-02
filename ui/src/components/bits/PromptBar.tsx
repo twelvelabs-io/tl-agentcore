@@ -9,6 +9,9 @@
 //   2. `defaultValue?: string` — seed the uncontrolled draft on mount.
 //      Needed for the Brief composer in RoughCut which starts with a
 //      sample script.
+//   3. The `+` sources button is hidden when `sources` is empty AND
+//      `onAttach` is unset — nothing to attach, nothing to browse, so
+//      the button has nothing to do.
 
 'use client';
 
@@ -769,23 +772,27 @@ const PromptBar: React.FC<PromptBarProps> = ({
         />
 
         <div className="flex items-center gap-1">
-          <button
-            type="button"
-            className="inline-grid h-7 w-7 flex-none cursor-pointer touch-manipulation place-items-center rounded-lg border-0 bg-transparent p-0 outline-none select-none [color:color-mix(in_srgb,var(--pb-ink)_60%,transparent)] [font:inherit] [-webkit-tap-highlight-color:transparent] [transition:background-color_150ms_ease,color_150ms_ease,transform_160ms_cubic-bezier(0.23,1,0.32,1)] active:[transform:scale(0.94)] data-[on]:[background:color-mix(in_srgb,var(--pb-ink)_8%,transparent)] data-[on]:[color:var(--pb-ink)] motion-reduce:active:[transform:none] [@media(hover:hover)_and_(pointer:fine)]:hover:[background:color-mix(in_srgb,var(--pb-ink)_8%,transparent)] [@media(hover:hover)_and_(pointer:fine)]:hover:[color:var(--pb-ink)]"
-            aria-label="Add files and sources"
-            aria-expanded={plusOpen}
-            data-on={plusOpen ? '' : undefined}
-            onMouseDown={e => e.preventDefault()}
-            onClick={() => {
-              setModelOpen(false);
-              setEffortOpen(false);
-              setActive(0);
-              setPlusOpen(v => !v);
-              focusInput();
-            }}
-          >
-            <HugeiconsIcon icon={PlusSignIcon} size={16} strokeWidth={2} />
-          </button>
+          {/* VENDOR-MOD: hide the sources `+` button when there is nothing
+              to attach or browse. */}
+          {sources.length > 0 || onAttach ? (
+            <button
+              type="button"
+              className="inline-grid h-7 w-7 flex-none cursor-pointer touch-manipulation place-items-center rounded-lg border-0 bg-transparent p-0 outline-none select-none [color:color-mix(in_srgb,var(--pb-ink)_60%,transparent)] [font:inherit] [-webkit-tap-highlight-color:transparent] [transition:background-color_150ms_ease,color_150ms_ease,transform_160ms_cubic-bezier(0.23,1,0.32,1)] active:[transform:scale(0.94)] data-[on]:[background:color-mix(in_srgb,var(--pb-ink)_8%,transparent)] data-[on]:[color:var(--pb-ink)] motion-reduce:active:[transform:none] [@media(hover:hover)_and_(pointer:fine)]:hover:[background:color-mix(in_srgb,var(--pb-ink)_8%,transparent)] [@media(hover:hover)_and_(pointer:fine)]:hover:[color:var(--pb-ink)]"
+              aria-label="Add files and sources"
+              aria-expanded={plusOpen}
+              data-on={plusOpen ? '' : undefined}
+              onMouseDown={e => e.preventDefault()}
+              onClick={() => {
+                setModelOpen(false);
+                setEffortOpen(false);
+                setActive(0);
+                setPlusOpen(v => !v);
+                focusInput();
+              }}
+            >
+              <HugeiconsIcon icon={PlusSignIcon} size={16} strokeWidth={2} />
+            </button>
+          ) : null}
           {models.length > 0 ? (
             <button
               type="button"

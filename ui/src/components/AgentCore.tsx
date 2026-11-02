@@ -240,6 +240,12 @@ export function AgentCore() {
               color="var(--color-ink)"
               menuBackground="var(--color-surface)"
               sparkColor="var(--color-cue)"
+              // Strip demo chrome — no attach/sources, no model picker,
+              // no effort tiers, no dictation on this agent surface.
+              sources={[]}
+              commands={[]}
+              models={[]}
+              efforts={[]}
               onSend={(text) => void send(text)}
             />
           </div>
